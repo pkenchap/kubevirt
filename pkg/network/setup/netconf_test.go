@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2021 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -57,12 +57,12 @@ var _ = Describe("netconf", func() {
 		stateCache = newConfigStateCacheStub()
 		ns = nsExecutorStub{}
 		stateMap = map[string]*netpod.State{}
-		netConf = netsetup.NewNetConfWithCustomFactoryAndConfigState(nsNoopFactory, &tempCacheCreator{}, stateMap)
+		netConf = netsetup.NewNetConfWithCustomFactoryAndConfigState(nsNoopFactory, &tempCacheCreator{}, stateMap, cConfigStub{})
 		vmi = &v1.VirtualMachineInstance{ObjectMeta: metav1.ObjectMeta{UID: "123", Name: "vmi1"}}
 	})
 
 	It("runs setup successfully without networks", func() {
-		Expect(netConf.Setup(vmi, vmi.Spec.Networks, launcherPid, netPreSetupDummyNoop)).To(Succeed())
+		Expect(netConf.Setup(vmi, vmi.Spec.Networks, launcherPid)).To(Succeed())
 	})
 
 	It("runs setup successfully with networks", func() {
@@ -77,12 +77,12 @@ var _ = Describe("netconf", func() {
 			Name:          testNetworkName,
 			NetworkSource: v1.NetworkSource{Pod: &v1.PodNetwork{}},
 		}}
-		Expect(netConf.Setup(vmi, vmi.Spec.Networks, launcherPid, netPreSetupDummyNoop)).To(Succeed())
+		Expect(netConf.Setup(vmi, vmi.Spec.Networks, launcherPid)).To(Succeed())
 		Expect(stateCache.Read(testNetworkName)).To(Equal(cache.PodIfaceNetworkPreparationFinished))
 	})
 
 	DescribeTable("setup ignores specific network bindings", func(binding v1.InterfaceBindingMethod) {
-		netConf = netsetup.NewNetConfWithCustomFactoryAndConfigState(nsFailureFactory, &tempCacheCreator{}, stateMap)
+		netConf = netsetup.NewNetConfWithCustomFactoryAndConfigState(nsFailureFactory, &tempCacheCreator{}, stateMap, cConfigStub{})
 
 		stateMap[string(vmi.UID)] = netpod.NewState(stateCache, ns)
 
@@ -98,19 +98,14 @@ var _ = Describe("netconf", func() {
 			Name:          testNetworkName,
 			NetworkSource: v1.NetworkSource{Pod: &v1.PodNetwork{}},
 		}}
-		Expect(netConf.Setup(vmi, vmi.Spec.Networks, launcherPid, netPreSetupDummyNoop)).To(Succeed())
+		Expect(netConf.Setup(vmi, vmi.Spec.Networks, launcherPid)).To(Succeed())
 		Expect(stateCache.stateCache).To(BeEmpty())
 	},
 		Entry("SR-IOV", v1.InterfaceBindingMethod{SRIOV: &v1.InterfaceSRIOV{}}),
-		Entry("macvtap", v1.InterfaceBindingMethod{Macvtap: &v1.InterfaceMacvtap{}}),
 	)
 
-	It("fails the pre-setup run", func() {
-		Expect(netConf.Setup(vmi, vmi.Spec.Networks, launcherPid, netPreSetupFail)).NotTo(Succeed())
-	})
-
 	It("fails the setup run", func() {
-		netConf := netsetup.NewNetConfWithCustomFactoryAndConfigState(nsFailureFactory, &tempCacheCreator{}, stateMap)
+		netConf := netsetup.NewNetConfWithCustomFactoryAndConfigState(nsFailureFactory, &tempCacheCreator{}, stateMap, cConfigStub{})
 		vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{{
 			Name:                   testNetworkName,
 			InterfaceBindingMethod: v1.InterfaceBindingMethod{Masquerade: &v1.InterfaceMasquerade{}},
@@ -119,11 +114,11 @@ var _ = Describe("netconf", func() {
 			Name:          testNetworkName,
 			NetworkSource: v1.NetworkSource{Pod: &v1.PodNetwork{}},
 		}}
-		Expect(netConf.Setup(vmi, vmi.Spec.Networks, launcherPid, netPreSetupDummyNoop)).NotTo(Succeed())
+		Expect(netConf.Setup(vmi, vmi.Spec.Networks, launcherPid)).NotTo(Succeed())
 	})
 
 	It("fails the teardown run", func() {
-		netConf := netsetup.NewNetConfWithCustomFactoryAndConfigState(nil, failingCacheCreator{}, stateMap)
+		netConf := netsetup.NewNetConfWithCustomFactoryAndConfigState(nil, failingCacheCreator{}, stateMap, cConfigStub{})
 		Expect(netConf.Teardown(vmi)).NotTo(Succeed())
 	})
 })
@@ -140,10 +135,6 @@ func (n netnsStub) Do(func() error) error {
 }
 func nsNoopFactory(_ int) netsetup.NSExecutor    { return netnsStub{} }
 func nsFailureFactory(_ int) netsetup.NSExecutor { return netnsStub{shouldFail: true} }
-
-func netPreSetupDummyNoop() error { return nil }
-
-func netPreSetupFail() error { return fmt.Errorf("pre-setup failure") }
 
 type tempCacheCreator struct {
 	once   sync.Once
@@ -209,4 +200,10 @@ type nsExecutorStub struct {
 func (n nsExecutorStub) Do(f func() error) error {
 	Expect(n.shouldNotBeExecuted).To(BeFalse(), "The namespace executor shouldn't be invoked")
 	return f()
+}
+
+type cConfigStub struct{}
+
+func (c cConfigStub) GetNetworkBindings() map[string]v1.InterfaceBindingPlugin {
+	return map[string]v1.InterfaceBindingPlugin{}
 }

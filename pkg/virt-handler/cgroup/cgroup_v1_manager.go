@@ -1,3 +1,22 @@
+/*
+ * This file is part of the KubeVirt project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * Copyright The KubeVirt Authors.
+ *
+ */
+
 package cgroup
 
 import (
@@ -19,6 +38,7 @@ import (
 	runc_configs "github.com/opencontainers/runc/libcontainer/configs"
 
 	"kubevirt.io/kubevirt/pkg/util"
+	cgroupconsts "kubevirt.io/kubevirt/pkg/virt-handler/cgroup/constants"
 )
 
 type v1Manager struct {
@@ -55,7 +75,7 @@ func (v *v1Manager) GetBasePathToHostSubsystem(subsystem string) (string, error)
 	if subsystemPath == "" {
 		return "", fmt.Errorf("controller %s does not exist", subsystem)
 	}
-	return filepath.Join(HostCgroupBasePath, subsystemPath), nil
+	return filepath.Join(cgroupconsts.HostCgroupBasePath, subsystemPath), nil
 }
 
 func (v *v1Manager) Set(r *runc_configs.Resources) error {
@@ -92,7 +112,7 @@ func getCurrentlyDefinedRules(runcManager runc_cgroups.Manager) ([]*devices.Rule
 	if !ok {
 		return nil, fmt.Errorf("devices subsystem's path is not defined for this manager")
 	}
-	devicesPath = filepath.Join(HostCgroupBasePath, devicesPath)
+	devicesPath = filepath.Join(cgroupconsts.HostCgroupBasePath, devicesPath)
 
 	currentRulesStr, err := runc_cgroups.ReadFile(devicesPath, "devices.list")
 	if err != nil {

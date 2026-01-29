@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2017-2023 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -21,26 +21,33 @@ package infrastructure
 
 import (
 	"kubevirt.io/kubevirt/tests/framework/kubevirt"
+	"kubevirt.io/kubevirt/tests/libkubevirt"
+	"kubevirt.io/kubevirt/tests/libkubevirt/config"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
-
-	"kubevirt.io/kubevirt/tests"
 )
 
-var _ = DescribeInfra("cluster profiler for pprof data aggregation", func() {
-	var (
-		virtClient kubecli.KubevirtClient
-	)
+var _ = Describe(SIGSerial("cluster profiler for pprof data aggregation", func() {
+	var virtClient kubecli.KubevirtClient
+	var kvConfig v1.KubeVirtConfiguration
+
 	BeforeEach(func() {
 		virtClient = kubevirt.Client()
+		kv := libkubevirt.GetCurrentKv(virtClient)
+		kvConfig = kv.Spec.Configuration
+
+		if kvConfig.DeveloperConfiguration == nil {
+			kvConfig.DeveloperConfiguration = &v1.DeveloperConfiguration{}
+		}
 	})
 
-	Context("when ClusterProfiler feature gate", func() {
+	Context("when ClusterProfiler configuration", func() {
 		It("is disabled it should prevent subresource access", func() {
-			tests.DisableFeatureGate("ClusterProfiler")
+			kvConfig.DeveloperConfiguration.ClusterProfiler = false
+			config.UpdateKubeVirtConfigValueAndWait(kvConfig)
 
 			err := virtClient.ClusterProfiler().Start()
 			Expect(err).To(HaveOccurred())
@@ -52,7 +59,8 @@ var _ = DescribeInfra("cluster profiler for pprof data aggregation", func() {
 			Expect(err).To(HaveOccurred())
 		})
 		It("is enabled it should allow subresource access", func() {
-			tests.EnableFeatureGate("ClusterProfiler")
+			kvConfig.DeveloperConfiguration.ClusterProfiler = true
+			config.UpdateKubeVirtConfigValueAndWait(kvConfig)
 
 			err := virtClient.ClusterProfiler().Start()
 			Expect(err).ToNot(HaveOccurred())
@@ -64,4 +72,4 @@ var _ = DescribeInfra("cluster profiler for pprof data aggregation", func() {
 			Expect(err).ToNot(HaveOccurred())
 		})
 	})
-})
+}))

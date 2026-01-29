@@ -8,7 +8,6 @@ metadata:
 spec:
   dataVolumeTemplates:
   - metadata:
-      creationTimestamp: null
       name: alpine-dv
     spec:
       pvc:
@@ -21,7 +20,7 @@ spec:
       source:
         registry:
           url: docker://registry:5000/kubevirt/alpine-container-disk-demo:devel
-  running: false
+  runStrategy: Halted
   template:
     metadata:
       labels:
@@ -33,9 +32,9 @@ spec:
           - disk:
               bus: virtio
             name: datavolumedisk1
-        resources:
-          requests:
-            memory: 128Mi
+        memory:
+          guest: 128Mi
+        resources: {}
       terminationGracePeriodSeconds: 0
       volumes:
       - dataVolume:

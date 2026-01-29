@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2021 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -117,6 +117,10 @@ func (app *SubresourceAPIApp) getPodsNextPage(cpRequest *v1.ClusterProfilerReque
 }
 
 func podIsReadyComponent(pod *k8sv1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+
 	re, _ := regexp.Compile("^(virt-api-|virt-operator-|virt-handler-|virt-controller-).*")
 	isComponentPod := re.MatchString(pod.Name)
 	// filter out any kubevirt related pod that doesn't have profiling capabilities
@@ -124,17 +128,13 @@ func podIsReadyComponent(pod *k8sv1.Pod) bool {
 		return false
 	}
 
-	if pod == nil {
+	if pod.Status.Phase != k8sv1.PodRunning || pod.DeletionTimestamp != nil {
 		return false
-	} else if pod.Status.Phase != k8sv1.PodRunning {
-		return false
-	} else if pod.DeletionTimestamp != nil {
-		return false
-	} else {
-		for _, cond := range pod.Status.Conditions {
-			if cond.Type == k8sv1.PodReady && cond.Status == k8sv1.ConditionTrue {
-				return true
-			}
+	}
+
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == k8sv1.PodReady && cond.Status == k8sv1.ConditionTrue {
+			return true
 		}
 	}
 

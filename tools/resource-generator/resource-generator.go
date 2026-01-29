@@ -56,14 +56,15 @@ func newKubeVirtCR(namespace string, pullPolicy v1.PullPolicy, featureGates stri
 		},
 		Spec: virtv1.KubeVirtSpec{
 			ImagePullPolicy: pullPolicy,
+			Configuration: virtv1.KubeVirtConfiguration{
+				ImagePullPolicy: pullPolicy,
+			},
 		},
 	}
 
 	if featureGates != "" {
-		cr.Spec.Configuration = virtv1.KubeVirtConfiguration{
-			DeveloperConfiguration: &virtv1.DeveloperConfiguration{
-				FeatureGates: strings.Split(featureGates, ","),
-			},
+		cr.Spec.Configuration.DeveloperConfiguration = &virtv1.DeveloperConfiguration{
+			FeatureGates: strings.Split(featureGates, ","),
 		}
 	}
 
@@ -135,7 +136,7 @@ ${2}replicas: {{`+infraReplicasVar+`}}{{end}}`)
 }
 
 func main() {
-	resourceType := flag.String("type", "", "Type of resource to generate. kv | kv-cr | operator-rbac | priorityclass")
+	resourceType := flag.String("type", "", "Type of resource to generate. kv | kv-cr | operator-rbac | priorityclass | networkpolicies")
 	namespace := flag.String("namespace", "kube-system", "Namespace to use.")
 	pullPolicy := flag.String("pullPolicy", "IfNotPresent", "ImagePullPolicy to use.")
 	featureGates := flag.String("featureGates", "", "Feature gates to enable.")
@@ -170,6 +171,14 @@ func main() {
 		err := util.MarshallObject(priorityClass, os.Stdout)
 		if err != nil {
 			panic(err)
+		}
+	case "networkpolicies":
+		networkPolicies := components.NewKubeVirtNetworkPolicies(*namespace)
+		for _, networkPolicy := range networkPolicies {
+			err := util.MarshallObject(networkPolicy, os.Stdout)
+			if err != nil {
+				panic(err)
+			}
 		}
 	default:
 		panic(fmt.Errorf("unknown resource type %s", *resourceType))

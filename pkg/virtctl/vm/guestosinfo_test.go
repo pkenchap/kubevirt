@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2023 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -23,15 +23,15 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
 
 	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
-	"kubevirt.io/kubevirt/tests/clientcmd"
+	"kubevirt.io/kubevirt/pkg/virtctl/testing"
 )
 
 var _ = Describe("Guest os info command", func() {
@@ -47,10 +47,10 @@ var _ = Describe("Guest os info command", func() {
 	})
 
 	It("should fail with missing input parameters", func() {
-		cmd := clientcmd.NewRepeatableVirtctlCommand("guestosinfo")
+		cmd := testing.NewRepeatableVirtctlCommand("guestosinfo")
 		err := cmd()
 		Expect(err).To(HaveOccurred())
-		Expect(err).Should(MatchError("argument validation failed"))
+		Expect(err).Should(MatchError("accepts 1 arg(s), received 0"))
 	})
 
 	It("should fail with non existing vm", func() {
@@ -62,8 +62,8 @@ var _ = Describe("Guest os info command", func() {
 
 		vmiInterface.EXPECT().GuestOsInfo(context.Background(), vmName).Return(v1.VirtualMachineInstanceGuestAgentInfo{}, fmt.Errorf("an error on the server (\"virtualmachineinstance.kubevirt.io \"testvm\" not found\") has prevented the request from succeeding")).Times(1)
 
-		cmd := clientcmd.NewVirtctlCommand("guestosinfo", vmName)
-		err := cmd.Execute()
+		cmd := testing.NewRepeatableVirtctlCommand("guestosinfo", vmName)
+		err := cmd()
 		Expect(err).To(HaveOccurred())
 		Expect(err).Should(MatchError("Error getting guestosinfo of VirtualMachineInstance testvm, an error on the server (\"virtualmachineinstance.kubevirt.io \"testvm\" not found\") has prevented the request from succeeding"))
 	})
@@ -79,8 +79,8 @@ var _ = Describe("Guest os info command", func() {
 
 		vmiInterface.EXPECT().GuestOsInfo(context.Background(), vm.Name).Return(v1.VirtualMachineInstanceGuestAgentInfo{}, fmt.Errorf("an error on the server (\"Operation cannot be fulfilled on virtualmachineinstance.kubevirt.io \"testvm\": VMI does not have guest agent connected\") has prevented the request from succeeding")).Times(1)
 
-		cmd := clientcmd.NewVirtctlCommand("guestosinfo", vm.Name)
-		err := cmd.Execute()
+		cmd := testing.NewRepeatableVirtctlCommand("guestosinfo", vm.Name)
+		err := cmd()
 		Expect(err).To(HaveOccurred())
 		Expect(err).Should(MatchError("Error getting guestosinfo of VirtualMachineInstance testvm, an error on the server (\"Operation cannot be fulfilled on virtualmachineinstance.kubevirt.io \"testvm\": VMI does not have guest agent connected\") has prevented the request from succeeding"))
 	})
@@ -99,7 +99,7 @@ var _ = Describe("Guest os info command", func() {
 
 		vmiInterface.EXPECT().GuestOsInfo(context.Background(), vm.Name).Return(guestOSInfo, nil).Times(1)
 
-		cmd := clientcmd.NewVirtctlCommand("guestosinfo", vm.Name)
-		Expect(cmd.Execute()).To(Succeed())
+		cmd := testing.NewRepeatableVirtctlCommand("guestosinfo", vm.Name)
+		Expect(cmd()).To(Succeed())
 	})
 })

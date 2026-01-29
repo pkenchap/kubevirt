@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2017 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -29,29 +29,26 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"net"
-	"net/rpc"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/json"
 
+	backupv1 "kubevirt.io/api/backup/v1alpha1"
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
 
-	diskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
+	"golang.org/x/sys/unix"
+
 	com "kubevirt.io/kubevirt/pkg/handler-launcher-com"
 	"kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/info"
 	cmdv1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
+	"kubevirt.io/kubevirt/pkg/safepath"
 	grpcutil "kubevirt.io/kubevirt/pkg/util/net/grpc"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/stats"
@@ -61,15 +58,13 @@ var (
 	// add older version when supported
 	// don't use the variable in pkg/handler-launcher-com/cmd/v1/version.go in order to detect version mismatches early
 	supportedCmdVersions = []uint32{1}
-	legacyBaseDir        = "/var/run/kubevirt"
+	baseDir              = "/var/run/kubevirt"
 	podsBaseDir          = "/pods"
 )
 
 const StandardLauncherSocketFileName = "launcher-sock"
 const StandardInitLauncherSocketFileName = "launcher-init-sock"
 const StandardLauncherUnresponsiveFileName = "launcher-unresponsive"
-
-const MultiThreadedQemuMigrationAnnotation = "kubevirt.io/multiThreadedQemuMigration"
 
 type MigrationOptions struct {
 	Bandwidth                resource.Quantity
@@ -79,6 +74,7 @@ type MigrationOptions struct {
 	AllowAutoConverge        bool
 	AllowPostCopy            bool
 	ParallelMigrationThreads *uint
+	AllowWorkloadDisruption  bool
 }
 
 type LauncherClient interface {
@@ -88,13 +84,14 @@ type LauncherClient interface {
 	FreezeVirtualMachine(vmi *v1.VirtualMachineInstance, unfreezeTimeoutSeconds int32) error
 	UnfreezeVirtualMachine(vmi *v1.VirtualMachineInstance) error
 	SyncMigrationTarget(vmi *v1.VirtualMachineInstance, options *cmdv1.VirtualMachineOptions) error
+	ResetVirtualMachine(vmi *v1.VirtualMachineInstance) error
 	SoftRebootVirtualMachine(vmi *v1.VirtualMachineInstance) error
 	SignalTargetPodCleanup(vmi *v1.VirtualMachineInstance) error
 	ShutdownVirtualMachine(vmi *v1.VirtualMachineInstance) error
 	KillVirtualMachine(vmi *v1.VirtualMachineInstance) error
 	MigrateVirtualMachine(vmi *v1.VirtualMachineInstance, options *MigrationOptions) error
 	CancelVirtualMachineMigration(vmi *v1.VirtualMachineInstance) error
-	FinalizeVirtualMachineMigration(vmi *v1.VirtualMachineInstance) error
+	FinalizeVirtualMachineMigration(vmi *v1.VirtualMachineInstance, options *cmdv1.VirtualMachineOptions) error
 	HotplugHostDevices(vmi *v1.VirtualMachineInstance) error
 	DeleteDomain(vmi *v1.VirtualMachineInstance) error
 	GetDomain() (*api.Domain, bool, error)
@@ -113,6 +110,9 @@ type LauncherClient interface {
 	GetLaunchMeasurement(*v1.VirtualMachineInstance) (*v1.SEVMeasurementInfo, error)
 	InjectLaunchSecret(*v1.VirtualMachineInstance, *v1.SEVSecretOptions) error
 	SyncVirtualMachineMemory(vmi *v1.VirtualMachineInstance, options *cmdv1.VirtualMachineOptions) error
+	GetDomainDirtyRateStats() (dirtyRateMbps int64, err error)
+	GetScreenshot(*v1.VirtualMachineInstance) (*cmdv1.ScreenshotResponse, error)
+	VirtualMachineBackup(vmi *v1.VirtualMachineInstance, options *backupv1.BackupOptions) error
 }
 
 type VirtLauncherClient struct {
@@ -125,152 +125,84 @@ const (
 	longTimeout  time.Duration = 20 * time.Second
 )
 
-func SetLegacyBaseDir(baseDir string) {
-	legacyBaseDir = baseDir
+func SetBaseDir(dir string) {
+	baseDir = dir
 }
 
 func SetPodsBaseDir(baseDir string) {
 	podsBaseDir = baseDir
 }
 
-func ListAllSockets() ([]string, error) {
-	var socketFiles []string
-
-	socketsDir := filepath.Join(legacyBaseDir, "sockets")
-	exists, err := diskutils.FileExists(socketsDir)
-	if err != nil {
-		return nil, err
-	}
-
-	if exists == false {
-		return socketFiles, nil
-	}
-
-	files, err := os.ReadDir(socketsDir)
-	if err != nil {
-		return nil, err
-	}
-	for _, file := range files {
-		if file.IsDir() || !strings.Contains(file.Name(), "_sock") {
-			continue
-		}
-		// legacy support.
-		// The old way of handling launcher sockets was to
-		// dump them all in the same directory. So if we encounter
-		// a legacy socket, still process it. This is necessary
-		// for update support.
-		socketFiles = append(socketFiles, filepath.Join(socketsDir, file.Name()))
-	}
-
-	podsDir := podsBaseDir
-	dirs, err := os.ReadDir(podsDir)
-	if err != nil {
-		return nil, err
-	}
-	for _, dir := range dirs {
-		if !dir.IsDir() {
-			continue
-		}
-
-		socketPath := SocketFilePathOnHost(dir.Name())
-		exists, err = diskutils.FileExists(socketPath)
-		if err != nil {
-			return socketFiles, err
-		}
-
-		if exists {
-			socketFiles = append(socketFiles, socketPath)
-		}
-	}
-
-	return socketFiles, nil
-}
-
-func LegacySocketsDirectory() string {
-	return filepath.Join(legacyBaseDir, "sockets")
-}
-
-func IsLegacySocket(socket string) bool {
-	if filepath.Base(socket) == StandardLauncherSocketFileName {
-		return false
-	}
-
-	return true
-}
-
-func SocketMonitoringEnabled(socket string) bool {
-	if filepath.Base(socket) == StandardLauncherSocketFileName {
-		return true
-	}
-	return false
+func SocketsDirectory() string {
+	return filepath.Join(baseDir, "sockets")
 }
 
 func IsSocketUnresponsive(socket string) bool {
-	file := filepath.Join(filepath.Dir(socket), StandardLauncherUnresponsiveFileName)
-	exists, _ := diskutils.FileExists(file)
+	dir, err := safepath.NewPathNoFollow(filepath.Dir(socket))
+	fileNotExists := errors.Is(err, unix.ENOENT)
+	if err != nil {
+		return fileNotExists
+	}
+
+	_, err = safepath.JoinNoFollow(dir, StandardLauncherUnresponsiveFileName)
+	unresponsive := !errors.Is(err, unix.ENOENT)
 	// if the unresponsive socket monitor marked this socket
 	// as being unresponsive, return true
-	if exists {
+	if unresponsive {
 		return true
 	}
 
-	exists, _ = diskutils.FileExists(socket)
+	_, err = safepath.JoinNoFollow(dir, filepath.Base(socket))
+	fileNotExists = errors.Is(err, unix.ENOENT)
 	// if the socket file doesn't exist, it's definitely unresponsive as well
-	if !exists {
-		return true
-	}
-
-	return false
+	return fileNotExists
 }
 
 func MarkSocketUnresponsive(socket string) error {
-	file := filepath.Join(filepath.Dir(socket), StandardLauncherUnresponsiveFileName)
-	f, err := os.Create(file)
+	dir, err := safepath.NewPathNoFollow(filepath.Dir(socket))
 	if err != nil {
 		return err
 	}
-	f.Close()
-	return nil
+	err = safepath.TouchAtNoFollow(dir, StandardLauncherUnresponsiveFileName, 0666)
+	if errors.Is(err, unix.EEXIST) {
+		return nil
+	}
+	return err
 }
 
 func SocketDirectoryOnHost(podUID string) string {
-	return fmt.Sprintf("/%s/%s/volumes/kubernetes.io~empty-dir/sockets", podsBaseDir, string(podUID))
+	return filepath.Clean(fmt.Sprintf("/%s/%s/volumes/kubernetes.io~empty-dir/sockets", podsBaseDir, podUID))
 }
 
 func SocketFilePathOnHost(podUID string) string {
-	return fmt.Sprintf("%s/%s", SocketDirectoryOnHost(podUID), StandardLauncherSocketFileName)
+	return filepath.Clean(fmt.Sprintf("%s/%s", SocketDirectoryOnHost(podUID), StandardLauncherSocketFileName))
 }
 
 // gets the cmd socket for a VMI
-func FindPodDirOnHost(vmi *v1.VirtualMachineInstance) (string, error) {
+func FindPodDirOnHost(vmi *v1.VirtualMachineInstance, socketDirFunc func(string) string) (string, error) {
 
+	var socketDirsForErrorReporting []string
 	// It is possible for multiple pods to be active on a single VMI
 	// during migrations. This loop will discover the active pod on
 	// this particular local node if it exists. A active pod not
 	// running on this node will not have a kubelet pods directory,
 	// so it will not be found.
 	for podUID := range vmi.Status.ActivePods {
-		socketPodDir := SocketDirectoryOnHost(string(podUID))
-		exists, _ := diskutils.FileExists(socketPodDir)
-		if exists {
+		socketPodDir := socketDirFunc(string(podUID))
+		socketDirsForErrorReporting = append(socketDirsForErrorReporting, socketPodDir)
+		_, err := safepath.NewPathNoFollow(socketPodDir)
+		if err == nil {
 			return socketPodDir, nil
 		}
 	}
 
-	return "", fmt.Errorf("No command socketdir for vmi %s", vmi.UID)
+	return "", fmt.Errorf("No pod dir found for vmi %s in paths [%s]", vmi.UID, strings.Join(socketDirsForErrorReporting, ","))
 }
 
-// gets the cmd socket for a VMI
-func FindSocketOnHost(vmi *v1.VirtualMachineInstance) (string, error) {
-	if string(vmi.UID) != "" {
-		legacySockFile := string(vmi.UID) + "_sock"
-		legacySock := filepath.Join(LegacySocketsDirectory(), legacySockFile)
-		exists, _ := diskutils.FileExists(legacySock)
-		if exists {
-			return legacySock, nil
-		}
-	}
-
+// Finds exactly one socket on a host based on the hostname.
+// A empty hostname is wildcard.
+// Returns error otherwise.
+func FindSocketOnHost(vmi *v1.VirtualMachineInstance, host string) (string, error) {
 	socketsFound := 0
 	foundSocket := ""
 	// It is possible for multiple pods to be active on a single VMI
@@ -278,10 +210,13 @@ func FindSocketOnHost(vmi *v1.VirtualMachineInstance) (string, error) {
 	// this particular local node if it exists. A active pod not
 	// running on this node will not have a kubelet pods directory,
 	// so it will not be found.
-	for podUID := range vmi.Status.ActivePods {
+	for podUID, phost := range vmi.Status.ActivePods {
+		if host != "" && host != phost {
+			continue
+		}
 		socket := SocketFilePathOnHost(string(podUID))
-		exists, _ := diskutils.FileExists(socket)
-		if exists {
+		_, err := safepath.NewPathNoFollow(socket)
+		if err == nil {
 			foundSocket = socket
 			socketsFound++
 		}
@@ -296,16 +231,11 @@ func FindSocketOnHost(vmi *v1.VirtualMachineInstance) (string, error) {
 	return "", fmt.Errorf("No command socket found for vmi %s", vmi.UID)
 }
 
-func SocketOnGuest() string {
-	sockFile := StandardLauncherSocketFileName
-	return filepath.Join(LegacySocketsDirectory(), sockFile)
+// Finds exactly one socket on a host based on the NODE_NAME env. Returns error otherwise.
+func FindSocket(vmi *v1.VirtualMachineInstance) (string, error) {
+	host, _ := os.LookupEnv("NODE_NAME")
+	return FindSocketOnHost(vmi, host)
 }
-
-func UninitializedSocketOnGuest() string {
-	sockFile := StandardInitLauncherSocketFileName
-	return filepath.Join(LegacySocketsDirectory(), sockFile)
-}
-
 func NewClient(socketPath string) (LauncherClient, error) {
 	// dial socket
 	conn, err := grpcutil.DialSocket(socketPath)
@@ -375,60 +305,6 @@ func (c *VirtLauncherClient) genericSendVMICmd(cmdName string,
 	err = handleError(err, cmdName, response)
 	return err
 }
-func IsUnimplemented(err error) bool {
-	if grpcStatus, ok := status.FromError(err); ok {
-		if grpcStatus.Code() == codes.Unimplemented {
-			return true
-		}
-	}
-	return false
-}
-func handleError(err error, cmdName string, response *cmdv1.Response) error {
-	if IsDisconnected(err) {
-		return err
-	} else if IsUnimplemented(err) {
-		return err
-	} else if err != nil {
-		msg := fmt.Sprintf("unknown error encountered sending command %s: %s", cmdName, err.Error())
-		return fmt.Errorf(msg)
-	} else if response != nil && response.Success != true {
-		return fmt.Errorf("server error. command %s failed: %q", cmdName, response.Message)
-	}
-	return nil
-}
-
-func IsDisconnected(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	if err == rpc.ErrShutdown || err == io.ErrUnexpectedEOF || err == io.EOF {
-		return true
-	}
-
-	if opErr, ok := err.(*net.OpError); ok {
-		if syscallErr, ok := opErr.Err.(*os.SyscallError); ok {
-			// catches "connection reset by peer"
-			if syscallErr.Err == syscall.ECONNRESET {
-				return true
-			}
-		}
-	}
-
-	if grpcStatus, ok := status.FromError(err); ok {
-
-		// see https://github.com/grpc/grpc-go/blob/master/codes/codes.go
-		// TODO which other codes might be related to disconnection...?
-		switch grpcStatus.Code() {
-		case codes.Canceled:
-			// e.g. v1client connection closing
-			return true
-		}
-
-	}
-
-	return false
-}
 
 func (c *VirtLauncherClient) SyncVirtualMachine(vmi *v1.VirtualMachineInstance, options *cmdv1.VirtualMachineOptions) error {
 	return c.genericSendVMICmd("SyncVMI", c.v1client.SyncVirtualMachine, vmi, options)
@@ -491,6 +367,10 @@ func (c *VirtLauncherClient) SoftRebootVirtualMachine(vmi *v1.VirtualMachineInst
 	return c.genericSendVMICmd("SoftReboot", c.v1client.SoftRebootVirtualMachine, vmi, &cmdv1.VirtualMachineOptions{})
 }
 
+func (c *VirtLauncherClient) ResetVirtualMachine(vmi *v1.VirtualMachineInstance) error {
+	return c.genericSendVMICmd("Reset", c.v1client.ResetVirtualMachine, vmi, &cmdv1.VirtualMachineOptions{})
+}
+
 func (c *VirtLauncherClient) ShutdownVirtualMachine(vmi *v1.VirtualMachineInstance) error {
 	return c.genericSendVMICmd("Shutdown", c.v1client.ShutdownVirtualMachine, vmi, &cmdv1.VirtualMachineOptions{})
 }
@@ -547,8 +427,8 @@ func (c *VirtLauncherClient) SignalTargetPodCleanup(vmi *v1.VirtualMachineInstan
 	return c.genericSendVMICmd("SignalTargetPodCleanup", c.v1client.SignalTargetPodCleanup, vmi, &cmdv1.VirtualMachineOptions{})
 }
 
-func (c *VirtLauncherClient) FinalizeVirtualMachineMigration(vmi *v1.VirtualMachineInstance) error {
-	return c.genericSendVMICmd("FinalizeVirtualMachineMigration", c.v1client.FinalizeVirtualMachineMigration, vmi, &cmdv1.VirtualMachineOptions{})
+func (c *VirtLauncherClient) FinalizeVirtualMachineMigration(vmi *v1.VirtualMachineInstance, options *cmdv1.VirtualMachineOptions) error {
+	return c.genericSendVMICmd("FinalizeVirtualMachineMigration", c.v1client.FinalizeVirtualMachineMigration, vmi, options)
 }
 
 func (c *VirtLauncherClient) HotplugHostDevices(vmi *v1.VirtualMachineInstance) error {
@@ -570,7 +450,7 @@ func (c *VirtLauncherClient) GetDomain() (*api.Domain, bool, error) {
 		response = domainResponse.Response
 	}
 
-	if err = handleError(err, "GetDomain", response); err != nil {
+	if err = handleError(err, "GetDomain", response); err != nil || domainResponse == nil {
 		return domain, exists, err
 	}
 
@@ -582,6 +462,24 @@ func (c *VirtLauncherClient) GetDomain() (*api.Domain, bool, error) {
 		exists = true
 	}
 	return domain, exists, nil
+}
+
+func (c *VirtLauncherClient) GetDomainDirtyRateStats() (dirtyRateMbps int64, err error) {
+	request := &cmdv1.EmptyRequest{}
+	ctx, cancel := context.WithTimeout(context.Background(), longTimeout)
+	defer cancel()
+
+	domainDirtyRateStatsResponse, err := c.v1client.GetDomainDirtyRateStats(ctx, request)
+	var response *cmdv1.Response
+	if domainDirtyRateStatsResponse != nil {
+		response = domainDirtyRateStatsResponse.Response
+	}
+
+	if err = handleError(err, "GetDomainDirtyRateStats", response); err != nil || domainDirtyRateStatsResponse == nil {
+		return -1, err
+	}
+
+	return domainDirtyRateStatsResponse.DirtyRateMbs, nil
 }
 
 func (c *VirtLauncherClient) GetQemuVersion() (string, error) {
@@ -620,7 +518,7 @@ func (c *VirtLauncherClient) GetDomainStats() (*stats.DomainStats, bool, error) 
 		response = domainStatsResponse.Response
 	}
 
-	if err = handleError(err, "GetDomainStats", response); err != nil {
+	if err = handleError(err, "GetDomainStats", response); err != nil || domainStatsResponse == nil {
 		return stats, exists, err
 	}
 
@@ -658,7 +556,7 @@ func (c *VirtLauncherClient) GetGuestInfo() (*v1.VirtualMachineInstanceGuestAgen
 		response = gaRespose.Response
 	}
 
-	if err = handleError(err, "GetGuestInfo", response); err != nil {
+	if err = handleError(err, "GetGuestInfo", response); err != nil || gaRespose == nil {
 		return guestInfo, err
 	}
 
@@ -673,7 +571,7 @@ func (c *VirtLauncherClient) GetGuestInfo() (*v1.VirtualMachineInstanceGuestAgen
 
 // GetUsers returns the list of the active users on the guest machine
 func (c *VirtLauncherClient) GetUsers() (v1.VirtualMachineInstanceGuestOSUserList, error) {
-	userList := []v1.VirtualMachineInstanceGuestOSUser{}
+	var userList []v1.VirtualMachineInstanceGuestOSUser
 
 	request := &cmdv1.EmptyRequest{}
 	ctx, cancel := context.WithTimeout(context.Background(), shortTimeout)
@@ -685,7 +583,7 @@ func (c *VirtLauncherClient) GetUsers() (v1.VirtualMachineInstanceGuestOSUserLis
 		response = uResponse.Response
 	}
 
-	if err = handleError(err, "GetUsers", response); err != nil {
+	if err = handleError(err, "GetUsers", response); err != nil || uResponse == nil {
 		return v1.VirtualMachineInstanceGuestOSUserList{}, err
 	}
 
@@ -705,7 +603,7 @@ func (c *VirtLauncherClient) GetUsers() (v1.VirtualMachineInstanceGuestOSUserLis
 
 // GetFilesystems returns the list of active filesystems on the guest machine
 func (c *VirtLauncherClient) GetFilesystems() (v1.VirtualMachineInstanceFileSystemList, error) {
-	fsList := []v1.VirtualMachineInstanceFileSystem{}
+	var fsList []v1.VirtualMachineInstanceFileSystem
 
 	request := &cmdv1.EmptyRequest{}
 	ctx, cancel := context.WithTimeout(context.Background(), shortTimeout)
@@ -717,7 +615,7 @@ func (c *VirtLauncherClient) GetFilesystems() (v1.VirtualMachineInstanceFileSyst
 		response = fsResponse.Response
 	}
 
-	if err = handleError(err, "GetFilesystems", response); err != nil {
+	if err = handleError(err, "GetFilesystems", response); err != nil || fsResponse == nil {
 		return v1.VirtualMachineInstanceFileSystemList{}, err
 	}
 
@@ -741,7 +639,7 @@ func (c *VirtLauncherClient) Exec(domainName, command string, args []string, tim
 		DomainName:     domainName,
 		Command:        command,
 		Args:           args,
-		TimeoutSeconds: int32(timeoutSeconds),
+		TimeoutSeconds: timeoutSeconds,
 	}
 	exitCode := -1
 	stdOut := ""
@@ -780,6 +678,24 @@ func (c *VirtLauncherClient) GuestPing(domainName string, timeoutSeconds int32) 
 
 	_, err := c.v1client.GuestPing(ctx, request)
 	return err
+}
+
+func (c *VirtLauncherClient) GetScreenshot(vmi *v1.VirtualMachineInstance) (*cmdv1.ScreenshotResponse, error) {
+	vmiJson, err := json.Marshal(vmi)
+	if err != nil {
+		return nil, err
+	}
+
+	request := &cmdv1.VMIRequest{
+		Vmi: &cmdv1.VMI{
+			VmiJson: vmiJson,
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), shortTimeout)
+	defer cancel()
+
+	return c.v1client.GetScreenshot(ctx, request)
 }
 
 func (c *VirtLauncherClient) GetSEVInfo() (*v1.SEVPlatformInfo, error) {
@@ -858,4 +774,30 @@ func (c *VirtLauncherClient) InjectLaunchSecret(vmi *v1.VirtualMachineInstance, 
 
 func (c *VirtLauncherClient) SyncVirtualMachineMemory(vmi *v1.VirtualMachineInstance, options *cmdv1.VirtualMachineOptions) error {
 	return c.genericSendVMICmd("SyncVirtualMachineMemory", c.v1client.SyncVirtualMachineMemory, vmi, options)
+}
+
+func (c *VirtLauncherClient) VirtualMachineBackup(vmi *v1.VirtualMachineInstance, options *backupv1.BackupOptions) error {
+	vmiJson, err := json.Marshal(vmi)
+	if err != nil {
+		return err
+	}
+
+	optionsJson, err := json.Marshal(options)
+	if err != nil {
+		return err
+	}
+
+	request := &cmdv1.BackupRequest{
+		Vmi: &cmdv1.VMI{
+			VmiJson: vmiJson,
+		},
+		Options: optionsJson,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), longTimeout)
+	defer cancel()
+	response, err := c.v1client.BackupVirtualMachine(ctx, request)
+
+	err = handleError(err, "Backup", response)
+	return err
 }

@@ -13,78 +13,87 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2023 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
 package vm
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/clientcmd"
 	v1 "kubevirt.io/api/core/v1"
+	"kubevirt.io/client-go/kubecli"
 
+	"kubevirt.io/kubevirt/pkg/virtctl/clientconfig"
 	"kubevirt.io/kubevirt/pkg/virtctl/templates"
 )
 
 const COMMAND_MIGRATE_CANCEL = "migrate-cancel"
 
-func NewMigrateCancelCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
+func NewMigrateCancelCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "migrate-cancel (VM)",
 		Short:   "Cancel migration of a virtual machine.",
 		Example: usage(COMMAND_MIGRATE_CANCEL),
-		Args:    templates.ExactArgs("migrate-cancel", 1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			c := Command{command: COMMAND_MIGRATE_CANCEL, clientConfig: clientConfig}
-			return c.migrateCancelRun(args)
-		},
+		Args:    cobra.ExactArgs(1),
+		RunE:    migrateCancelRun,
 	}
+
+	cmd.Flags().BoolVar(&dryRun, dryRunArg, false, dryRunCommandUsage)
 	cmd.SetUsageTemplate(templates.UsageTemplate())
 	return cmd
 }
 
-func (o *Command) migrateCancelRun(args []string) error {
+func migrateCancelRun(cmd *cobra.Command, args []string) error {
 	vmiName := args[0]
 
-	virtClient, namespace, err := GetNamespaceAndClient(o.clientConfig)
+	virtClient, namespace, _, err := clientconfig.ClientAndNamespaceFromContext(cmd.Context())
+	if err != nil {
+		return err
+	}
+	err = migrateCancel(cmd.Context(), virtClient, vmiName, namespace)
 	if err != nil {
 		return err
 	}
 
+	cmd.Printf("VM %s was scheduled to %s\n", vmiName, COMMAND_MIGRATE_CANCEL)
+	return nil
+}
+
+func migrateCancel(ctx context.Context, virtClient kubecli.KubevirtClient, vmiName string, namespace string) error {
 	// get a list of migrations for vmiName (use LabelSelector filter)
-	labelselector := fmt.Sprintf("%s==%s", v1.MigrationSelectorLabel, vmiName)
-	migrations, err := virtClient.VirtualMachineInstanceMigration(namespace).List(&metav1.ListOptions{
-		LabelSelector: labelselector})
+	labelSelector := fmt.Sprintf("%s==%s", v1.MigrationSelectorLabel, vmiName)
+	migrations, err := virtClient.VirtualMachineInstanceMigration(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector})
 	if err != nil {
 		return fmt.Errorf("Error fetching virtual machine instance migration list  %v", err)
 	}
 
+	deleteOpts := metav1.DeleteOptions{
+		DryRun: setDryRunOption(dryRun),
+	}
+
 	// There may be a single active migrations but several completed/failed ones
 	// go over the migrations list and find the active one
-	done := false
 	for _, mig := range migrations.Items {
-		migname := mig.ObjectMeta.Name
-
-		if !mig.IsFinal() {
-			// Cancel the active migration by calling Delete
-			err = virtClient.VirtualMachineInstanceMigration(namespace).Delete(migname, &metav1.DeleteOptions{})
-			if err != nil {
-				return fmt.Errorf("Error canceling migration %s of a VirtualMachine %s: %v", migname, vmiName, err)
-			}
-			done = true
-			break
+		if mig.IsFinal() {
+			continue
 		}
+
+		migName := mig.ObjectMeta.Name
+
+		// Cancel the active migration by calling Delete
+		err = virtClient.VirtualMachineInstanceMigration(namespace).Delete(ctx, migName, deleteOpts)
+		if err != nil {
+			return fmt.Errorf("Error canceling migration %s of a VirtualMachine %s: %v", migName, vmiName, err)
+		}
+
+		return nil
 	}
 
-	if !done {
-		return fmt.Errorf("Found no migration to cancel for %s", vmiName)
-	}
-
-	fmt.Printf("VM %s was scheduled to %s\n", vmiName, o.command)
-
-	return nil
+	return fmt.Errorf("Found no migration to cancel for %s", vmiName)
 }

@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2018 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -65,8 +65,8 @@ func (v VMNetworkConfigurator) getPhase2NICs(domain *api.Domain, networks []v1.N
 			return nil, fmt.Errorf("no iface matching with network %s", networks[i].Name)
 		}
 
-		// Binding plugin (with non tap domain attachment), SR-IOV and Slirp devices are not part of the phases
-		if (iface.Binding != nil && v.domainAttachments[iface.Name] != string(v1.Tap)) || iface.SRIOV != nil || iface.Slirp != nil {
+		// Binding plugin (with non tap domain attachment) and SR-IOV devices are not part of the phases
+		if (iface.Binding != nil && v.domainAttachments[iface.Name] != string(v1.Tap)) || iface.SRIOV != nil {
 			continue
 		}
 

@@ -41,13 +41,6 @@ var _ = Describe("Defaults", func() {
 		Expect(vmi.Spec.Domain.Features.SMM).To(BeNil())
 	})
 
-	It("should add interface and pod network by default", func() {
-		vmi := &v1.VirtualMachineInstance{}
-		v1.SetDefaults_NetworkInterface(vmi)
-		Expect(vmi.Spec.Domain.Devices.Interfaces).NotTo(BeEmpty())
-		Expect(vmi.Spec.Networks).NotTo(BeEmpty())
-	})
-
 	It("should default to true to all defined features", func() {
 		vmi := &v1.VirtualMachineInstance{
 			Spec: v1.VirtualMachineInstanceSpec{
@@ -70,7 +63,7 @@ var _ = Describe("Defaults", func() {
 				VendorID:        &v1.FeatureVendorID{},
 				Frequencies:     &v1.FeatureState{},
 				Reenlightenment: &v1.FeatureState{},
-				TLBFlush:        &v1.FeatureState{},
+				TLBFlush:        &v1.TLBFlush{},
 			},
 		}
 		v1.SetObjectDefaults_VirtualMachineInstance(vmi)
@@ -102,23 +95,25 @@ var _ = Describe("Defaults", func() {
 				Domain: v1.DomainSpec{},
 			},
 		}
-		pointer.BoolPtr(true)
 		vmi.Spec.Domain.Features = &v1.Features{
 			ACPI: v1.FeatureState{Enabled: pointer.BoolPtr(true)},
-			APIC: &v1.FeatureAPIC{Enabled: pointer.BoolPtr(false)},
+			APIC: &v1.FeatureAPIC{FeatureState: v1.FeatureState{Enabled: pointer.BoolPtr(false)}},
 			Hyperv: &v1.FeatureHyperv{
-				Relaxed:         &v1.FeatureState{Enabled: pointer.BoolPtr(true)},
-				VAPIC:           &v1.FeatureState{Enabled: pointer.BoolPtr(false)},
-				Spinlocks:       &v1.FeatureSpinlocks{Enabled: pointer.BoolPtr(true)},
-				VPIndex:         &v1.FeatureState{Enabled: pointer.BoolPtr(false)},
-				Runtime:         &v1.FeatureState{Enabled: pointer.BoolPtr(true)},
-				SyNIC:           &v1.FeatureState{Enabled: pointer.BoolPtr(false)},
-				SyNICTimer:      &v1.SyNICTimer{Enabled: pointer.BoolPtr(true), Direct: &v1.FeatureState{Enabled: pointer.BoolPtr(true)}},
+				Relaxed:   &v1.FeatureState{Enabled: pointer.BoolPtr(true)},
+				VAPIC:     &v1.FeatureState{Enabled: pointer.BoolPtr(false)},
+				Spinlocks: &v1.FeatureSpinlocks{FeatureState: v1.FeatureState{Enabled: pointer.BoolPtr(true)}},
+				VPIndex:   &v1.FeatureState{Enabled: pointer.BoolPtr(false)},
+				Runtime:   &v1.FeatureState{Enabled: pointer.BoolPtr(true)},
+				SyNIC:     &v1.FeatureState{Enabled: pointer.BoolPtr(false)},
+				SyNICTimer: &v1.SyNICTimer{
+					FeatureState: v1.FeatureState{Enabled: pointer.BoolPtr(true)},
+					Direct:       &v1.FeatureState{Enabled: pointer.BoolPtr(true)},
+				},
 				Reset:           &v1.FeatureState{Enabled: pointer.BoolPtr(false)},
-				VendorID:        &v1.FeatureVendorID{Enabled: pointer.BoolPtr(true)},
+				VendorID:        &v1.FeatureVendorID{FeatureState: v1.FeatureState{Enabled: pointer.BoolPtr(true)}},
 				Frequencies:     &v1.FeatureState{Enabled: pointer.BoolPtr(false)},
 				Reenlightenment: &v1.FeatureState{Enabled: pointer.BoolPtr(false)},
-				TLBFlush:        &v1.FeatureState{Enabled: pointer.BoolPtr(true)},
+				TLBFlush:        &v1.TLBFlush{FeatureState: v1.FeatureState{Enabled: pointer.BoolPtr(true)}},
 			},
 		}
 		v1.SetObjectDefaults_VirtualMachineInstance(vmi)
@@ -145,20 +140,20 @@ var _ = Describe("Defaults", func() {
 
 		vmi.Spec.Domain.Features = &v1.Features{
 			ACPI: v1.FeatureState{Enabled: pointer.BoolPtr(false)},
-			APIC: &v1.FeatureAPIC{Enabled: pointer.BoolPtr(true)},
+			APIC: &v1.FeatureAPIC{FeatureState: v1.FeatureState{Enabled: pointer.BoolPtr(true)}},
 			Hyperv: &v1.FeatureHyperv{
 				Relaxed:         &v1.FeatureState{Enabled: pointer.BoolPtr(false)},
 				VAPIC:           &v1.FeatureState{Enabled: pointer.BoolPtr(true)},
-				Spinlocks:       &v1.FeatureSpinlocks{Enabled: pointer.BoolPtr(false)},
+				Spinlocks:       &v1.FeatureSpinlocks{FeatureState: v1.FeatureState{Enabled: pointer.BoolPtr(false)}},
 				VPIndex:         &v1.FeatureState{Enabled: pointer.BoolPtr(true)},
 				Runtime:         &v1.FeatureState{Enabled: pointer.BoolPtr(false)},
 				SyNIC:           &v1.FeatureState{Enabled: pointer.BoolPtr(true)},
-				SyNICTimer:      &v1.SyNICTimer{Enabled: pointer.BoolPtr(false)},
+				SyNICTimer:      &v1.SyNICTimer{FeatureState: v1.FeatureState{Enabled: pointer.BoolPtr(false)}},
 				Reset:           &v1.FeatureState{Enabled: pointer.BoolPtr(true)},
-				VendorID:        &v1.FeatureVendorID{Enabled: pointer.BoolPtr(false)},
+				VendorID:        &v1.FeatureVendorID{FeatureState: v1.FeatureState{Enabled: pointer.BoolPtr(false)}},
 				Frequencies:     &v1.FeatureState{Enabled: pointer.BoolPtr(false)},
 				Reenlightenment: &v1.FeatureState{Enabled: pointer.BoolPtr(false)},
-				TLBFlush:        &v1.FeatureState{Enabled: pointer.BoolPtr(true)},
+				TLBFlush:        &v1.TLBFlush{FeatureState: v1.FeatureState{Enabled: pointer.BoolPtr(true)}},
 			},
 		}
 		v1.SetObjectDefaults_VirtualMachineInstance(vmi)
@@ -225,28 +220,6 @@ var _ = Describe("Defaults", func() {
 		Expect(disks[2].DedicatedIOThread).To(BeNil(), "Default DedicatedIOThread state should be nil")
 	})
 
-	It("should set the default watchdog and the default watchdog action", func() {
-		vmi := &v1.VirtualMachineInstance{
-			Spec: v1.VirtualMachineInstanceSpec{
-				Domain: v1.DomainSpec{
-					Devices: v1.Devices{
-						Watchdog: &v1.Watchdog{
-							WatchdogDevice: v1.WatchdogDevice{
-								I6300ESB: &v1.I6300ESBWatchdog{},
-							},
-						},
-					},
-				},
-			},
-		}
-		v1.SetObjectDefaults_VirtualMachineInstance(vmi)
-		Expect(vmi.Spec.Domain.Devices.Watchdog.I6300ESB.Action).To(Equal(v1.WatchdogActionReset))
-		vmi.Spec.Domain.Devices.Watchdog.I6300ESB = nil
-		v1.SetObjectDefaults_VirtualMachineInstance(vmi)
-		Expect(vmi.Spec.Domain.Devices.Watchdog.I6300ESB).ToNot(BeNil())
-		Expect(vmi.Spec.Domain.Devices.Watchdog.I6300ESB.Action).To(Equal(v1.WatchdogActionReset))
-	})
-
 	It("should set timer defaults", func() {
 		vmi := &v1.VirtualMachineInstance{
 			Spec: v1.VirtualMachineInstanceSpec{
@@ -276,55 +249,6 @@ var _ = Describe("Defaults", func() {
 		vmi := &v1.VirtualMachineInstance{}
 		v1.SetObjectDefaults_VirtualMachineInstance(vmi)
 		Expect(vmi.Spec.Domain.IOThreadsPolicy).To(BeNil(), "Default IOThreadsPolicy should be nil")
-	})
-})
-
-var _ = Describe("Function SetDefaults_NetworkInterface()", func() {
-
-	It("should append pod interface if interface is not defined", func() {
-		vmi := &v1.VirtualMachineInstance{}
-		v1.SetDefaults_NetworkInterface(vmi)
-		Expect(vmi.Spec.Domain.Devices.Interfaces).To(HaveLen(1))
-		Expect(vmi.Spec.Domain.Devices.Interfaces[0].Name).To(Equal("default"))
-		Expect(vmi.Spec.Networks[0].Name).To(Equal("default"))
-		Expect(vmi.Spec.Networks[0].Pod).ToNot(BeNil())
-	})
-
-	It("should not append pod interface if interface is defined", func() {
-		vmi := &v1.VirtualMachineInstance{}
-		net := v1.Network{
-			Name: "testnet",
-		}
-		iface := v1.Interface{Name: net.Name}
-		vmi.Spec.Networks = []v1.Network{net}
-		vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{iface}
-
-		v1.SetDefaults_NetworkInterface(vmi)
-		Expect(vmi.Spec.Domain.Devices.Interfaces).To(HaveLen(1))
-		Expect(vmi.Spec.Domain.Devices.Interfaces[0].Name).To(Equal("testnet"))
-		Expect(vmi.Spec.Networks[0].Name).To(Equal("testnet"))
-		Expect(vmi.Spec.Networks[0].Pod).To(BeNil())
-	})
-
-	It("should not append pod interface if it's explicitly disabled", func() {
-		autoAttach := false
-		vmi := &v1.VirtualMachineInstance{}
-		vmi.Spec.Domain.Devices.AutoattachPodInterface = &autoAttach
-
-		v1.SetDefaults_NetworkInterface(vmi)
-		Expect(vmi.Spec.Domain.Devices.Interfaces).To(BeEmpty())
-		Expect(vmi.Spec.Networks).To(BeEmpty())
-	})
-
-	It("should append pod interface if auto attach is true", func() {
-		autoAttach := true
-		vmi := &v1.VirtualMachineInstance{}
-		vmi.Spec.Domain.Devices.AutoattachPodInterface = &autoAttach
-		v1.SetDefaults_NetworkInterface(vmi)
-		Expect(vmi.Spec.Domain.Devices.Interfaces).To(HaveLen(1))
-		Expect(vmi.Spec.Domain.Devices.Interfaces[0].Name).To(Equal("default"))
-		Expect(vmi.Spec.Networks[0].Name).To(Equal("default"))
-		Expect(vmi.Spec.Networks[0].Pod).ToNot(BeNil())
 	})
 
 	It("should default probes", func() {

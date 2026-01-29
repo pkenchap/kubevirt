@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2022 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -26,35 +26,34 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-
 	k8sv1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/tools/clientcmd"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
-	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
 
+	virtwait "kubevirt.io/kubevirt/pkg/apimachinery/wait"
 	storagetypes "kubevirt.io/kubevirt/pkg/storage/types"
 	kutil "kubevirt.io/kubevirt/pkg/util"
+	"kubevirt.io/kubevirt/pkg/virtctl/clientconfig"
 	"kubevirt.io/kubevirt/pkg/virtctl/templates"
 	"kubevirt.io/kubevirt/pkg/virtctl/vmexport"
 )
 
 const (
-	claimNameArg    = "claim-name"
-	createClaimArg  = "create-claim"
-	storageClassArg = "storage-class"
-	accessModeArg   = "access-mode"
-	portForwardArg  = "port-forward"
-	formatArg       = "format"
-	localPortArg    = "local-port"
+	ClaimNameFlag    = "claim-name"
+	CreateClaimFlag  = "create-claim"
+	StorageClassFlag = "storage-class"
+	AccessModeFlag   = "access-mode"
+	PortForwardFlag  = "port-forward"
+	FormatFlag       = "format"
+	LocalPortFlag    = "local-port"
+	OutputFileFlag   = "output"
 
 	configName         = "config"
-	filesystemOverhead = cdiv1.Percent("0.055")
+	filesystemOverhead = v1.Percent("0.055")
 	fsOverheadMsg      = "Using default 5.5%% filesystem overhead for pvc size"
 
 	processingWaitInterval = 2 * time.Second
@@ -72,15 +71,10 @@ var (
 	outputFile   string
 )
 
-type command struct {
-	clientConfig clientcmd.ClientConfig
-}
+type command struct{}
 
-type memoryDumpCompleteFunc func(kubecli.KubevirtClient, string, string, time.Duration, time.Duration) (string, error)
-
-// WaitMemoryDumpCompleted is used to store the function to wait for the memory dump to be complete.
-// Useful for unit tests.
-var WaitMemoryDumpComplete memoryDumpCompleteFunc = waitForMemoryDump
+// WaitForMemoryDumpCompleteFn allows overriding the function to wait for the memory dump object to be complete (useful for unit testing)
+var WaitForMemoryDumpCompleteFn = WaitForMemoryDumpComplete
 
 func usageMemoryDump() string {
 	usage := `  #Dump memory of a virtual machine instance called 'myvm' to an existing pvc called 'memoryvolume'.
@@ -105,36 +99,30 @@ func usageMemoryDump() string {
 }
 
 // NewMemoryDumpCommand returns a cobra.Command to handle the memory dump process
-func NewMemoryDumpCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
+func NewMemoryDumpCommand() *cobra.Command {
+	c := command{}
 	cmd := &cobra.Command{
 		Use:     "memory-dump get/download/remove (VM)",
 		Short:   "Dump the memory of a running VM to a pvc",
 		Example: usageMemoryDump(),
-		Args:    templates.ExactArgs("memory-dump", 2),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			c := command{clientConfig: clientConfig}
-			return c.run(args)
-		},
+		Args:    cobra.ExactArgs(2),
+		RunE:    c.run,
 	}
 	cmd.SetUsageTemplate(templates.UsageTemplate())
-	cmd.Flags().StringVar(&claimName, claimNameArg, "", "pvc name to contain the memory dump")
-	cmd.Flags().BoolVar(&createClaim, createClaimArg, false, "Create the pvc that will conatin the memory dump")
-	cmd.Flags().BoolVar(&portForward, portForwardArg, false, "Configure and set port-forward in a random port to download the memory dump")
-	cmd.Flags().StringVar(&format, formatArg, "", "Specifies the format of the memory dump download (gzipped or raw).")
-	cmd.Flags().StringVar(&localPort, localPortArg, "0", "Specify port for port-forward")
-	cmd.Flags().StringVar(&storageClass, storageClassArg, "", "The storage class for the PVC.")
-	cmd.Flags().StringVar(&accessMode, accessModeArg, "", "The access mode for the PVC.")
-	cmd.Flags().StringVar(&outputFile, "output", "", "Specifies the output path of the memory dump to be downloaded.")
+	cmd.Flags().StringVar(&claimName, ClaimNameFlag, "", "pvc name to contain the memory dump")
+	cmd.Flags().BoolVar(&createClaim, CreateClaimFlag, false, "Create the pvc that will conatin the memory dump")
+	cmd.Flags().BoolVar(&portForward, PortForwardFlag, false, "Configure and set port-forward in a random port to download the memory dump")
+	cmd.Flags().StringVar(&format, FormatFlag, "", "Specifies the format of the memory dump download (gzipped or raw).")
+	cmd.Flags().StringVar(&localPort, LocalPortFlag, "0", "Specify port for port-forward")
+	cmd.Flags().StringVar(&storageClass, StorageClassFlag, "", "The storage class for the PVC.")
+	cmd.Flags().StringVar(&accessMode, AccessModeFlag, "", "The access mode for the PVC.")
+	cmd.Flags().StringVar(&outputFile, OutputFileFlag, "", "Specifies the output path of the memory dump to be downloaded.")
 
 	return cmd
 }
 
-func (c *command) run(args []string) error {
-	namespace, _, err := c.clientConfig.Namespace()
-	if err != nil {
-		return err
-	}
-	virtClient, err := kubecli.GetKubevirtClientFromClientConfig(c.clientConfig)
+func (c *command) run(cmd *cobra.Command, args []string) error {
+	virtClient, namespace, _, err := clientconfig.ClientAndNamespaceFromContext(cmd.Context())
 	if err != nil {
 		return fmt.Errorf("cannot obtain KubeVirt client: %v", err)
 	}
@@ -153,7 +141,7 @@ func (c *command) run(args []string) error {
 }
 
 func calcMemoryDumpExpectedSize(vmName, namespace string, virtClient kubecli.KubevirtClient) (*resource.Quantity, error) {
-	vmi, err := virtClient.VirtualMachineInstance(namespace).Get(context.Background(), vmName, &metav1.GetOptions{})
+	vmi, err := virtClient.VirtualMachineInstance(namespace).Get(context.Background(), vmName, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -187,7 +175,7 @@ func generatePVC(size *resource.Quantity, claimName, namespace, storageClass, ac
 			Namespace: namespace,
 		},
 		Spec: k8sv1.PersistentVolumeClaimSpec{
-			Resources: k8sv1.ResourceRequirements{
+			Resources: k8sv1.VolumeResourceRequirements{
 				Requests: k8sv1.ResourceList{
 					k8sv1.ResourceStorage: *size,
 				},
@@ -213,6 +201,17 @@ func generatePVC(size *resource.Quantity, claimName, namespace, storageClass, ac
 		pvc.Spec.AccessModes = []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteOnce}
 	}
 
+	labels := map[string]string{
+		// Adding this label to allow the PVC to be processed by the CDI WebhookPvcRendering mutating webhook,
+		// which must be enabled in the CDI CR via feature gate.
+		// This mutating webhook processes the PVC based on its associated StorageProfile.
+		// For example, a profile can define a minimum supported volume size via the annotation:
+		// cdi.kubevirt.io/minimumSupportedPvcSize: 4Gi
+		storagetypes.LabelApplyStorageProfile: "true",
+	}
+
+	pvc.ObjectMeta.Labels = labels
+
 	return pvc, nil
 }
 
@@ -228,7 +227,7 @@ func checkNoExistingPVC(namespace, claimName string, virtClient kubecli.Kubevirt
 }
 
 func checkNoAssociatedMemoryDump(namespace, vmName string, virtClient kubecli.KubevirtClient) error {
-	vm, err := virtClient.VirtualMachine(namespace).Get(context.Background(), vmName, &metav1.GetOptions{})
+	vm, err := virtClient.VirtualMachine(namespace).Get(context.Background(), vmName, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
@@ -314,7 +313,7 @@ func downloadMemoryDump(namespace, vmName string, virtClient kubecli.KubevirtCli
 	}
 
 	// Wait for the memorydump to complete
-	claimName, err := WaitMemoryDumpComplete(virtClient, namespace, vmName, processingWaitInterval, processingWaitTotal)
+	claimName, err := WaitForMemoryDumpCompleteFn(virtClient, namespace, vmName, processingWaitInterval, processingWaitTotal)
 	if err != nil {
 		return err
 	}
@@ -338,6 +337,10 @@ func downloadMemoryDump(namespace, vmName string, virtClient kubecli.KubevirtCli
 		ExportSource: exportSource,
 		PortForward:  portForward,
 		LocalPort:    localPort,
+		// Using 2 as retry count to help mitigate a bug that might happen when creating the
+		// exporter pod just after the hotplug pod is deleted: https://issues.redhat.com/browse/CNV-39141
+		DownloadRetries:  2,
+		ReadinessTimeout: vmexport.DefaultProcessingWaitTotal,
 	}
 
 	if portForward {
@@ -357,10 +360,10 @@ func downloadMemoryDump(namespace, vmName string, virtClient kubecli.KubevirtCli
 	return vmexport.DownloadVirtualMachineExport(virtClient, vmExportInfo)
 }
 
-func waitForMemoryDump(virtClient kubecli.KubevirtClient, namespace, vmName string, interval, timeout time.Duration) (string, error) {
+func WaitForMemoryDumpComplete(virtClient kubecli.KubevirtClient, namespace, vmName string, interval, timeout time.Duration) (string, error) {
 	var claimName string
-	err := wait.PollImmediate(interval, timeout, func() (bool, error) {
-		vm, err := virtClient.VirtualMachine(namespace).Get(context.Background(), vmName, &metav1.GetOptions{})
+	err := virtwait.PollImmediately(interval, timeout, func(ctx context.Context) (bool, error) {
+		vm, err := virtClient.VirtualMachine(namespace).Get(ctx, vmName, metav1.GetOptions{})
 		if err != nil {
 			return false, err
 		}

@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2017 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -75,10 +75,6 @@ type CloudInitData struct {
 	NetworkData         string
 	DevicesData         *[]DeviceData
 	VolumeName          string
-}
-
-type PublicSSHKey struct {
-	string
 }
 
 type NoCloudMetadata struct {
@@ -265,10 +261,6 @@ func resolveConfigDriveSecrets(vmi *v1.VirtualMachineInstance, secretSourceDir s
 		return keys, err
 	}
 
-	if err != nil {
-		return keys, err
-	}
-
 	volume := findCloudInitConfigDriveSecretVolume(vmi.Spec.Volumes)
 	if volume == nil {
 		return keys, nil
@@ -442,7 +434,7 @@ func defaultIsoFunc(isoOutFile, volumeID string, inDir string) error {
 
 	isoBinary := "xorrisofs"
 
-	// #nosec No risk for attacket injection. Parameters are predefined strings
+	// #nosec No risk for attacker injection. Parameters are predefined strings
 	cmd := exec.Command(isoBinary, args...)
 
 	err := cmd.Start()

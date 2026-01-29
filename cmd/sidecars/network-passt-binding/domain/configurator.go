@@ -32,7 +32,6 @@ import (
 	"kubevirt.io/kubevirt/pkg/network/istio"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/device"
 
-	"kubevirt.io/kubevirt/pkg/network/namescheme"
 	"kubevirt.io/kubevirt/pkg/network/vmispec"
 )
 
@@ -43,17 +42,24 @@ type NetworkConfiguratorOptions struct {
 
 type PasstNetworkConfigurator struct {
 	vmiSpecIface *vmschema.Interface
+	podIfaceName string
 	options      NetworkConfiguratorOptions
 }
 
 const (
 	// PasstPluginName passt binding plugin name should be registered to Kubevirt through Kubevirt CR
 	PasstPluginName = "passt"
+	//nolint:gosec
 	// PasstLogFilePath passt log file path Kubevirt consume and record
 	PasstLogFilePath = "/var/run/kubevirt/passt.log"
 )
 
-func NewPasstNetworkConfigurator(ifaces []vmschema.Interface, networks []vmschema.Network, opts NetworkConfiguratorOptions) (*PasstNetworkConfigurator, error) {
+func NewPasstNetworkConfigurator(
+	ifaces []vmschema.Interface,
+	networks []vmschema.Network,
+	ifaceStatuses []vmschema.VirtualMachineInstanceNetworkInterface,
+	opts NetworkConfiguratorOptions,
+) (*PasstNetworkConfigurator, error) {
 	network := vmispec.LookupPodNetwork(networks)
 	if network == nil {
 		return nil, fmt.Errorf("pod network not found")
@@ -66,13 +72,36 @@ func NewPasstNetworkConfigurator(ifaces []vmschema.Interface, networks []vmschem
 		return nil, fmt.Errorf("interface %q is not set with Passt network binding plugin", network.Name)
 	}
 
+	ifaceStatus := vmispec.LookupInterfaceStatusByName(ifaceStatuses, network.Name)
+	if ifaceStatus == nil {
+		return nil, fmt.Errorf("primary network interface status was not found")
+	}
+
+	primaryPodIfaceName := ifaceStatus.PodInterfaceName
+	if primaryPodIfaceName == "" {
+		return nil, fmt.Errorf("primary pod network interface name was not found")
+	}
+
 	return &PasstNetworkConfigurator{
 		vmiSpecIface: iface,
+		podIfaceName: primaryPodIfaceName,
 		options:      opts,
 	}, nil
 }
 
 func (p PasstNetworkConfigurator) Mutate(domainSpec *domainschema.DomainSpec) (*domainschema.DomainSpec, error) {
+	const (
+		sharedMemoryBackingAccessMode = "shared"
+		memfdMemoryBackingSourceType  = "memfd"
+	)
+
+	if domainSpec.MemoryBacking != nil &&
+		domainSpec.MemoryBacking.Access != nil &&
+		domainSpec.MemoryBacking.Access.Mode != sharedMemoryBackingAccessMode {
+		return nil, fmt.Errorf("memory backing access mode must be 'shared'; cannot override existing mode: %q",
+			domainSpec.MemoryBacking.Access.Mode)
+	}
+
 	generatedIface, err := p.generateInterface()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate domain interface spec: %v", err)
@@ -85,6 +114,16 @@ func (p PasstNetworkConfigurator) Mutate(domainSpec *domainschema.DomainSpec) (*
 		domainSpecCopy.Devices.Interfaces = append(domainSpecCopy.Devices.Interfaces, *generatedIface)
 	}
 
+	if domainSpecCopy.MemoryBacking == nil {
+		domainSpecCopy.MemoryBacking = &domainschema.MemoryBacking{
+			Access: &domainschema.MemoryBackingAccess{
+				Mode: sharedMemoryBackingAccessMode,
+			},
+			Source: &domainschema.MemoryBackingSource{
+				Type: memfdMemoryBackingSourceType,
+			},
+		}
+	}
 	log.Log.Infof("passt interface is added to domain spec successfully: %+v", generatedIface)
 
 	return domainSpecCopy, nil
@@ -135,13 +174,13 @@ func (p PasstNetworkConfigurator) generateInterface() (*domainschema.Interface, 
 	}
 
 	var acpi *domainschema.ACPI
-	if p.vmiSpecIface.ACPIIndex > 0 {
-		acpi = &domainschema.ACPI{Index: uint(p.vmiSpecIface.ACPIIndex)}
+	if acpiIndex := p.vmiSpecIface.ACPIIndex; acpiIndex > 0 {
+		acpi = &domainschema.ACPI{Index: uint(acpiIndex)}
 	}
 
 	const (
-		ifaceTypeUser     = "user"
-		ifaceBackendPasst = "passt"
+		ifaceTypeVhostUser = "vhostuser"
+		ifaceBackendPasst  = "passt"
 	)
 	return &domainschema.Interface{
 		Alias:       domainschema.NewUserDefinedAlias(p.vmiSpecIface.Name),
@@ -149,8 +188,8 @@ func (p PasstNetworkConfigurator) generateInterface() (*domainschema.Interface, 
 		Address:     pciAddress,
 		MAC:         mac,
 		ACPI:        acpi,
-		Type:        ifaceTypeUser,
-		Source:      domainschema.InterfaceSource{Device: namescheme.PrimaryPodInterfaceName},
+		Type:        ifaceTypeVhostUser,
+		Source:      domainschema.InterfaceSource{Device: p.podIfaceName},
 		Backend:     &domainschema.InterfaceBackend{Type: ifaceBackendPasst, LogFile: PasstLogFilePath},
 		PortForward: p.generatePortForward(),
 	}, nil
@@ -161,7 +200,7 @@ func (p PasstNetworkConfigurator) generatePortForward() []domainschema.Interface
 
 	if p.options.IstioProxyInjectionEnabled {
 		for _, port := range istio.ReservedPorts() {
-			tcpPortsRange = append(tcpPortsRange, domainschema.InterfacePortForwardRange{Start: uint(port), Exclude: "yes"})
+			tcpPortsRange = append(tcpPortsRange, domainschema.InterfacePortForwardRange{Start: port, Exclude: "yes"})
 		}
 	}
 
@@ -171,10 +210,17 @@ func (p PasstNetworkConfigurator) generatePortForward() []domainschema.Interface
 	)
 
 	for _, port := range p.vmiSpecIface.Ports {
+		portNumber := port.Port
+		if portNumber < 0 {
+			// This path is unreachable, as the port number is validated by webhooks.
+			// https://github.com/kubevirt/kubevirt/blob/e36bb0bd799764901e5dade8e4b2a5e906230d15/pkg/network/admitter/netiface.go#L200
+			log.Log.Errorf("port %d is illegal", portNumber)
+			continue
+		}
 		if strings.EqualFold(port.Protocol, protoTCP) || port.Protocol == "" {
-			tcpPortsRange = append(tcpPortsRange, domainschema.InterfacePortForwardRange{Start: uint(port.Port)})
+			tcpPortsRange = append(tcpPortsRange, domainschema.InterfacePortForwardRange{Start: uint(portNumber)})
 		} else if strings.EqualFold(port.Protocol, protoUDP) {
-			udpPortsRange = append(udpPortsRange, domainschema.InterfacePortForwardRange{Start: uint(port.Port)})
+			udpPortsRange = append(udpPortsRange, domainschema.InterfacePortForwardRange{Start: uint(portNumber)})
 		} else {
 			log.Log.Errorf("protocol %s is not supported by passt", port.Protocol)
 		}
@@ -182,8 +228,11 @@ func (p PasstNetworkConfigurator) generatePortForward() []domainschema.Interface
 
 	var portsFwd []domainschema.InterfacePortForward
 	if len(udpPortsRange) == 0 && len(tcpPortsRange) == 0 {
-		portsFwd = append(portsFwd, domainschema.InterfacePortForward{Proto: protoTCP})
-		portsFwd = append(portsFwd, domainschema.InterfacePortForward{Proto: protoUDP})
+		portsFwd = append(
+			portsFwd,
+			domainschema.InterfacePortForward{Proto: protoTCP},
+			domainschema.InterfacePortForward{Proto: protoUDP},
+		)
 	}
 	if len(tcpPortsRange) > 0 {
 		portsFwd = append(portsFwd, domainschema.InterfacePortForward{Proto: protoTCP, Ranges: tcpPortsRange})

@@ -26,12 +26,10 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
-	"strings"
+	"syscall"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
 	"github.com/nxadm/tail"
 	"github.com/spf13/pflag"
 	"golang.org/x/sync/errgroup"
@@ -39,30 +37,29 @@ import (
 	"kubevirt.io/client-go/log"
 )
 
-type TermFileError struct{}
-type SocketFileError struct{}
-
-func (m *TermFileError) Error() string {
-	return "termFile got detected"
-}
-
-func (m *SocketFileError) Error() string {
-	return "socketFile got removed"
-}
-
 type VirtTail struct {
 	ctx     context.Context
 	logFile string
-	g       *errgroup.Group
 }
 
-func (v *VirtTail) checkFile(socketFile string) bool {
-	_, err := os.Stat(socketFile)
-	return !os.IsNotExist(err)
+func (v *VirtTail) tailLogsWrapper() error {
+	location := &tail.SeekInfo{Offset: 0}
+	for {
+		var err error
+		location, err = v.tailLogs(*location)
+		if err != nil {
+			return err
+		}
+		if location == nil {
+			return nil
+		}
+		time.Sleep(1 * time.Second)
+	}
 }
 
-func (v *VirtTail) tailLogs() error {
+func (v *VirtTail) tailLogs(location tail.SeekInfo) (*tail.SeekInfo, error) {
 	t, err := tail.TailFile(v.logFile, tail.Config{
+		Location:      &location,
 		Follow:        true,
 		CompleteLines: true,
 		MustExist:     false,
@@ -70,22 +67,28 @@ func (v *VirtTail) tailLogs() error {
 		Logger:        tail.DiscardingLogger,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
+	cleanup := true
 	defer func() {
 		serr := t.Stop()
 		if serr != nil {
 			log.Log.V(3).Infof("tail error: %v", serr)
 		}
-		t.Cleanup()
+		if cleanup {
+			t.Cleanup()
+		}
 	}()
 
 	for {
 		select {
 		case line, ok := <-t.Lines:
 			if !ok {
-				log.Log.V(4).Info("tail error: line not ok")
+				log.Log.V(4).Info("tail error: chan closed")
+				cleanup = false
+				return &location, nil
 			} else if line != nil {
+				location = line.SeekInfo
 				if line.Err != nil {
 					log.Log.V(3).Infof("tail error: %v", line.Err)
 				} else {
@@ -93,104 +96,12 @@ func (v *VirtTail) tailLogs() error {
 				}
 			}
 		case <-v.ctx.Done():
-			return v.ctx.Err()
-		}
-	}
-}
-
-func (v *VirtTail) watchFS() error {
-	socketFile := strings.TrimSuffix(v.logFile, "-log")
-	termFile := v.logFile + "-sigTerm"
-	termFileDone := termFile + "-done"
-	socketExists := v.checkFile(socketFile)
-
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		log.Log.V(3).Infof("watcher error: %v", err)
-		return err
-	}
-	defer watcher.Close()
-
-	// Add a path.
-	dirPath := filepath.Dir(v.logFile)
-	found := false
-	i := 0
-	for i < 30 && !found {
-		i = i + 1
-		if _, derr := os.Stat(dirPath); derr == nil {
-			found = true
-			if err = watcher.Add(dirPath); err != nil {
-				log.Log.V(3).Infof("watcher error: %v - %s", err, dirPath)
-				return err
-			}
-		} else {
-			time.Sleep(100 * time.Millisecond)
-		}
-	}
-	if !found {
-		rerr := errors.New("expected directory is still not ready")
-		log.Log.V(3).Infof("watchFS error: %v", rerr)
-		return rerr
-	}
-
-	// initial timeout for serial console socket creation
-	const initialSocketTimeout = time.Second * 20
-	socketCheckCh := make(chan int)
-	time.AfterFunc(initialSocketTimeout, func() {
-		socketCheckCh <- 1
-	})
-
-	if v.checkFile(termFileDone) {
-		log.Log.V(3).Infof("watchFS error: termFileDone was already there")
-		return &TermFileError{}
-	}
-
-	// Start listening for events.
-	for {
-		select {
-		case <-socketCheckCh:
-			if !socketExists {
-				if socketExists = v.checkFile(socketFile); !socketExists {
-					rerr := errors.New("socketFile is still not ready")
-					log.Log.V(3).Infof("watchFS error: %v", rerr)
-					return rerr
-				}
-			}
-			if v.checkFile(termFileDone) {
-				log.Log.V(3).Infof("watchFS error: termFileDone was already there")
-				return &TermFileError{}
-			}
-		case event := <-watcher.Events:
-			if event.Has(fsnotify.Create) {
-				if event.Name == socketFile {
-					// socket file got created
-					socketExists = true
-				}
-			} else if event.Has(fsnotify.Remove) {
-				if event.Name == socketFile {
-					// socket file got deleted, we should quickly terminate
-					rerr := &SocketFileError{}
-					log.Log.V(3).Infof("watchFS error: %v", rerr)
-					return rerr
-				} else if event.Name == termFile {
-					// termination file got deleted, we should quickly terminate
-					terr := &TermFileError{}
-					log.Log.V(3).Infof("watchFS error: %v", terr)
-					return terr
-				}
-			}
-		case werr := <-watcher.Errors:
-			log.Log.V(3).Infof("watcher error: %v", werr)
-			return werr
-		case <-v.ctx.Done():
-			return v.ctx.Err()
+			return nil, v.ctx.Err()
 		}
 	}
 }
 
 func main() {
-	// set new default verbosity, was set to 0 by glog
-	goflag.Set("v", "2")
 	pflag.CommandLine.AddGoFlag(goflag.CommandLine.Lookup("v"))
 	pflag.CommandLine.ParseErrorsWhitelist = pflag.ParseErrorsWhitelist{UnknownFlags: true}
 	logFile := pflag.String("logfile", "", "path of the logfile to be streamed")
@@ -205,7 +116,7 @@ func main() {
 	}
 
 	// Create context that listens for the interrupt signal from the container runtime.
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	g, gctx := errgroup.WithContext(ctx)
@@ -213,15 +124,13 @@ func main() {
 	v := &VirtTail{
 		ctx:     gctx,
 		logFile: *logFile,
-		g:       g,
 	}
 
-	g.Go(v.tailLogs)
-	g.Go(v.watchFS)
+	g.Go(v.tailLogsWrapper)
 
 	// wait for all errgroup goroutines
 	if err := g.Wait(); err != nil {
-		if !(errors.Is(err, context.Canceled) || errors.Is(err, &TermFileError{}) || errors.Is(err, &SocketFileError{})) {
+		if !errors.Is(err, context.Canceled) {
 			log.Log.V(3).Infof("received error: %v", err)
 			os.Exit(1)
 		}

@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2019 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 package controller
@@ -23,7 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1 "kubevirt.io/api/core/v1"
-	poolv1 "kubevirt.io/api/pool/v1alpha1"
+	poolv1 "kubevirt.io/api/pool/v1beta1"
 )
 
 type VirtualMachinePoolConditionManager struct {
@@ -273,10 +273,7 @@ func (d *VirtualMachineInstanceMigrationConditionManager) HasCondition(migration
 func (d *VirtualMachineInstanceMigrationConditionManager) HasConditionWithStatus(migration *v1.VirtualMachineInstanceMigration, cond v1.VirtualMachineInstanceMigrationConditionType, status k8sv1.ConditionStatus) bool {
 	for _, c := range migration.Status.Conditions {
 		if c.Type == cond {
-			if c.Status == status {
-				return true
-			}
-			return false
+			return c.Status == status
 		}
 	}
 	return false
@@ -291,6 +288,24 @@ func (d *VirtualMachineInstanceMigrationConditionManager) RemoveCondition(migrat
 		conds = append(conds, c)
 	}
 	migration.Status.Conditions = conds
+}
+
+// UpdateCondition updates the given VirtualMachineMigrationCondition, unless it is already set with the same status and reason.
+func (d *VirtualMachineInstanceMigrationConditionManager) UpdateCondition(mig *v1.VirtualMachineInstanceMigration,
+	cond *v1.VirtualMachineInstanceMigrationCondition) {
+	for i, c := range mig.Status.Conditions {
+		if c.Type != cond.Type {
+			continue
+		}
+
+		if c.Status != cond.Status || c.Reason != cond.Reason {
+			mig.Status.Conditions[i] = *cond
+		}
+
+		return
+	}
+
+	mig.Status.Conditions = append(mig.Status.Conditions, *cond)
 }
 
 type PodConditionManager struct {

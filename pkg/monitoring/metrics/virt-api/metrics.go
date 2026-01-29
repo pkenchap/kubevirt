@@ -13,22 +13,32 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2023 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
 package virt_api
 
-import "github.com/machadovilaca/operator-observability/pkg/operatormetrics"
+import (
+	"github.com/rhobs/operator-observability-toolkit/pkg/operatormetrics"
 
-var (
-	metrics = [][]operatormetrics.Metric{
-		vmMetrics,
-	}
+	"kubevirt.io/kubevirt/pkg/monitoring/metrics/common/client"
+	"kubevirt.io/kubevirt/pkg/monitoring/metrics/common/workqueue"
 )
 
 func SetupMetrics() error {
-	return operatormetrics.RegisterMetrics(metrics...)
+	if err := client.SetupMetrics(); err != nil {
+		return err
+	}
+
+	if err := workqueue.SetupMetrics(); err != nil {
+		return err
+	}
+
+	return operatormetrics.RegisterMetrics(
+		connectionMetrics,
+		vmMetrics,
+	)
 }
 
 func ListMetrics() []operatormetrics.Metric {

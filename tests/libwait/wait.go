@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2022 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -31,6 +31,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/watch"
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
@@ -136,12 +137,13 @@ func (w *Waiting) watchVMIForPhase(vmi *v1.VirtualMachineInstance) *v1.VirtualMa
 	// Fetch the VirtualMachineInstance, to make sure we have a resourceVersion as a starting point for the watch
 	// FIXME: This may start watching too late and we may miss some warnings
 	if vmi.ResourceVersion == "" {
-		vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, &metav1.GetOptions{})
+		vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, metav1.GetOptions{})
 		gomega.ExpectWithOffset(1, err).ToNot(gomega.HaveOccurred())
 	}
 
-	objectEventWatcher := watcher.New(vmi).SinceWatchedObjectResourceVersion().Timeout(time.Duration(w.timeout+2) * time.Second)
-	if w.wp.FailOnWarnings == true {
+	const offset = 2
+	objectEventWatcher := watcher.New(vmi).SinceWatchedObjectResourceVersion().Timeout(time.Duration(w.timeout+offset) * time.Second)
+	if w.wp.FailOnWarnings {
 		// let's ignore PSA events as kubernetes internally uses a namespace informer
 		// that might not be up to date after virt-controller relabeled the namespace
 		// to use a 'privileged' policy
@@ -155,21 +157,28 @@ func (w *Waiting) watchVMIForPhase(vmi *v1.VirtualMachineInstance) *v1.VirtualMa
 		objectEventWatcher.WaitFor(w.ctx, watcher.NormalEvent, v1.Started)
 	}()
 
-	timeoutMsg := fmt.Sprintf("Timed out waiting for VMI %s to enter %s phase(s)", vmi.Name, w.phases)
+	var retrievedVMI *v1.VirtualMachineInstance
 	// FIXME the event order is wrong. First the document should be updated
 	gomega.EventuallyWithOffset(1, func(g gomega.Gomega) v1.VirtualMachineInstancePhase {
-		vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, &metav1.GetOptions{})
+		retrievedVMI, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, metav1.GetOptions{})
 		g.ExpectWithOffset(1, err).ToNot(gomega.HaveOccurred())
 
-		g.Expect(vmi).ToNot(matcher.HaveSucceeded(), "VMI %s unexpectedly stopped. State: %s", vmi.Name, vmi.Status.Phase)
+		g.Expect(retrievedVMI).ToNot(matcher.HaveSucceeded(),
+			"VMI %s unexpectedly stopped. State: %s",
+			retrievedVMI.Name,
+			retrievedVMI.Status.Phase)
 		// May need to wait for Failed state
 		if !w.waitForFail {
-			g.Expect(vmi).ToNot(matcher.BeInPhase(v1.Failed), "VMI %s unexpectedly stopped. State: %s", vmi.Name, vmi.Status.Phase)
+			g.Expect(retrievedVMI).ToNot(matcher.BeInPhase(v1.Failed),
+				"VMI %s unexpectedly stopped. State: %s",
+				retrievedVMI.Name,
+				retrievedVMI.Status.Phase)
 		}
-		return vmi.Status.Phase
-	}, time.Duration(w.timeout)*time.Second, 1*time.Second).Should(gomega.BeElementOf(w.phases), timeoutMsg)
+		return retrievedVMI.Status.Phase
+	}, time.Duration(w.timeout)*time.Second, 1*time.Second).Should(gomega.BeElementOf(w.phases),
+		fmt.Sprintf("Timed out waiting for VMI %s to enter %s phase(s)", vmi.Name, w.phases))
 
-	return vmi
+	return retrievedVMI
 }
 
 // WaitForSuccessfulVMIStart blocks until the specified VirtualMachineInstance reaches the Running state
@@ -191,7 +200,7 @@ func WaitUntilVMIReady(vmi *v1.VirtualMachineInstance, loginTo console.LoginToFu
 	gomega.Expect(loginTo(vmi)).To(gomega.Succeed())
 
 	var err error
-	vmi, err = kubevirt.Client().VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, &metav1.GetOptions{})
+	vmi, err = kubevirt.Client().VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, metav1.GetOptions{})
 	gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
 	return vmi
@@ -202,17 +211,93 @@ func WaitForVirtualMachineToDisappearWithTimeout(vmi *v1.VirtualMachineInstance,
 	virtClient, err := kubecli.GetKubevirtClient()
 	gomega.ExpectWithOffset(1, err).ToNot(gomega.HaveOccurred())
 	gomega.EventuallyWithOffset(1, func() error {
-		_, err := virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, &metav1.GetOptions{})
+		_, err := virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, metav1.GetOptions{})
 		return err
-	}, seconds, 1*time.Second).Should(gomega.SatisfyAll(gomega.HaveOccurred(), gomega.WithTransform(errors.IsNotFound, gomega.BeTrue())), "The VMI should be gone within the given timeout")
+	}, seconds, 1*time.Second).Should(gomega.SatisfyAll(
+		gomega.HaveOccurred(),
+		gomega.WithTransform(errors.IsNotFound, gomega.BeTrue())),
+		"The VMI should be gone within the given timeout")
 }
 
-// WaitForMigrationToDisappearWithTimeout blocks for the passed seconds until the specified VirtualMachineInstanceMigration disappears
-func WaitForMigrationToDisappearWithTimeout(migration *v1.VirtualMachineInstanceMigration, seconds int) {
+// WaitForMigrationToDisappearWithTimeout blocks for the passed duration until the specified VirtualMachineInstanceMigration disappears
+func WaitForMigrationToDisappearWithTimeout(migration *v1.VirtualMachineInstanceMigration, timeout time.Duration) error {
 	virtClient, err := kubecli.GetKubevirtClient()
-	gomega.ExpectWithOffset(1, err).ToNot(gomega.HaveOccurred())
-	gomega.EventuallyWithOffset(1, func() bool {
-		_, err := virtClient.VirtualMachineInstanceMigration(migration.Namespace).Get(migration.Name, &metav1.GetOptions{})
-		return errors.IsNotFound(err)
-	}, seconds, 1*time.Second).Should(gomega.BeTrue(), fmt.Sprintf("migration %s was expected to dissapear after %d seconds, but it did not", migration.Name, seconds))
+	if err != nil {
+		return fmt.Errorf("failed to get kubevirt client: %w", err)
+	}
+
+	return waitForObjectToDisappear(
+		migration.Name,
+		timeout,
+		virtClient.VirtualMachineInstanceMigration(migration.Namespace).Get,
+		virtClient.VirtualMachineInstanceMigration(migration.Namespace).Watch,
+	)
+}
+
+// waitForObjectToDisappear is a generic function that waits for any Kubernetes object to disappear using watch
+func waitForObjectToDisappear[T metav1.Object](
+	name string,
+	timeout time.Duration,
+	getFn func(ctx context.Context, name string, opts metav1.GetOptions) (T, error),
+	watchFn func(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error),
+) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	// Set up watch with field selector for the specific object
+	watchOpts := metav1.ListOptions{
+		FieldSelector: fmt.Sprintf("metadata.name=%s", name),
+	}
+
+	w, err := watchFn(ctx, watchOpts)
+	if err != nil {
+		return fmt.Errorf("failed to create watch for %s: %w", name, err)
+	}
+	defer w.Stop()
+
+	// Check if the object already doesn't exist (after watch is established to avoid race)
+	_, err = getFn(ctx, name, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		// Object already gone, success
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to check %s existence: %w", name, err)
+	}
+
+	for {
+		select {
+		case event, ok := <-w.ResultChan():
+			if !ok {
+				// Channel closed, check if object still exists
+				_, err := getFn(context.Background(), name, metav1.GetOptions{})
+				if errors.IsNotFound(err) {
+					return nil // Successfully disappeared
+				}
+				return fmt.Errorf("watch channel closed but %s still exists", name)
+			}
+
+			switch event.Type {
+			case watch.Deleted:
+				// Object was deleted, success!
+				return nil
+			case watch.Error:
+				// Handle watch errors
+				if statusErr, ok := event.Object.(*metav1.Status); ok {
+					const notFoundCode = 404
+					if statusErr.Code == notFoundCode {
+						// Object not found during watch setup, it's already gone
+						return nil
+					}
+				}
+				return fmt.Errorf("watch error for %s: %v", name, event.Object)
+			case watch.Added, watch.Modified, watch.Bookmark:
+				// Explicitly ignore these events, we care about deletion only
+				continue
+			}
+		case <-ctx.Done():
+			// Timeout reached
+			return fmt.Errorf("%s was expected to disappear but it did not", name)
+		}
+	}
 }

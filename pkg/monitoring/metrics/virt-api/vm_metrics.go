@@ -13,14 +13,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2023 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
 package virt_api
 
 import (
-	"github.com/machadovilaca/operator-observability/pkg/operatormetrics"
+	"github.com/rhobs/operator-observability-toolkit/pkg/operatormetrics"
 	v1 "kubevirt.io/api/core/v1"
 )
 
@@ -31,8 +31,8 @@ var (
 
 	vmsCreatedCounter = operatormetrics.NewCounterVec(
 		operatormetrics.MetricOpts{
-			Name: "kubevirt_vm_created_total",
-			Help: "Amount of VMs created, broken down by namespace, since install.",
+			Name: "kubevirt_vm_created_by_pod_total",
+			Help: "The total number of VMs created by namespace and virt-api pod, since install.",
 		},
 		[]string{"namespace"},
 	)

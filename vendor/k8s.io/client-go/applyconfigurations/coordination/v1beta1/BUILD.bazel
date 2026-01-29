@@ -4,12 +4,15 @@ go_library(
     name = "go_default_library",
     srcs = [
         "lease.go",
+        "leasecandidate.go",
+        "leasecandidatespec.go",
         "leasespec.go",
     ],
     importmap = "kubevirt.io/kubevirt/vendor/k8s.io/client-go/applyconfigurations/coordination/v1beta1",
     importpath = "k8s.io/client-go/applyconfigurations/coordination/v1beta1",
     visibility = ["//visibility:public"],
     deps = [
+        "//vendor/k8s.io/api/coordination/v1:go_default_library",
         "//vendor/k8s.io/api/coordination/v1beta1:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/apis/meta/v1:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/types:go_default_library",

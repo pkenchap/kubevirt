@@ -13,29 +13,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2018 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
 package webhooks
 
 import (
-	"fmt"
-	"runtime"
-
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
 
-	poolv1 "kubevirt.io/api/pool/v1alpha1"
-	"kubevirt.io/client-go/log"
-
-	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/components"
-
 	v1 "kubevirt.io/api/core/v1"
-	clientutil "kubevirt.io/client-go/util"
+	poolv1 "kubevirt.io/api/pool/v1beta1"
 )
-
-var Arch = runtime.GOARCH
 
 var VirtualMachineInstanceGroupVersionResource = metav1.GroupVersionResource{
 	Group:    v1.VirtualMachineInstanceGroupVersionKind.Group,
@@ -76,35 +66,7 @@ var MigrationGroupVersionResource = metav1.GroupVersionResource{
 type Informers struct {
 	VMIPresetInformer  cache.SharedIndexInformer
 	VMRestoreInformer  cache.SharedIndexInformer
+	VMBackupInformer   cache.SharedIndexInformer
 	DataSourceInformer cache.SharedIndexInformer
 	NamespaceInformer  cache.SharedIndexInformer
-}
-
-func IsKubeVirtServiceAccount(serviceAccount string) bool {
-	ns, err := clientutil.GetNamespace()
-	logger := log.DefaultLogger()
-
-	if err != nil {
-		logger.Info("Failed to get namespace. Fallback to default: 'kubevirt'")
-		ns = "kubevirt"
-	}
-
-	prefix := fmt.Sprintf("system:serviceaccount:%s", ns)
-	return serviceAccount == fmt.Sprintf("%s:%s", prefix, components.ApiServiceAccountName) ||
-		serviceAccount == fmt.Sprintf("%s:%s", prefix, components.HandlerServiceAccountName) ||
-		serviceAccount == fmt.Sprintf("%s:%s", prefix, components.ControllerServiceAccountName)
-}
-
-func IsARM64(vmiSpec *v1.VirtualMachineInstanceSpec) bool {
-	if vmiSpec.Architecture == "arm64" {
-		return true
-	}
-	return false
-}
-
-func IsPPC64(vmiSpec *v1.VirtualMachineInstanceSpec) bool {
-	if vmiSpec.Architecture == "ppc64le" {
-		return true
-	}
-	return false
 }

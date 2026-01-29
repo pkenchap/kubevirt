@@ -1,3 +1,22 @@
+/*
+ * This file is part of the KubeVirt project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * Copyright The KubeVirt Authors.
+ *
+ */
+
 package device_manager
 
 import (
@@ -6,18 +25,20 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
+
+	k8sv1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/cache"
 
 	v1 "kubevirt.io/api/core/v1"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/yaml"
-	"k8s.io/client-go/kubernetes/fake"
 
 	"kubevirt.io/kubevirt/pkg/testutils"
-	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
+	"kubevirt.io/kubevirt/pkg/virt-config/featuregate"
 )
 
 const (
@@ -34,14 +55,15 @@ var _ = Describe("Mediated Device", func() {
 	var fakePermittedHostDevices v1.PermittedHostDevices
 	var ctrl *gomock.Controller
 	var fakeSupportedTypesPath string
-	var clientTest *fake.Clientset
+	var fakeNodeStore cache.Store
 	resourceNameToTypeName := func(rawName string) string {
-		typeNameStr := strings.Replace(string(rawName), " ", "_", -1)
+		typeNameStr := strings.Replace(rawName, " ", "_", -1)
 		typeNameStr = strings.TrimSpace(typeNameStr)
 		return typeNameStr
 	}
 	BeforeEach(func() {
-		clientTest = fake.NewSimpleClientset()
+		fakeNodeInformer, _ := testutils.NewFakeInformerFor(&k8sv1.Node{})
+		fakeNodeStore = fakeNodeInformer.GetStore()
 		By("creating a temporary fake mdev directory tree")
 		// create base mdev dir instead of /sys/bus/mdev/devices
 		fakeMdevBasePath, err := os.MkdirTemp("/tmp", "mdevs")
@@ -105,7 +127,7 @@ var _ = Describe("Mediated Device", func() {
 			By("mocking PCI and MDEV functions to simulate an mdev an its parent PCI device")
 			ctrl = gomock.NewController(GinkgoT())
 			mockPCI = NewMockDeviceHandler(ctrl)
-			Handler = mockPCI
+			handler = mockPCI
 			// Force pre-defined returned values and ensure the function only get called exacly once each on 0000:00:00.0
 			mockPCI.EXPECT().GetMdevParentPCIAddr(fakeMdevUUID).Return(fakeAddress, nil).Times(1)
 			mockPCI.EXPECT().GetDeviceIOMMUGroup(mdevBasePath, fakeMdevUUID).Return(fakeIommuGroup, nil).Times(1)
@@ -179,15 +201,15 @@ var _ = Describe("Mediated Device", func() {
 					Phase: v1.KubeVirtPhaseDeploying,
 				},
 			}
-			fakeClusterConfig, _, kvInformer := testutils.NewFakeClusterConfigUsingKV(kv)
+			fakeClusterConfig, _, kvStore := testutils.NewFakeClusterConfigUsingKV(kv)
 
 			By("creating an empty device controller")
 			var noDevices []Device
-			deviceController := NewDeviceController("master", 100, "rw", noDevices, fakeClusterConfig, clientTest.CoreV1())
+			deviceController := NewDeviceController("master", 100, "rw", noDevices, fakeClusterConfig, fakeNodeStore)
 
 			By("adding a host device to the cluster config")
 			kvConfig := kv.DeepCopy()
-			kvConfig.Spec.Configuration.DeveloperConfiguration.FeatureGates = []string{virtconfig.HostDevicesGate}
+			kvConfig.Spec.Configuration.DeveloperConfiguration.FeatureGates = []string{featuregate.HostDevicesGate}
 			kvConfig.Spec.Configuration.PermittedHostDevices = &v1.PermittedHostDevices{
 				MediatedDevices: []v1.MediatedHostDevice{
 					{
@@ -196,7 +218,7 @@ var _ = Describe("Mediated Device", func() {
 					},
 				},
 			}
-			testutils.UpdateFakeKubeVirtClusterConfig(kvInformer, kvConfig)
+			testutils.UpdateFakeKubeVirtClusterConfig(kvStore, kvConfig)
 			permittedDevices := fakeClusterConfig.GetPermittedHostDevices()
 			Expect(permittedDevices).ToNot(BeNil(), "something went wrong while parsing the configmap(s)")
 			Expect(permittedDevices.MediatedDevices).To(HaveLen(1), "the fake device was not found")
@@ -215,7 +237,7 @@ var _ = Describe("Mediated Device", func() {
 
 			By("deletting the device from the configmap")
 			kvConfig.Spec.Configuration.PermittedHostDevices = &v1.PermittedHostDevices{}
-			testutils.UpdateFakeKubeVirtClusterConfig(kvInformer, kvConfig)
+			testutils.UpdateFakeKubeVirtClusterConfig(kvStore, kvConfig)
 			permittedDevices = fakeClusterConfig.GetPermittedHostDevices()
 			Expect(permittedDevices).ToNot(BeNil(), "something went wrong while parsing the configmap(s)")
 			Expect(permittedDevices.MediatedDevices).To(BeEmpty(), "the fake device was not deleted")

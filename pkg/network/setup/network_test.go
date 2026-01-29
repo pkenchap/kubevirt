@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2018 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -24,7 +24,8 @@ import (
 	. "github.com/onsi/gomega"
 
 	v1 "kubevirt.io/api/core/v1"
-	api2 "kubevirt.io/client-go/api"
+
+	"kubevirt.io/kubevirt/pkg/libvmi"
 
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 )
@@ -32,38 +33,29 @@ import (
 var _ = Describe("VMNetworkConfigurator", func() {
 	var baseCacheCreator tempCacheCreator
 
-	const launcherPID = 0
-
 	AfterEach(func() {
 		Expect(baseCacheCreator.New("").Delete()).To(Succeed())
 	})
 	Context("interface configuration", func() {
-
-		It("when vm has no network source should propagate errors when phase2 is called", func() {
-			vmi := newVMIBridgeInterface("testnamespace", "testVmName")
-			vmi.Spec.Networks = []v1.Network{{
-				Name:          "default",
-				NetworkSource: v1.NetworkSource{},
-			}}
-			vmNetworkConfigurator := NewVMNetworkConfigurator(vmi, &baseCacheCreator)
-			var domain *api.Domain
-			err := vmNetworkConfigurator.SetupPodNetworkPhase2(domain, vmi.Spec.Networks)
-			Expect(err).To(MatchError("Network not implemented"))
-		})
-
 		Context("when calling []podNIC factory functions", func() {
 			It("should not process SR-IOV networks", func() {
-				vmi := api2.NewMinimalVMIWithNS("testnamespace", "testVmName")
 				const networkName = "sriov"
-				vmi.Spec.Networks = []v1.Network{{
-					Name: networkName,
-					NetworkSource: v1.NetworkSource{
-						Multus: &v1.MultusNetwork{NetworkName: "sriov-nad"},
-					},
-				}}
-				vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{{
-					Name: networkName, InterfaceBindingMethod: v1.InterfaceBindingMethod{SRIOV: &v1.InterfaceSRIOV{}},
-				}}
+				vmi := libvmi.New(
+					libvmi.WithNamespace("testnamespace"),
+					libvmi.WithName("testVmName"),
+					libvmi.WithNetwork(&v1.Network{
+						Name: networkName,
+						NetworkSource: v1.NetworkSource{
+							Multus: &v1.MultusNetwork{NetworkName: "sriov-nad"},
+						},
+					}),
+					libvmi.WithInterface(v1.Interface{
+						Name: networkName,
+						InterfaceBindingMethod: v1.InterfaceBindingMethod{
+							SRIOV: &v1.InterfaceSRIOV{},
+						},
+					}),
+				)
 
 				vmNetworkConfigurator := NewVMNetworkConfigurator(vmi, nil)
 

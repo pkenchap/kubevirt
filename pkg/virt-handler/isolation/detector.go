@@ -1,5 +1,5 @@
 /*
- * This file is part of the kubevirt project
+ * This file is part of the KubeVirt project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2021 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -36,6 +36,7 @@ import (
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
 
+	"kubevirt.io/kubevirt/pkg/safepath"
 	"kubevirt.io/kubevirt/pkg/util"
 	"kubevirt.io/kubevirt/pkg/virt-controller/services"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
@@ -48,7 +49,7 @@ type PodIsolationDetector interface {
 	// It returns an IsolationResult containing all isolation information
 	Detect(vm *v1.VirtualMachineInstance) (IsolationResult, error)
 
-	DetectForSocket(vm *v1.VirtualMachineInstance, socket string) (IsolationResult, error)
+	DetectForSocket(socket string) (IsolationResult, error)
 
 	// Adjust system resources to run the passed VM
 	AdjustResources(vm *v1.VirtualMachineInstance, additionalOverheadRatio *string) error
@@ -57,51 +58,46 @@ type PodIsolationDetector interface {
 const isolationDialTimeout = 5
 
 type socketBasedIsolationDetector struct {
-	socketDir string
 }
 
 // NewSocketBasedIsolationDetector takes socketDir and creates a socket based IsolationDetector
 // It returns a PodIsolationDetector which detects pid, cgroups and namespaces of the socket owner.
-func NewSocketBasedIsolationDetector(socketDir string) PodIsolationDetector {
-	return &socketBasedIsolationDetector{
-		socketDir: socketDir,
-	}
+func NewSocketBasedIsolationDetector() PodIsolationDetector {
+	return &socketBasedIsolationDetector{}
 }
 
 func (s *socketBasedIsolationDetector) Detect(vm *v1.VirtualMachineInstance) (IsolationResult, error) {
 	// Look up the socket of the virt-launcher Pod which was created for that VM, and extract the PID from it
-	socket, err := cmdclient.FindSocketOnHost(vm)
+	socket, err := cmdclient.FindSocket(vm)
 	if err != nil {
 		return nil, err
 	}
 
-	return s.DetectForSocket(vm, socket)
+	return s.DetectForSocket(socket)
 }
 
-func (s *socketBasedIsolationDetector) DetectForSocket(vm *v1.VirtualMachineInstance, socket string) (IsolationResult, error) {
+func (s *socketBasedIsolationDetector) DetectForSocket(socket string) (IsolationResult, error) {
 	pid, err := s.getPid(socket)
 	if err != nil {
-		log.Log.Object(vm).Reason(err).Errorf("Could not get owner Pid of socket %s", socket)
-		return nil, err
+		return nil, fmt.Errorf("Could not get owner Pid of socket %s: %w", socket, err)
 	}
 
 	ppid, err := getPPid(pid)
 	if err != nil {
-		log.Log.Object(vm).Reason(err).Errorf("Could not get owner PPid of socket %s", socket)
-		return nil, err
+		return nil, fmt.Errorf("Could not get owner PPid of socket %s: %w", socket, err)
 	}
 
 	return NewIsolationResult(pid, ppid), nil
 }
 
-func (s *socketBasedIsolationDetector) AdjustResources(vm *v1.VirtualMachineInstance, additionalOverheadRatio *string) error {
+func (s *socketBasedIsolationDetector) AdjustResources(vmi *v1.VirtualMachineInstance, additionalOverheadRatio *string) error {
 	// only VFIO attached or with lock guest memory domains require MEMLOCK adjustment
-	if !util.IsVFIOVMI(vm) && !vm.IsRealtimeEnabled() && !util.IsSEVVMI(vm) {
+	if !util.IsVFIOVMI(vmi) && !vmi.IsRealtimeEnabled() && !util.IsSEVVMI(vmi) {
 		return nil
 	}
 
 	// bump memlock ulimit for virtqemud
-	res, err := s.Detect(vm)
+	res, err := s.Detect(vmi)
 	if err != nil {
 		return err
 	}
@@ -124,10 +120,16 @@ func (s *socketBasedIsolationDetector) AdjustResources(vm *v1.VirtualMachineInst
 		}
 
 		// make the best estimate for memory required by libvirt
-		memlockSize := services.GetMemoryOverhead(vm, runtime.GOARCH, additionalOverheadRatio)
+		memlockSize := services.GetMemoryOverhead(vmi, runtime.GOARCH, additionalOverheadRatio)
 		// Add base memory requested for the VM
-		vmiMemoryReq := vm.Spec.Domain.Resources.Requests.Memory()
-		memlockSize.Add(*resource.NewScaledQuantity(vmiMemoryReq.ScaledValue(resource.Kilo), resource.Kilo))
+		var vmiBaseMemory *resource.Quantity
+		if vmi.Spec.Domain.Memory != nil && vmi.Spec.Domain.Memory.Guest != nil {
+			vmiBaseMemory = vmi.Spec.Domain.Memory.Guest
+		} else {
+			vmiBaseMemory = vmi.Spec.Domain.Resources.Requests.Memory()
+		}
+
+		memlockSize.Add(*resource.NewScaledQuantity(vmiBaseMemory.ScaledValue(resource.Kilo), resource.Kilo))
 
 		err = setProcessMemoryLockRLimit(process.Pid(), memlockSize.Value())
 		if err != nil {
@@ -159,9 +161,19 @@ func AdjustQemuProcessMemoryLimits(podIsoDetector PodIsolationDetector, vmi *v1.
 	qemuProcessID := qemuProcess.Pid()
 	// make the best estimate for memory required by libvirt
 	memlockSize := services.GetMemoryOverhead(vmi, runtime.GOARCH, additionalOverheadRatio)
-	// Add base memory requested for the VM
-	vmiMemoryReq := vmi.Spec.Domain.Resources.Requests.Memory()
-	memlockSize.Add(*resource.NewScaledQuantity(vmiMemoryReq.ScaledValue(resource.Kilo), resource.Kilo))
+	// Add max memory assigned to the VM
+	var vmiBaseMemory *resource.Quantity
+
+	switch {
+	case vmi.Spec.Domain.Memory != nil && vmi.Spec.Domain.Memory.MaxGuest != nil:
+		vmiBaseMemory = vmi.Spec.Domain.Memory.MaxGuest
+	case vmi.Spec.Domain.Resources.Requests.Memory() != nil:
+		vmiBaseMemory = vmi.Spec.Domain.Resources.Requests.Memory()
+	case vmi.Spec.Domain.Memory != nil:
+		vmiBaseMemory = vmi.Spec.Domain.Memory.Guest
+	}
+
+	memlockSize.Add(*resource.NewScaledQuantity(vmiBaseMemory.ScaledValue(resource.Kilo), resource.Kilo))
 
 	if err := setProcessMemoryLockRLimit(qemuProcessID, memlockSize.Value()); err != nil {
 		return fmt.Errorf("failed to set process %d memlock rlimit to %d: %v", qemuProcessID, memlockSize.Value(), err)
@@ -208,7 +220,13 @@ func setProcessMemoryLockRLimit(pid int, size int64) error {
 }
 
 func (s *socketBasedIsolationDetector) getPid(socket string) (int, error) {
-	sock, err := net.DialTimeout("unix", socket, time.Duration(isolationDialTimeout)*time.Second)
+	safeSocket, err := safepath.NewFileNoFollow(socket)
+	if err != nil {
+		return -1, err
+	}
+	defer safeSocket.Close()
+
+	sock, err := net.DialTimeout("unix", safeSocket.SafePath(), time.Duration(isolationDialTimeout)*time.Second)
 	if err != nil {
 		return -1, err
 	}
@@ -238,6 +256,8 @@ func getPPid(pid int) (int, error) {
 	if err != nil {
 		return -1, err
 	}
-
+	if process == nil {
+		return -1, fmt.Errorf("failed to find process with pid: %d", pid)
+	}
 	return process.PPid(), nil
 }

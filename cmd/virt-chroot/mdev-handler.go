@@ -1,13 +1,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
-	utilwait "k8s.io/apimachinery/pkg/util/wait"
+
+	virtwait "kubevirt.io/kubevirt/pkg/apimachinery/wait"
 )
 
 var mdevBasePath string = "/sys/bus/mdev/devices"
@@ -19,7 +21,7 @@ func createMDEVType(mdevType string, parentID string, uid string) error {
 	// wait for interface to become available
 	if !isInterfaceAvailable(path) {
 		msg := fmt.Sprintf("failed to create mdev type %s, interface is not available %s", mdevType, path)
-		errMsg := fmt.Errorf(msg)
+		errMsg := fmt.Errorf("%s", msg)
 		fmt.Println(msg)
 		return errMsg
 	}
@@ -44,7 +46,7 @@ func removeMDEVType(mdevUUID string) error {
 	// wait for interface to become available
 	if !isInterfaceAvailable(removePath) {
 		msg := fmt.Sprintf("failed to remove mdev %s, interface is not available %s", mdevUUID, removePath)
-		errMsg := fmt.Errorf(msg)
+		errMsg := fmt.Errorf("%s", msg)
 		fmt.Println(msg)
 		return errMsg
 	}
@@ -90,10 +92,7 @@ func NewRemoveMDEVCommand() *cobra.Command {
 }
 
 func isInterfaceAvailable(interfacePath string) bool {
-	connectionInterval := 1 * time.Second
-	connectionTimeout := 5 * time.Second
-
-	err := utilwait.PollImmediate(connectionInterval, connectionTimeout, func() (done bool, err error) {
+	err := virtwait.PollImmediately(1*time.Second, 5*time.Second, func(_ context.Context) (done bool, err error) {
 		_, err = os.Stat(interfacePath)
 		if err != nil {
 			return false, nil

@@ -30,10 +30,11 @@ import (
 )
 
 type CapsHostCPUTopology struct {
-	Sockets int `xml:"sockets,attr"`
-	Dies    int `xml:"dies,attr,omitempty"`
-	Cores   int `xml:"cores,attr"`
-	Threads int `xml:"threads,attr"`
+	Sockets  int `xml:"sockets,attr"`
+	Dies     int `xml:"dies,attr,omitempty"`
+	Clusters int `xml:"clusters,attr,omitempty"`
+	Cores    int `xml:"cores,attr"`
+	Threads  int `xml:"threads,attr"`
 }
 
 type CapsHostCPUFeatureFlag struct {
@@ -109,11 +110,12 @@ type CapsHostNUMAPageInfo struct {
 }
 
 type CapsHostNUMACPU struct {
-	ID       int    `xml:"id,attr"`
-	SocketID *int   `xml:"socket_id,attr"`
-	DieID    *int   `xml:"die_id,attr"`
-	CoreID   *int   `xml:"core_id,attr"`
-	Siblings string `xml:"siblings,attr,omitempty"`
+	ID        int    `xml:"id,attr"`
+	SocketID  *int   `xml:"socket_id,attr"`
+	DieID     *int   `xml:"die_id,attr"`
+	ClusterID *int   `xml:"cluster_id,attr"`
+	CoreID    *int   `xml:"core_id,attr"`
+	Siblings  string `xml:"siblings,attr,omitempty"`
 }
 
 type CapsHostNUMASibling struct {
@@ -296,9 +298,10 @@ type CapsHostMemoryBandwidthMonitorFeature struct {
 }
 
 type CapsGuestMachine struct {
-	Name      string `xml:",chardata"`
-	MaxCPUs   int    `xml:"maxCpus,attr,omitempty"`
-	Canonical string `xml:"canonical,attr,omitempty"`
+	Name       string `xml:",chardata"`
+	MaxCPUs    int    `xml:"maxCpus,attr,omitempty"`
+	Deprecated string `xml:"deprecated,attr,omitempty"`
+	Canonical  string `xml:"canonical,attr,omitempty"`
 }
 
 type CapsGuestDomain struct {

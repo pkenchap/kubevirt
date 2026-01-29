@@ -23,22 +23,15 @@ import (
 	"fmt"
 	"log"
 
-	vishnetlink "github.com/vishvananda/netlink"
-
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	type100 "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/plugins/pkg/ns"
 
-	"kubevirt.io/kubevirt/cmd/cniplugins/passt-binding/pkg/plugin/netlink"
 	"kubevirt.io/kubevirt/cmd/cniplugins/passt-binding/pkg/plugin/sysctl"
 )
 
-const (
-	primaryPodInterfaceName = "eth0"
-
-	virtLauncherUserID = 107
-)
+const virtLauncherUserID = 107
 
 func CmdAdd(args *skel.CmdArgs) error {
 	netns, err := ns.GetNS(args.Netns)
@@ -47,7 +40,7 @@ func CmdAdd(args *skel.CmdArgs) error {
 	}
 	defer netns.Close()
 
-	c := NewCmd(netns, sysctl.New(), netlink.New())
+	c := NewCmd(netns, sysctl.New())
 	result, err := c.CmdAddResult(args)
 	if err != nil {
 		return err
@@ -68,18 +61,13 @@ type sysctlAdapter interface {
 	IPv4SetPingGroupRange(int, int) error
 }
 
-type netlinkAdapter interface {
-	ReadLink(string) (vishnetlink.Link, error)
-}
-
 type cmd struct {
-	netns          ns.NetNS
-	sysctlAdapter  sysctlAdapter
-	netlinkAdapter netlinkAdapter
+	netns         ns.NetNS
+	sysctlAdapter sysctlAdapter
 }
 
-func NewCmd(netns ns.NetNS, sysctlAdapter sysctlAdapter, netlinkAdapter netlinkAdapter) *cmd {
-	return &cmd{netns: netns, sysctlAdapter: sysctlAdapter, netlinkAdapter: netlinkAdapter}
+func NewCmd(netns ns.NetNS, sysctlAdapter sysctlAdapter) *cmd {
+	return &cmd{netns: netns, sysctlAdapter: sysctlAdapter}
 }
 
 func (c *cmd) CmdAddResult(args *skel.CmdArgs) (types.Result, error) {
@@ -91,26 +79,15 @@ func (c *cmd) CmdAddResult(args *skel.CmdArgs) (types.Result, error) {
 	result := type100.Result{CNIVersion: cniVersion}
 
 	err = c.netns.Do(func(_ ns.NetNS) error {
-		if err := c.sysctlAdapter.IPv4SetUnprivilegedPortStart(0); err != nil {
-			return err
+		if sysctlErr := c.sysctlAdapter.IPv4SetUnprivilegedPortStart(0); sysctlErr != nil {
+			return sysctlErr
 		}
-		if err := c.sysctlAdapter.IPv4SetPingGroupRange(virtLauncherUserID, virtLauncherUserID); err != nil {
-			return err
+		if sysctlErr := c.sysctlAdapter.IPv4SetPingGroupRange(virtLauncherUserID, virtLauncherUserID); sysctlErr != nil {
+			return sysctlErr
 		}
 
 		netname := netConf.Args.Cni.LogicNetworkName
 		log.Printf("setup for logical network %s completed successfully", netname)
-
-		podLink, lerr := c.netlinkAdapter.ReadLink(primaryPodInterfaceName)
-		if lerr != nil {
-			return lerr
-		}
-
-		result.Interfaces = append(result.Interfaces, &type100.Interface{
-			Name:    podLink.Attrs().Name,
-			Mac:     podLink.Attrs().HardwareAddr.String(),
-			Sandbox: c.netns.Path(),
-		})
 		return nil
 	})
 	if err != nil {

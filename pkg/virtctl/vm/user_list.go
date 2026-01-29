@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2023 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -25,32 +25,29 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"k8s.io/client-go/tools/clientcmd"
 
+	"kubevirt.io/kubevirt/pkg/virtctl/clientconfig"
 	"kubevirt.io/kubevirt/pkg/virtctl/templates"
 )
 
 const COMMAND_USERLIST = "userlist"
 
-func NewUserListCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
+func NewUserListCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "userlist (VMI)",
 		Short:   "Return full list of logged in users on the guest machine.",
 		Example: usage(COMMAND_USERLIST),
-		Args:    templates.ExactArgs("userlist", 1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			c := Command{clientConfig: clientConfig}
-			return c.userListRun(args)
-		},
+		Args:    cobra.ExactArgs(1),
+		RunE:    userListRun,
 	}
 	cmd.SetUsageTemplate(templates.UsageTemplate())
 	return cmd
 }
 
-func (o *Command) userListRun(args []string) error {
+func userListRun(cmd *cobra.Command, args []string) error {
 	vmiName := args[0]
 
-	virtClient, namespace, err := GetNamespaceAndClient(o.clientConfig)
+	virtClient, namespace, _, err := clientconfig.ClientAndNamespaceFromContext(cmd.Context())
 	if err != nil {
 		return err
 	}

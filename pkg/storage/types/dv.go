@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2021 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -21,7 +21,9 @@ package types
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"maps"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -82,9 +84,14 @@ func GetResolvedCloneSource(ctx context.Context, client kubecli.KubevirtClient, 
 			return nil, err
 		}
 
+		resolvedSource := ds.Spec.Source.DeepCopy()
+		if ds.Spec.Source.DataSource != nil {
+			resolvedSource = ds.Status.Source.DeepCopy()
+		}
+
 		source = &cdiv1.DataVolumeSource{
-			PVC:      ds.Spec.Source.PVC,
-			Snapshot: ds.Spec.Source.Snapshot,
+			PVC:      resolvedSource.PVC,
+			Snapshot: resolvedSource.Snapshot,
 		}
 	}
 
@@ -111,18 +118,15 @@ func GenerateDataVolumeFromTemplate(clientset kubecli.KubevirtClient, dataVolume
 	newDataVolume := &cdiv1.DataVolume{}
 	newDataVolume.Spec = *dataVolumeTemplate.Spec.DeepCopy()
 	newDataVolume.ObjectMeta = *dataVolumeTemplate.ObjectMeta.DeepCopy()
-
-	labels := map[string]string{}
-	for k, v := range dataVolumeTemplate.Labels {
-		labels[k] = v
+	newDataVolume.ObjectMeta.Labels = maps.Clone(dataVolumeTemplate.Labels)
+	if newDataVolume.ObjectMeta.Labels == nil {
+		newDataVolume.ObjectMeta.Labels = make(map[string]string)
 	}
-	newDataVolume.ObjectMeta.Labels = labels
-
-	annotations := map[string]string{}
-	for k, v := range dataVolumeTemplate.Annotations {
-		annotations[k] = v
+	newDataVolume.ObjectMeta.Annotations = maps.Clone(dataVolumeTemplate.Annotations)
+	if newDataVolume.ObjectMeta.Annotations == nil {
+		newDataVolume.ObjectMeta.Annotations = make(map[string]string, 1)
 	}
-	newDataVolume.ObjectMeta.Annotations = annotations
+	newDataVolume.ObjectMeta.Annotations[allowClaimAdoptionAnnotation] = "true"
 
 	if newDataVolume.Spec.PriorityClassName == "" && priorityClassName != "" {
 		newDataVolume.Spec.PriorityClassName = priorityClassName
@@ -145,9 +149,9 @@ func GenerateDataVolumeFromTemplate(clientset kubecli.KubevirtClient, dataVolume
 	return newDataVolume, nil
 }
 
-func GetDataVolumeFromCache(namespace, name string, dataVolumeInformer cache.SharedInformer) (*cdiv1.DataVolume, error) {
+func GetDataVolumeFromCache(namespace, name string, dataVolumeStore cache.Store) (*cdiv1.DataVolume, error) {
 	key := controller.NamespacedKey(namespace, name)
-	obj, exists, err := dataVolumeInformer.GetStore().GetByKey(key)
+	obj, exists, err := dataVolumeStore.GetByKey(key)
 
 	if err != nil {
 		return nil, fmt.Errorf("error fetching DataVolume %s: %v", key, err)
@@ -161,16 +165,16 @@ func GetDataVolumeFromCache(namespace, name string, dataVolumeInformer cache.Sha
 		return nil, fmt.Errorf("error converting object to DataVolume: object is of type %T", obj)
 	}
 
-	return dv, nil
+	return dv.DeepCopy(), nil
 }
 
-func HasDataVolumeErrors(namespace string, volumes []virtv1.Volume, dataVolumeInformer cache.SharedInformer) error {
+func HasDataVolumeErrors(namespace string, volumes []virtv1.Volume, dataVolumeStore cache.Store) error {
 	for _, volume := range volumes {
 		if volume.DataVolume == nil {
 			continue
 		}
 
-		dv, err := GetDataVolumeFromCache(namespace, volume.DataVolume.Name, dataVolumeInformer)
+		dv, err := GetDataVolumeFromCache(namespace, volume.DataVolume.Name, dataVolumeStore)
 		if err != nil {
 			log.Log.Errorf("Error fetching DataVolume %s: %v", volume.DataVolume.Name, err)
 			continue
@@ -186,7 +190,7 @@ func HasDataVolumeErrors(namespace string, volumes []virtv1.Volume, dataVolumeIn
 		dvRunningCond := NewDataVolumeConditionManager().GetCondition(dv, cdiv1.DataVolumeRunning)
 		if dvRunningCond != nil &&
 			dvRunningCond.Status == v1.ConditionFalse &&
-			dvRunningCond.Reason == "Error" {
+			(dvRunningCond.Reason == "Error" || dvRunningCond.Reason == "ImagePullFailed") {
 			return fmt.Errorf("DataVolume %s importer has stopped running due to an error: %v",
 				volume.DataVolume.Name, dvRunningCond.Message)
 		}
@@ -195,13 +199,23 @@ func HasDataVolumeErrors(namespace string, volumes []virtv1.Volume, dataVolumeIn
 	return nil
 }
 
-func HasDataVolumeProvisioning(namespace string, volumes []virtv1.Volume, dataVolumeInformer cache.SharedInformer) bool {
+// FIXME: Bound mistakenly reports ErrExceededQuota with ConditionUnknown status
+func HasDataVolumeExceededQuotaError(dv *cdiv1.DataVolume) error {
+	dvBoundCond := NewDataVolumeConditionManager().GetCondition(dv, cdiv1.DataVolumeBound)
+	if dvBoundCond != nil && dvBoundCond.Status != v1.ConditionTrue && dvBoundCond.Reason == "ErrExceededQuota" {
+		return fmt.Errorf("DataVolume %s importer is not running due to an error: %v", dv.Name, dvBoundCond.Message)
+	}
+
+	return nil
+}
+
+func HasDataVolumeProvisioning(namespace string, volumes []virtv1.Volume, dataVolumeStore cache.Store) bool {
 	for _, volume := range volumes {
 		if volume.DataVolume == nil {
 			continue
 		}
 
-		dv, err := GetDataVolumeFromCache(namespace, volume.DataVolume.Name, dataVolumeInformer)
+		dv, err := GetDataVolumeFromCache(namespace, volume.DataVolume.Name, dataVolumeStore)
 		if err != nil {
 			log.Log.Errorf("Error fetching DataVolume %s while determining virtual machine status: %v", volume.DataVolume.Name, err)
 			continue
@@ -221,12 +235,12 @@ func HasDataVolumeProvisioning(namespace string, volumes []virtv1.Volume, dataVo
 	return false
 }
 
-func ListDataVolumesFromTemplates(namespace string, dvTemplates []virtv1.DataVolumeTemplateSpec, dataVolumeInformer cache.SharedInformer) ([]*cdiv1.DataVolume, error) {
+func ListDataVolumesFromTemplates(namespace string, dvTemplates []virtv1.DataVolumeTemplateSpec, dataVolumeStore cache.Store) ([]*cdiv1.DataVolume, error) {
 	dataVolumes := []*cdiv1.DataVolume{}
 
 	for _, template := range dvTemplates {
 		// get DataVolume from cache for each templated dataVolume
-		dv, err := GetDataVolumeFromCache(namespace, template.Name, dataVolumeInformer)
+		dv, err := GetDataVolumeFromCache(namespace, template.Name, dataVolumeStore)
 		if err != nil {
 			return dataVolumes, err
 		} else if dv == nil {
@@ -238,16 +252,16 @@ func ListDataVolumesFromTemplates(namespace string, dvTemplates []virtv1.DataVol
 	return dataVolumes, nil
 }
 
-func ListDataVolumesFromVolumes(namespace string, volumes []virtv1.Volume, dataVolumeInformer cache.SharedInformer, pvcInformer cache.SharedInformer) ([]*cdiv1.DataVolume, error) {
+func ListDataVolumesFromVolumes(namespace string, volumes []virtv1.Volume, dataVolumeStore cache.Store, pvcStore cache.Store) ([]*cdiv1.DataVolume, error) {
 	dataVolumes := []*cdiv1.DataVolume{}
 
 	for _, volume := range volumes {
-		dataVolumeName := getDataVolumeName(namespace, volume, pvcInformer)
+		dataVolumeName := getDataVolumeName(namespace, volume, pvcStore)
 		if dataVolumeName == nil {
 			continue
 		}
 
-		dv, err := GetDataVolumeFromCache(namespace, *dataVolumeName, dataVolumeInformer)
+		dv, err := GetDataVolumeFromCache(namespace, *dataVolumeName, dataVolumeStore)
 		if err != nil {
 			return dataVolumes, err
 		} else if dv == nil {
@@ -260,9 +274,9 @@ func ListDataVolumesFromVolumes(namespace string, volumes []virtv1.Volume, dataV
 	return dataVolumes, nil
 }
 
-func getDataVolumeName(namespace string, volume virtv1.Volume, pvcInformer cache.SharedInformer) *string {
+func getDataVolumeName(namespace string, volume virtv1.Volume, pvcStore cache.Store) *string {
 	if volume.VolumeSource.PersistentVolumeClaim != nil {
-		pvcInterface, pvcExists, _ := pvcInformer.GetStore().
+		pvcInterface, pvcExists, _ := pvcStore.
 			GetByKey(fmt.Sprintf("%s/%s", namespace, volume.VolumeSource.PersistentVolumeClaim.ClaimName))
 		if pvcExists {
 			pvc := pvcInterface.(*v1.PersistentVolumeClaim)
@@ -277,14 +291,14 @@ func getDataVolumeName(namespace string, volume virtv1.Volume, pvcInformer cache
 	return nil
 }
 
-func DataVolumeByNameFunc(dataVolumeInformer cache.SharedInformer, dataVolumes []*cdiv1.DataVolume) func(name string, namespace string) (*cdiv1.DataVolume, error) {
+func DataVolumeByNameFunc(dataVolumeStore cache.Store, dataVolumes []*cdiv1.DataVolume) func(name string, namespace string) (*cdiv1.DataVolume, error) {
 	return func(name, namespace string) (*cdiv1.DataVolume, error) {
 		for _, dataVolume := range dataVolumes {
 			if dataVolume.Name == name && dataVolume.Namespace == namespace {
 				return dataVolume, nil
 			}
 		}
-		dv, exists, _ := dataVolumeInformer.GetStore().GetByKey(fmt.Sprintf("%s/%s", namespace, name))
+		dv, exists, _ := dataVolumeStore.GetByKey(fmt.Sprintf("%s/%s", namespace, name))
 		if !exists {
 			return nil, fmt.Errorf("unable to find datavolume %s/%s", namespace, name)
 		}
@@ -323,4 +337,26 @@ func (d *DataVolumeConditionManager) HasConditionWithStatus(dv *cdiv1.DataVolume
 func (d *DataVolumeConditionManager) HasConditionWithStatusAndReason(dv *cdiv1.DataVolume, cond cdiv1.DataVolumeConditionType, status v1.ConditionStatus, reason string) bool {
 	c := d.GetCondition(dv, cond)
 	return c != nil && c.Status == status && c.Reason == reason
+}
+
+var ErrDVNotFound = errors.New("Datavolume not found")
+
+type DVNotFoundError struct {
+	DVName string
+	Err    error
+}
+
+func NewDVNotFoundError(name string) error {
+	return &DVNotFoundError{DVName: name, Err: ErrDVNotFound}
+}
+
+func (e *DVNotFoundError) Error() string {
+	if e.DVName == "" {
+		return "datavolume not defined"
+	}
+	return fmt.Sprintf("the datavolume %s doesn't exist", e.DVName)
+}
+
+func (e *DVNotFoundError) Unwrap() error {
+	return e.Err
 }

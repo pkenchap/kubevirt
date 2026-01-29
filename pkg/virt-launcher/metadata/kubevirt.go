@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2022 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -37,6 +37,9 @@ func LoadKubevirtMetadata(metadataCache *Cache) api.KubeVirtMetadata {
 	}
 	if value, exists := metadataCache.Migration.Load(); exists {
 		kubevirtMetadata.Migration = &value
+	}
+	if value, exists := metadataCache.Backup.Load(); exists {
+		kubevirtMetadata.Backup = &value
 	}
 	if value, exists := metadataCache.AccessCredential.Load(); exists {
 		kubevirtMetadata.AccessCredential = &value

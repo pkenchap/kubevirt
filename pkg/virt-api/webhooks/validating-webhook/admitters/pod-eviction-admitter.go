@@ -1,49 +1,141 @@
+/*
+ * This file is part of the KubeVirt project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * Copyright The KubeVirt Authors.
+ *
+ */
+
 package admitters
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 
-	"k8s.io/apimachinery/pkg/types"
-
 	admissionv1 "k8s.io/api/admission/v1"
+	k8scorev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 
 	virtv1 "kubevirt.io/api/core/v1"
-	"kubevirt.io/client-go/kubecli"
+	kubevirt "kubevirt.io/client-go/kubevirt"
 
+	"kubevirt.io/kubevirt/pkg/apimachinery/patch"
 	"kubevirt.io/kubevirt/pkg/util/migrations"
 	validating_webhooks "kubevirt.io/kubevirt/pkg/util/webhooks/validating-webhooks"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 )
 
+const (
+	// requestedByAnnotation is an annotation set by the descheduler on the eviction requests whose value
+	// will be the component the eviction request is originated from.
+	requestedByAnnotation = "requested-by"
+	// requestedByDeschedulerValue is the value of the `requested-by` annotation set by the descheduler on the eviction requests
+	// Ref: https://github.com/kubernetes-sigs/descheduler/pull/1753
+	requestedByDeschedulerValue = "sigs.k8s.io/descheduler"
+)
+
 type PodEvictionAdmitter struct {
-	ClusterConfig *virtconfig.ClusterConfig
-	VirtClient    kubecli.KubevirtClient
+	clusterConfig *virtconfig.ClusterConfig
+	kubeClient    kubernetes.Interface
+	virtClient    kubevirt.Interface
 }
 
-func (admitter *PodEvictionAdmitter) Admit(ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
-	launcher, err := admitter.VirtClient.CoreV1().Pods(ar.Request.Namespace).Get(context.Background(), ar.Request.Name, metav1.GetOptions{})
+func NewPodEvictionAdmitter(clusterConfig *virtconfig.ClusterConfig, kubeClient kubernetes.Interface, virtClient kubevirt.Interface) *PodEvictionAdmitter {
+	return &PodEvictionAdmitter{
+		clusterConfig: clusterConfig,
+		kubeClient:    kubeClient,
+		virtClient:    virtClient,
+	}
+}
+
+func isDryRun(ar *admissionv1.AdmissionReview, evictionObject *policyv1.Eviction) bool {
+	dryRun := ar.Request.DryRun != nil && *ar.Request.DryRun == true
+
+	if !dryRun {
+		if evictionObject.DeleteOptions != nil && len(evictionObject.DeleteOptions.DryRun) > 0 {
+			dryRun = evictionObject.DeleteOptions.DryRun[0] == metav1.DryRunAll
+		}
+	}
+	return dryRun
+}
+
+func isDeschedulerEviction(evictionObject *policyv1.Eviction) bool {
+	if value, exists := evictionObject.GetAnnotations()[requestedByAnnotation]; exists && value == requestedByDeschedulerValue {
+		return true
+	}
+	return false
+}
+
+func (admitter *PodEvictionAdmitter) Admit(ctx context.Context, ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
+	pod, err := admitter.kubeClient.CoreV1().Pods(ar.Request.Namespace).Get(ctx, ar.Request.Name, metav1.GetOptions{})
 	if err != nil {
 		return validating_webhooks.NewPassingAdmissionResponse()
 	}
+	switch {
+	case isHotplugPod(pod):
+		return admitter.admitHotplugPod(ctx, pod)
+	case isVirtLauncher(pod) && !isCompleted(pod):
+		return admitter.admitLauncherPod(ctx, ar, pod)
+	}
+	return validating_webhooks.NewPassingAdmissionResponse()
+}
 
-	if value, exists := launcher.GetLabels()[virtv1.AppLabel]; !exists || value != "virt-launcher" {
+func (admitter *PodEvictionAdmitter) admitHotplugPod(ctx context.Context, pod *k8scorev1.Pod) *admissionv1.AdmissionResponse {
+	ownerPod, err := admitter.kubeClient.CoreV1().Pods(pod.Namespace).Get(ctx, pod.OwnerReferences[0].Name, metav1.GetOptions{})
+	if err != nil {
+		if !k8serrors.IsNotFound(err) {
+			return denied(fmt.Sprintf("failed getting owner for hotplug pod: %v", err))
+		}
 		return validating_webhooks.NewPassingAdmissionResponse()
 	}
-
-	domainName, exists := launcher.GetAnnotations()[virtv1.DomainAnnotation]
+	if !isVirtLauncher(ownerPod) || isCompleted(ownerPod) {
+		return validating_webhooks.NewPassingAdmissionResponse()
+	}
+	vmiName, exists := ownerPod.GetAnnotations()[virtv1.DomainAnnotation]
 	if !exists {
 		return validating_webhooks.NewPassingAdmissionResponse()
 	}
 
-	vmi, err := admitter.VirtClient.VirtualMachineInstance(ar.Request.Namespace).Get(context.Background(), domainName, &metav1.GetOptions{})
+	_, err = admitter.virtClient.KubevirtV1().VirtualMachineInstances(pod.Namespace).Get(ctx, vmiName, metav1.GetOptions{})
 	if err != nil {
-		return denied(fmt.Sprintf("kubevirt failed getting the vmi: %s", err.Error()))
+		if !k8serrors.IsNotFound(err) {
+			return denied(fmt.Sprintf("kubevirt failed getting the vmi: %v", err))
+		}
+		return validating_webhooks.NewPassingAdmissionResponse()
 	}
 
-	evictionStrategy := migrations.VMIEvictionStrategy(admitter.ClusterConfig, vmi)
+	return denied(fmt.Sprintf("cannot evict hotplug pod: %s associated with running vmi: %s in namespace %s", pod.Name, vmiName, pod.Namespace))
+}
+
+func (admitter *PodEvictionAdmitter) admitLauncherPod(ctx context.Context, ar *admissionv1.AdmissionReview, pod *k8scorev1.Pod) *admissionv1.AdmissionResponse {
+	vmiName, exists := pod.GetAnnotations()[virtv1.DomainAnnotation]
+	if !exists {
+		return validating_webhooks.NewPassingAdmissionResponse()
+	}
+
+	vmi, err := admitter.virtClient.KubevirtV1().VirtualMachineInstances(ar.Request.Namespace).Get(ctx, vmiName, metav1.GetOptions{})
+	if err != nil {
+		return denied(fmt.Sprintf("kubevirt failed getting the vmi: %v", err))
+	}
+
+	evictionStrategy := migrations.VMIEvictionStrategy(admitter.clusterConfig, vmi)
 	if evictionStrategy == nil {
 		// we don't act on VMIs without an eviction strategy
 		return validating_webhooks.NewPassingAdmissionResponse()
@@ -65,33 +157,61 @@ func (admitter *PodEvictionAdmitter) Admit(ar *admissionv1.AdmissionReview) *adm
 		markForEviction = true
 	}
 
-	if markForEviction && !vmi.IsMarkedForEviction() && vmi.Status.NodeName == launcher.Spec.NodeName {
-		dryRun := ar.Request.DryRun != nil && *ar.Request.DryRun == true
-		err := admitter.markVMI(ar, vmi.Name, vmi.Status.NodeName, dryRun)
-		if err != nil {
-			// As with the previous case, it is up to the user to issue a retry.
-			return denied(fmt.Sprintf("kubevirt failed marking the vmi for eviction: %s", err.Error()))
+	if !markForEviction {
+		return validating_webhooks.NewPassingAdmissionResponse()
+	}
+
+	// This message format is expected from descheduler.
+	const evictionFmt = "Eviction triggered evacuation of VMI \"%s/%s\""
+	if vmi.IsMarkedForEviction() {
+		return denied(fmt.Sprintf("Evacuation in progress: "+evictionFmt, vmi.Namespace, vmi.Name))
+	}
+	if vmi.Status.NodeName != pod.Spec.NodeName {
+		return denied("Eviction request for target Pod")
+	}
+	evictionObject := policyv1.Eviction{}
+	if err := json.Unmarshal(ar.Request.Object.Raw, &evictionObject); err != nil {
+		denied(fmt.Sprintf("failed to parse the eviction object: %v", err))
+	}
+	descEviction := isDeschedulerEviction(&evictionObject)
+	err = admitter.markVMI(ctx, vmi, pod.Spec.NodeName, isDryRun(ar, &evictionObject), descEviction)
+	if err != nil {
+		// As with the previous case, it is up to the user to issue a retry.
+		return denied(fmt.Sprintf("kubevirt failed marking the vmi for eviction: %v", err))
+	}
+	return denied(fmt.Sprintf(evictionFmt, vmi.Namespace, vmi.Name))
+}
+
+func (admitter *PodEvictionAdmitter) markVMI(ctx context.Context, vmi *virtv1.VirtualMachineInstance, nodeName string, dryRun, deschedulerEviction bool) error {
+	patchSet := patch.New(patch.WithAdd("/status/evacuationNodeName", nodeName))
+	if deschedulerEviction {
+		if len(vmi.Annotations) == 0 {
+			patchSet.AddOption(patch.WithAdd("/metadata/annotations", map[string]string{patch.EscapeJSONPointer(virtv1.EvictionSourceAnnotation): "descheduler"}))
+		} else {
+			patchSet.AddOption(patch.WithReplace(fmt.Sprintf("/metadata/annotations/%s", patch.EscapeJSONPointer(virtv1.EvictionSourceAnnotation)), "descheduler"))
 		}
 	}
 
-	// We can let the request go through because the pod is protected by a PDB if the VMI wants to be live-migrated on
-	// eviction. Otherwise, we can just evict it.
-	return validating_webhooks.NewPassingAdmissionResponse()
-}
-
-func (admitter *PodEvictionAdmitter) markVMI(ar *admissionv1.AdmissionReview, vmiName, nodeName string, dryRun bool) (err error) {
-	data := fmt.Sprintf(`[{ "op": "add", "path": "/status/evacuationNodeName", "value": "%s" }]`, nodeName)
-
-	if !dryRun {
-		_, err = admitter.
-			VirtClient.
-			VirtualMachineInstance(ar.Request.Namespace).
-			Patch(context.Background(),
-				vmiName,
-				types.JSONPatchType,
-				[]byte(data),
-				&metav1.PatchOptions{})
+	patchBytes, err := patchSet.GeneratePayload()
+	if err != nil {
+		return err
 	}
+
+	var patchOptions metav1.PatchOptions
+	if dryRun {
+		patchOptions.DryRun = []string{metav1.DryRunAll}
+	}
+
+	_, err = admitter.
+		virtClient.
+		KubevirtV1().
+		VirtualMachineInstances(vmi.Namespace).
+		Patch(ctx,
+			vmi.Name,
+			types.JSONPatchType,
+			patchBytes,
+			patchOptions,
+		)
 
 	return err
 }
@@ -104,4 +224,16 @@ func denied(message string) *admissionv1.AdmissionResponse {
 			Code:    http.StatusTooManyRequests,
 		},
 	}
+}
+
+func isVirtLauncher(pod *k8scorev1.Pod) bool {
+	return pod.Labels[virtv1.AppLabel] == "virt-launcher"
+}
+
+func isHotplugPod(pod *k8scorev1.Pod) bool {
+	return pod.Labels[virtv1.AppLabel] == "hotplug-disk" && len(pod.OwnerReferences) == 1
+}
+
+func isCompleted(pod *k8scorev1.Pod) bool {
+	return pod.Status.Phase == k8scorev1.PodFailed || pod.Status.Phase == k8scorev1.PodSucceeded
 }

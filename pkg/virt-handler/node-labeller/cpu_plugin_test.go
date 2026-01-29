@@ -1,4 +1,4 @@
-//go:build amd64
+//go:build amd64 || s390x
 
 /*
  * This file is part of the KubeVirt project
@@ -15,14 +15,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2021 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
 package nodelabeller
 
 import (
-	"path"
+	"runtime"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -37,12 +37,6 @@ import (
 	util "kubevirt.io/kubevirt/pkg/virt-handler/node-labeller/util"
 )
 
-var features = []string{"apic", "clflush", "cmov"}
-
-const (
-	x86PenrynXml = "x86_Penryn.xml"
-)
-
 var _ = Describe("Node-labeller config", func() {
 	var nlController *NodeLabeller
 
@@ -55,7 +49,6 @@ var _ = Describe("Node-labeller config", func() {
 			Spec: kubevirtv1.KubeVirtSpec{
 				Configuration: kubevirtv1.KubeVirtConfiguration{
 					ObsoleteCPUModels: util.DefaultObsoleteCPUModels,
-					MinCPUModel:       util.DefaultMinCPUModel,
 				},
 			},
 		}
@@ -68,52 +61,24 @@ var _ = Describe("Node-labeller config", func() {
 			logger:                  log.DefaultLogger(),
 			volumePath:              "testdata",
 			domCapabilitiesFileName: "virsh_domcapabilities.xml",
-			hostCPUModel:            hostCPUModel{requiredFeatures: make(map[string]bool, 0)},
+			cpuCounter:              nil,
+			hostCPUModel:            hostCPUModel{requiredFeatures: make(map[string]bool)},
+			arch:                    newArchLabeller(runtime.GOARCH),
 		}
 	})
 
-	It("should return correct cpu file path", func() {
-		p := getPathCPUFeatures(nlController.volumePath, x86PenrynXml)
-		correctPath := path.Join(nlController.volumePath, "cpu_map", x86PenrynXml)
-		Expect(p).To(Equal(correctPath), "cpu file path is not the same")
-	})
-
-	It("should load cpu features", func() {
-		fileName := x86PenrynXml
-		f, err := nlController.loadFeatures(fileName)
-		Expect(err).ToNot(HaveOccurred())
-		for _, val := range features {
-			if _, ok := f[val]; !ok {
-				Expect(ok).To(BeFalse(), "expect feature")
-			}
-		}
-
-	})
-
-	It("should return correct cpu models, features and tsc freqnency", func() {
+	It("should return correct cpu models", func() {
 		err := nlController.loadDomCapabilities()
 		Expect(err).ToNot(HaveOccurred())
 
 		err = nlController.loadHostSupportedFeatures()
 		Expect(err).ToNot(HaveOccurred())
 
-		err = nlController.loadCPUInfo()
-		Expect(err).ToNot(HaveOccurred())
-
-		err = nlController.loadHostCapabilities()
-		Expect(err).ToNot(HaveOccurred())
-
 		cpuModels := nlController.getSupportedCpuModels(nlController.clusterConfig.GetObsoleteCPUModels())
 		cpuFeatures := nlController.getSupportedCpuFeatures()
 
-		Expect(cpuModels).To(HaveLen(5), "number of models must match")
-
+		Expect(cpuModels).To(HaveLen(4), "number of models must match")
 		Expect(cpuFeatures).To(HaveLen(4), "number of features must match")
-		counter, err := nlController.capabilities.GetTSCCounter()
-		Expect(err).ToNot(HaveOccurred())
-		Expect(counter).ToNot(BeNil())
-		Expect(counter.Frequency).To(BeNumerically("==", 4008012000))
-
 	})
 
 	It("No cpu model is usable", func() {
@@ -121,10 +86,8 @@ var _ = Describe("Node-labeller config", func() {
 		err := nlController.loadDomCapabilities()
 		Expect(err).ToNot(HaveOccurred())
 
-		err = nlController.loadCPUInfo()
+		err = nlController.loadHostSupportedFeatures()
 		Expect(err).ToNot(HaveOccurred())
-
-		Expect(nlController.loadHostSupportedFeatures()).To(Succeed())
 
 		cpuModels := nlController.getSupportedCpuModels(nlController.clusterConfig.GetObsoleteCPUModels())
 		cpuFeatures := nlController.getSupportedCpuFeatures()
@@ -132,6 +95,56 @@ var _ = Describe("Node-labeller config", func() {
 		Expect(cpuModels).To(BeEmpty(), "no CPU models are expected to be supported")
 
 		Expect(cpuFeatures).To(HaveLen(4), "number of features doesn't match")
+	})
+
+	It("should mark all CPU models from domCapabilities as known, regardless of usability", func() {
+		nlController.domCapabilitiesFileName = "virsh_domcapabilities.xml"
+
+		err := nlController.loadDomCapabilities()
+		Expect(err).ToNot(HaveOccurred())
+
+		knownCpuModels := nlController.getKnownCpuModels(nlController.clusterConfig.GetObsoleteCPUModels())
+
+		Expect(knownCpuModels).To(ConsistOf(
+			"EPYC-IBPB",
+			"Penryn",
+			"IvyBridge",
+			"Haswell",
+			"Skylake-Client-IBRS",
+		), "expected all CPU models from domCapabilities to be marked as known")
+	})
+
+	It("Should return the cpu features on s390x even without policy='require' property", func() {
+		nlController.arch = newArchLabeller(s390x)
+		nlController.volumePath = "testdata/s390x"
+
+		err := nlController.loadHostSupportedFeatures()
+		Expect(err).ToNot(HaveOccurred())
+
+		cpuFeatures := nlController.getSupportedCpuFeatures()
+
+		Expect(cpuFeatures).To(HaveLen(89), "number of features doesn't match")
+	})
+	It("Should return the cpu features on amd64 only with policy='require' property", func() {
+		nlController.arch = newArchLabeller(amd64)
+		nlController.volumePath = "testdata/s390x"
+
+		err := nlController.loadHostSupportedFeatures()
+		Expect(err).ToNot(HaveOccurred())
+
+		cpuFeatures := nlController.getSupportedCpuFeatures()
+
+		Expect(cpuFeatures).To(BeEmpty(), "number of features doesn't match")
+	})
+
+	It("Should default to IBM as CPU Vendor on s390x if none is given", func() {
+		nlController.arch = newArchLabeller(s390x)
+		nlController.volumePath = "testdata/s390x"
+
+		err := nlController.loadDomCapabilities()
+		Expect(err).ToNot(HaveOccurred())
+
+		Expect(nlController.cpuModelVendor).To(Equal("IBM"), "CPU Vendor should be IBM")
 	})
 
 	Context("should return correct host cpu", func() {
@@ -166,9 +179,11 @@ var _ = Describe("Node-labeller config", func() {
 
 	Context("return correct SEV capabilities", func() {
 		DescribeTable("for SEV and SEV-ES",
-			func(isSupported bool, withES bool) {
-				if isSupported && withES {
+			func(isSupported bool, withES bool, withSNP bool) {
+				if isSupported && withES && !withSNP {
 					nlController.domCapabilitiesFileName = "domcapabilities_sev.xml"
+				} else if isSupported && withES && withSNP {
+					nlController.domCapabilitiesFileName = "domcapabilities_sevsnp.xml"
 				} else if isSupported {
 					nlController.domCapabilitiesFileName = "domcapabilities_noseves.xml"
 				} else {
@@ -186,6 +201,10 @@ var _ = Describe("Node-labeller config", func() {
 					if withES {
 						Expect(nlController.SEV.SupportedES).To(Equal("yes"))
 						Expect(nlController.SEV.MaxESGuests).To(Equal(uint(15)))
+
+						if withSNP {
+							Expect(nlController.SEV.SupportedSNP).To(Equal("yes"))
+						}
 					} else {
 						Expect(nlController.SEV.SupportedES).To(Equal("no"))
 						Expect(nlController.SEV.MaxESGuests).To(BeZero())
@@ -199,9 +218,51 @@ var _ = Describe("Node-labeller config", func() {
 					Expect(nlController.SEV.MaxESGuests).To(BeZero())
 				}
 			},
-			Entry("when only SEV is supported", true, false),
-			Entry("when both SEV and SEV-ES are supported", true, true),
-			Entry("when neither SEV nor SEV-ES are supported", false, false),
+			Entry("when only SEV is supported", true, false, false),
+			Entry("when both SEV and SEV-ES are supported", true, true, false),
+			Entry("when SEV, SEV-ES, and SEV-SNP are all supported", true, true, true),
+			Entry("when none of SEV, SEV-ES, and SEV-SNP is supported", false, false, false),
+		)
+	})
+
+	DescribeTable("return correct SecureExecution capabilities",
+		func(isSupported bool) {
+			if isSupported {
+				nlController.domCapabilitiesFileName = "s390x/domcapabilities_s390-pv.xml"
+			} else {
+				nlController.domCapabilitiesFileName = "s390x/virsh_domcapabilities.xml"
+			}
+			err := nlController.loadDomCapabilities()
+			Expect(err).ToNot(HaveOccurred())
+
+			if isSupported {
+				Expect(nlController.SecureExecution.Supported).To(Equal("yes"))
+			} else {
+				Expect(nlController.SecureExecution.Supported).To(Equal("no"))
+			}
+		},
+		Entry("when Secure Execution is supported", true),
+		Entry("when Secure Execution is not supported", false),
+	)
+
+	Context("return correct Intel TDX capabilities", func() {
+		DescribeTable("for Intel TDX",
+			func(isSupported bool) {
+				supported := ""
+				if isSupported {
+					supported = "yes"
+					nlController.domCapabilitiesFileName = "domcapabilities_tdx.xml"
+				} else {
+					nlController.domCapabilitiesFileName = "virsh_domcapabilities.xml"
+					supported = "no"
+				}
+
+				err := nlController.loadDomCapabilities()
+				Expect(err).ToNot(HaveOccurred())
+				Expect(nlController.TDX.Supported).To(Equal(supported))
+			},
+			Entry("When Intel TDX is supported", true),
+			Entry("When Intel TDX is not supported", false),
 		)
 	})
 
@@ -215,7 +276,7 @@ var _ = Describe("Node-labeller config", func() {
 		nlController.removeLabellerLabels(node)
 
 		badKey := ""
-		for key, _ := range node.Labels {
+		for key := range node.Labels {
 			for _, labellerPrefix := range nodeLabellerLabels {
 				if strings.HasPrefix(key, labellerPrefix) {
 					badKey = key
@@ -362,7 +423,7 @@ var nodeLabels = map[string]string{
 	"hyperv.node.kubevirt.io/tlbflush":                                 "true",
 	"hyperv.node.kubevirt.io/vpindex":                                  "true",
 	"kubernetes.io/arch":                                               "amd64",
-	"kubernetes.io/hostname":                                           "node01",
+	k8sv1.LabelHostname:                                                "node01",
 	"kubernetes.io/os":                                                 "linux",
 	"kubevirt.io/schedulable":                                          "true",
 	"node-role.kubernetes.io/control-plane":                            "",

@@ -38,8 +38,6 @@ import (
 
 	"golang.org/x/sys/unix"
 	"kubevirt.io/client-go/log"
-
-	"kubevirt.io/kubevirt/pkg/util"
 )
 
 const (
@@ -58,64 +56,12 @@ func cleanupContainerDiskDirectory(ephemeralDiskDir string) {
 	}
 }
 
-func createSerialConsoleTermFile(uid, suffix string) (bool, error) {
-	// Create a file that it will be removed to quickly signal the
-	// shutdown to the guest-console-log container in the case the sigterm signal got
-	// missed and some client process is still connected to the serial console socket
-	const serialPort = 0
-	if len(uid) > 0 {
-		logSigPath := fmt.Sprintf("%s/%s/virt-serial%d-log-sigTerm%s", util.VirtPrivateDir, uid, serialPort, suffix)
-
-		if _, err := os.Stat(logSigPath); os.IsNotExist(err) {
-			file, err := os.Create(logSigPath)
-			if err != nil {
-				log.Log.V(4).Infof("could not create up serial console term file: %s", logSigPath)
-				return false, err
-			}
-			if err = file.Close(); err != nil {
-				log.Log.V(4).Infof("could not create up serial console term file: %s", logSigPath)
-				return false, err
-			}
-			log.Log.V(3).Infof("serial console term file created: %s", logSigPath)
-			return true, nil
-		}
-	}
-	return false, nil
-
-}
-
-func removeSerialConsoleTermFile(uid string) {
-	// Delete a file (if there) to quickly signal the shutdown to the guest-console-log container in the case the sigterm signal got
-	// missed and some client process is still connected to the serial console socket
-	const serialPort = 0
-	if len(uid) > 0 {
-		logSigPath := fmt.Sprintf("%s/%s/virt-serial%d-log-sigTerm", util.VirtPrivateDir, uid, serialPort)
-
-		if _, err := os.Stat(logSigPath); err == nil {
-			rerr := os.Remove(logSigPath)
-			if rerr != nil {
-				log.Log.Reason(err).Errorf("could not delete serial console term file: %s", logSigPath)
-				return
-			}
-			log.Log.V(3).Infof("serial console term file deleted: %s", logSigPath)
-		}
-	}
-	// Create a second termination file for the unlikely case where virt-launcher-monitor
-	// has enough time to create and remove the termination file before virt-tail (asynchronously started)
-	// notices it.
-	if _, err := createSerialConsoleTermFile(uid, "-done"); err != nil {
-		log.Log.Reason(err).Errorf("could not delete serial console term file")
-	}
-}
-
 func main() {
 
 	containerDiskDir := pflag.String("container-disk-dir", "/var/run/kubevirt/container-disks", "Base directory for container disk data")
 	keepAfterFailure := pflag.Bool("keep-after-failure", false, "virt-launcher will be kept alive after failure for debugging if set to true")
 	uid := pflag.String("uid", "", "UID of the VirtualMachineInstance")
 
-	// set new default verbosity, was set to 0 by glog
-	goflag.Set("v", "2")
 	pflag.CommandLine.AddGoFlag(goflag.CommandLine.Lookup("v"))
 	pflag.CommandLine.ParseErrorsWhitelist = pflag.ParseErrorsWhitelist{UnknownFlags: true}
 	pflag.Parse()
@@ -142,6 +88,7 @@ func main() {
 		log.Log.Reason(err).Error("monitoring virt-launcher failed")
 		os.Exit(1)
 	}
+	log.Log.Info("virt-launcher-monitor: Exiting...")
 
 	os.Exit(exitCode)
 }
@@ -149,26 +96,9 @@ func main() {
 // RunAndMonitor run virt-launcher process and monitor it to give qemu an extra grace period to properly terminate
 // in case of crashes
 func RunAndMonitor(containerDiskDir, uid string) (int, error) {
-	defer removeSerialConsoleTermFile(uid)
 	defer cleanupContainerDiskDirectory(containerDiskDir)
 	defer terminateIstioProxy()
 	args := removeArg(os.Args[1:], "--keep-after-failure")
-
-	go func() {
-		created := false
-		i := 0
-		var err error
-		for i < 100 && !created {
-			i = i + 1
-			created, err = createSerialConsoleTermFile(uid, "")
-			if err != nil || !created {
-				time.Sleep(100 * time.Millisecond)
-			}
-		}
-		if !created {
-			log.Log.Reason(err).Errorf("could not create up serial console term file")
-		}
-	}()
 
 	cmd := exec.Command("/usr/bin/virt-launcher", args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -189,19 +119,29 @@ func RunAndMonitor(containerDiskDir, uid string) (int, error) {
 		for sig := range sigs {
 			switch sig {
 			case syscall.SIGCHLD:
-				var wstatus syscall.WaitStatus
-				wpid, err := syscall.Wait4(-1, &wstatus, syscall.WNOHANG, nil)
-				if err != nil {
-					log.Log.Reason(err).Errorf("Failed to reap process %d", wpid)
-				}
-
-				log.Log.Infof("Reaped pid %d with status %d", wpid, int(wstatus))
-				if wpid == cmd.Process.Pid {
-					exitStatus <- wstatus.ExitStatus()
+				for {
+					var wstatus syscall.WaitStatus
+					wpid, err := syscall.Wait4(-1, &wstatus, syscall.WNOHANG, nil)
+					if err != nil {
+						if err == syscall.ECHILD {
+							log.Log.Reason(err).Errorf("Break reap loop")
+							break
+						}
+						log.Log.Reason(err).Errorf("Failed to reap process %d", wpid)
+					}
+					if wpid == 0 {
+						log.Log.V(4).Infof("No more processes to be reaped")
+						break
+					}
+					if wpid == cmd.Process.Pid {
+						log.Log.Infof("Reaped Launcher main pid")
+						exitStatus <- wstatus.ExitStatus()
+					}
+					log.Log.V(4).Infof("Reaped pid %d with status %d", wpid, int(wstatus))
 				}
 
 			default:
-				log.Log.V(3).Log("signalling virt-launcher to shut down")
+				log.Log.Infof("signalling virt-launcher to shut down")
 				err := cmd.Process.Signal(syscall.SIGTERM)
 				sig.Signal()
 				if err != nil {
@@ -217,6 +157,13 @@ func RunAndMonitor(containerDiskDir, uid string) (int, error) {
 	}
 
 	dumpLogFile(passtLogFile)
+	entries, err := os.ReadDir("/run/kubevirt-private/libvirt/qemu/log")
+	if err != nil {
+		log.Log.Reason(err).Error("failed to read qemu log directory")
+	}
+	for _, entry := range entries {
+		dumpLogFile(filepath.Join("/run/kubevirt-private/libvirt/qemu/log", entry.Name()))
+	}
 
 	// give qemu some time to shut down in case it survived virt-handler
 	// Most of the time we call `qemu-system=* binaries, but qemu-system-* packages
@@ -230,6 +177,7 @@ func RunAndMonitor(containerDiskDir, uid string) (int, error) {
 	}
 
 	if pid > 0 {
+		log.Log.Infof("Killing QEMU gracefully.")
 		p, err := os.FindProcess(pid)
 		if err != nil {
 			return 1, err

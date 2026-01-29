@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2017 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -23,40 +23,33 @@ import (
 	"context"
 	"time"
 
-	"kubevirt.io/kubevirt/tests/libinfra"
-
-	"kubevirt.io/kubevirt/tests/framework/kubevirt"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/onsi/gomega/gstruct"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"kubevirt.io/client-go/kubecli"
 
-	"kubevirt.io/kubevirt/tests/libvmi"
-
-	"kubevirt.io/kubevirt/tests"
+	"kubevirt.io/kubevirt/pkg/libvmi"
 	"kubevirt.io/kubevirt/tests/console"
+	"kubevirt.io/kubevirt/tests/framework/kubevirt"
+	"kubevirt.io/kubevirt/tests/libinfra"
+	"kubevirt.io/kubevirt/tests/libvmifact"
+	"kubevirt.io/kubevirt/tests/libvmops"
 )
 
-var _ = DescribeInfra("downwardMetrics", func() {
-	var (
-		virtClient kubecli.KubevirtClient
-	)
-	BeforeEach(func() {
-		virtClient = kubevirt.Client()
-	})
+var _ = Describe(SIG("downwardMetrics", func() {
+	const vmiStartTimeout = libvmops.StartupTimeoutSecondsXLarge
 
 	DescribeTable("should start a vmi and get the metrics", func(via libvmi.Option, metricsGetter libinfra.MetricsGetter) {
-
-		vmi := libvmi.NewFedora(via)
-		vmi = tests.RunVMIAndExpectLaunch(vmi, 180)
+		vmi := libvmifact.NewFedora(via)
+		vmi = libvmops.RunVMIAndExpectLaunch(vmi, vmiStartTimeout)
 		Expect(console.LoginToFedora(vmi)).To(Succeed())
 
 		metrics, err := metricsGetter(vmi)
 		Expect(err).ToNot(HaveOccurred())
 		timestamp := libinfra.GetTimeFromMetrics(metrics)
 
-		vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, &metav1.GetOptions{})
+		vmi, err = kubevirt.Client().VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, metav1.GetOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		Eventually(func() int {
 			metrics, err = metricsGetter(vmi)
@@ -64,31 +57,22 @@ var _ = DescribeInfra("downwardMetrics", func() {
 			return libinfra.GetTimeFromMetrics(metrics)
 		}, 10*time.Second, 1*time.Second).ShouldNot(Equal(timestamp))
 		Expect(libinfra.GetHostnameFromMetrics(metrics)).To(Equal(vmi.Status.NodeName))
-
 	},
 		Entry("[test_id:6535]using a disk", libvmi.WithDownwardMetricsVolume("vhostmd"), libinfra.GetDownwardMetricsDisk),
 		Entry("using a virtio serial device", libvmi.WithDownwardMetricsChannel(), libinfra.GetDownwardMetricsVirtio),
 	)
 
 	It("metric ResourceProcessorLimit should be present", func() {
-		vmi := libvmi.NewFedora(libvmi.WithCPUCount(1, 1, 1), libvmi.WithDownwardMetricsVolume("vhostmd"))
-		vmi = tests.RunVMIAndExpectLaunch(vmi, 180)
+		vmi := libvmifact.NewFedora(libvmi.WithCPUCount(1, 1, 1), libvmi.WithDownwardMetricsVolume("vhostmd"))
+		vmi = libvmops.RunVMIAndExpectLaunch(vmi, vmiStartTimeout)
 		Expect(console.LoginToFedora(vmi)).To(Succeed())
 
 		metrics, err := libinfra.GetDownwardMetricsDisk(vmi)
 		Expect(err).ToNot(HaveOccurred())
 
-		//let's try to find the ResourceProcessorLimit metric
-		found := false
-		j := 0
-		for i, metric := range metrics.Metrics {
-			if metric.Name == "ResourceProcessorLimit" {
-				j = i
-				found = true
-				break
-			}
-		}
-		Expect(found).To(BeTrue())
-		Expect(metrics.Metrics[j].Value).To(Equal("1"))
+		Expect(metrics.Metrics).To(ContainElement(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+			"Name":  Equal("ResourceProcessorLimit"),
+			"Value": Equal("1"),
+		})))
 	})
-})
+}))

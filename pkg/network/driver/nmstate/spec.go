@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2022 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -190,12 +190,6 @@ func (n NMState) setupInterface(iface Interface, link vishnetlink.Link) error {
 
 	if iface.MTU > 0 && iface.MTU != link.Attrs().MTU {
 		if err := n.adapter.LinkSetMTU(link, iface.MTU); err != nil {
-			return err
-		}
-	}
-
-	if iface.Ethtool.Feature.TxChecksum != nil && !(*iface.Ethtool.Feature.TxChecksum) {
-		if err := n.adapter.TXChecksumOff(iface.Name); err != nil {
 			return err
 		}
 	}

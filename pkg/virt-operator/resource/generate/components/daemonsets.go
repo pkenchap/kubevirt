@@ -8,20 +8,27 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/utils/pointer"
+
+	networkv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 
 	virtv1 "kubevirt.io/api/core/v1"
 
+	"kubevirt.io/kubevirt/pkg/pointer"
 	"kubevirt.io/kubevirt/pkg/storage/reservation"
 	"kubevirt.io/kubevirt/pkg/util"
 	operatorutil "kubevirt.io/kubevirt/pkg/virt-operator/util"
 )
 
 const (
-	VirtHandlerName = "virt-handler"
-	kubeletPodsPath = "/var/lib/kubelet/pods"
-	PrHelperName    = "pr-helper"
-	prVolumeName    = "pr-helper-socket-vol"
+	VirtHandlerName                = "virt-handler"
+	kubeletPodsPath                = util.KubeletRoot + "/pods"
+	runtimesPath                   = "/var/run/kubevirt-libvirt-runtimes"
+	PrHelperName                   = "pr-helper"
+	prVolumeName                   = "pr-helper-socket-vol"
+	devDirVol                      = "dev-dir"
+	SidecarShimName                = "sidecar-shim"
+	etcMultipath                   = "etc-multipath"
+	SupportsMigrationCNsValidation = "kubevirt.io/supports-migration-cn-types"
 )
 
 func RenderPrHelperContainer(image string, pullPolicy corev1.PullPolicy) corev1.Container {
@@ -30,7 +37,7 @@ func RenderPrHelperContainer(image string, pullPolicy corev1.PullPolicy) corev1.
 		Name:            PrHelperName,
 		Image:           image,
 		ImagePullPolicy: pullPolicy,
-		Command:         []string{"/usr/bin/qemu-pr-helper"},
+		Command:         []string{"/entrypoint.sh"},
 		Args: []string{
 			"-k", reservation.GetPrHelperSocketPath(),
 		},
@@ -40,35 +47,54 @@ func RenderPrHelperContainer(image string, pullPolicy corev1.PullPolicy) corev1.
 				MountPath:        reservation.GetPrHelperSocketDir(),
 				MountPropagation: &bidi,
 			},
+			{
+				Name:             devDirVol,
+				MountPath:        "/dev",
+				MountPropagation: pointer.P(corev1.MountPropagationHostToContainer),
+			},
+			{
+				Name:             etcMultipath,
+				MountPath:        "/etc/multipath",
+				MountPropagation: &bidi,
+			},
 		},
 		SecurityContext: &corev1.SecurityContext{
-			RunAsUser:  pointer.Int64(util.RootUser),
-			Privileged: pointer.Bool(true),
+			RunAsUser:  pointer.P(int64(util.RootUser)),
+			Privileged: pointer.P(true),
 		},
+		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 	}
 }
 
-func NewHandlerDaemonSet(namespace, repository, imagePrefix, version, launcherVersion, prHelperVersion, productName, productVersion, productComponent, image, launcherImage, prHelperImage string, pullPolicy corev1.PullPolicy, imagePullSecrets []corev1.LocalObjectReference, migrationNetwork *string, verbosity string, extraEnv map[string]string, enablePrHelper bool) (*appsv1.DaemonSet, error) {
+func NewHandlerDaemonSet(config *operatorutil.KubeVirtDeploymentConfig, productName, productVersion, productComponent string) *appsv1.DaemonSet {
 
 	deploymentName := VirtHandlerName
-	imageName := fmt.Sprintf("%s%s", imagePrefix, deploymentName)
-	env := operatorutil.NewEnvVarMap(extraEnv)
-	podTemplateSpec, err := newPodTemplateSpec(deploymentName, imageName, repository, version, productName, productVersion, productComponent, image, pullPolicy, imagePullSecrets, nil, env)
-	if err != nil {
-		return nil, err
+	imageName := fmt.Sprintf("%s%s", config.GetImagePrefix(), deploymentName)
+	image := config.VirtHandlerImage
+	if image == "" {
+		image = fmt.Sprintf("%s/%s%s", config.GetImageRegistry(), imageName, AddVersionSeparatorPrefix(config.GetHandlerVersion()))
 	}
+	env := operatorutil.NewEnvVarMap(config.GetExtraEnv())
+	podTemplateSpec := newPodTemplateSpec(deploymentName, productName, productVersion, productComponent, image, config.GetImagePullPolicy(), config.GetImagePullSecrets(), nil, env)
 
+	launcherImage := config.VirtLauncherImage
 	if launcherImage == "" {
-		launcherImage = fmt.Sprintf("%s/%s%s%s", repository, imagePrefix, "virt-launcher", AddVersionSeparatorPrefix(launcherVersion))
+		launcherImage = fmt.Sprintf("%s/%s%s%s", config.GetImageRegistry(), config.GetImagePrefix(), "virt-launcher", AddVersionSeparatorPrefix(config.GetLauncherVersion()))
 	}
 
+	migrationNetwork := config.GetMigrationNetwork()
 	if migrationNetwork != nil {
 		if podTemplateSpec.ObjectMeta.Annotations == nil {
 			podTemplateSpec.ObjectMeta.Annotations = make(map[string]string)
 		}
 		// Join the pod to the migration network and name the corresponding interface "migration0"
-		podTemplateSpec.ObjectMeta.Annotations["k8s.v1.cni.cncf.io/networks"] = *migrationNetwork + "@" + virtv1.MigrationInterfaceName
+		podTemplateSpec.ObjectMeta.Annotations[networkv1.NetworkAttachmentAnnot] = *migrationNetwork + "@" + virtv1.MigrationInterfaceName
 	}
+
+	if podTemplateSpec.Annotations == nil {
+		podTemplateSpec.Annotations = make(map[string]string)
+	}
+	podTemplateSpec.Annotations["openshift.io/required-scc"] = "kubevirt-handler"
 
 	daemonset := &appsv1.DaemonSet{
 		TypeMeta: metav1.TypeMeta{
@@ -76,10 +102,11 @@ func NewHandlerDaemonSet(namespace, repository, imagePrefix, version, launcherVe
 			Kind:       "DaemonSet",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
+			Namespace: config.GetNamespace(),
 			Name:      VirtHandlerName,
 			Labels: map[string]string{
-				virtv1.AppLabel: VirtHandlerName,
+				virtv1.AppLabel:                VirtHandlerName,
+				SupportsMigrationCNsValidation: "true",
 			},
 		},
 		Spec: appsv1.DaemonSetSpec{
@@ -123,7 +150,7 @@ func NewHandlerDaemonSet(namespace, repository, imagePrefix, version, launcherVe
 				"node-labeller.sh",
 			},
 			SecurityContext: &corev1.SecurityContext{
-				Privileged: pointer.Bool(true),
+				Privileged: pointer.P(true),
 			},
 			VolumeMounts: []corev1.VolumeMount{
 				{
@@ -131,6 +158,7 @@ func NewHandlerDaemonSet(namespace, repository, imagePrefix, version, launcherVe
 					MountPath: nodeLabellerVolumePath,
 				},
 			},
+			TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 		},
 	}
 
@@ -142,7 +170,7 @@ func NewHandlerDaemonSet(namespace, repository, imagePrefix, version, launcherVe
 	// image could be garbage collected by the kubelet.
 	// Note that we cannot add `imagePullSecrets` to `virt-launcher` as this could
 	// be a security risk - user could use this secret and abuse it.
-	if len(imagePullSecrets) > 0 {
+	if len(config.GetImagePullSecrets()) > 0 {
 		pod.Containers = append(pod.Containers, corev1.Container{
 			Name:            "virt-launcher-image-holder",
 			Image:           launcherImage,
@@ -155,6 +183,7 @@ func NewHandlerDaemonSet(namespace, repository, imagePrefix, version, launcherVe
 					corev1.ResourceMemory: resource.MustParse("20Mi"),
 				},
 			},
+			TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 		})
 	}
 
@@ -183,7 +212,7 @@ func NewHandlerDaemonSet(namespace, repository, imagePrefix, version, launcherVe
 		"--graceful-shutdown-seconds",
 		fmt.Sprintf("%d", handlerGracePeriod),
 		"-v",
-		verbosity,
+		config.GetVerbosity(),
 	}
 	container.Ports = []corev1.ContainerPort{
 		{
@@ -193,7 +222,7 @@ func NewHandlerDaemonSet(namespace, repository, imagePrefix, version, launcherVe
 		},
 	}
 	container.SecurityContext = &corev1.SecurityContext{
-		Privileged: pointer.Bool(true),
+		Privileged: pointer.P(true),
 		SELinuxOptions: &corev1.SELinuxOptions{
 			Level: "s0",
 		},
@@ -259,22 +288,22 @@ func NewHandlerDaemonSet(namespace, repository, imagePrefix, version, launcherVe
 	}
 	attachCertificateSecret(pod, VirtHandlerCertSecretName, "/etc/virt-handler/clientcertificates")
 	attachCertificateSecret(pod, VirtHandlerServerCertSecretName, "/etc/virt-handler/servercertificates")
+	attachCertificateSecret(pod, VirtHandlerMigrationClientCertSecretName, "/etc/virt-handler/migrationservercertificates")
+	attachCertificateSecret(pod, VirtHandlerVsockClientCertSecretName, "/etc/virt-handler/vsockclientcertificates")
 	attachProfileVolume(pod)
 
 	bidi := corev1.MountPropagationBidirectional
-	// NOTE: the 'kubelet-pods-shortened' volume mounts the same host path as 'kubelet-pods'
-	// This is because that path holds unix domain sockets. Domain sockets fail when they're over
-	// ~ 100 characters, so that shortened volume path is to allow domain socket connections.
+	// NOTE: the 'kubelet-pods' volume mount exists because that path holds unix socket files.
+	// Socket files fail when their path is longer than 108 characters,
+	//   so that shortened volume path is to allow domain socket connections.
 	// It's ridiculous to have to account for that, but that's the situation we're in.
 	volumes := []volume{
-		{"libvirt-runtimes", "/var/run/kubevirt-libvirt-runtimes", "/var/run/kubevirt-libvirt-runtimes", nil},
-		{"virt-share-dir", "/var/run/kubevirt", "/var/run/kubevirt", &bidi},
-		{"virt-lib-dir", "/var/lib/kubevirt", "/var/lib/kubevirt", nil},
-		{"virt-private-dir", "/var/run/kubevirt-private", "/var/run/kubevirt-private", nil},
-		{"device-plugin", "/var/lib/kubelet/device-plugins", "/var/lib/kubelet/device-plugins", nil},
-		{"kubelet-pods-shortened", kubeletPodsPath, "/pods", nil},
-		{"kubelet-pods", kubeletPodsPath, kubeletPodsPath, &bidi},
-		{"node-labeller", "/var/lib/kubevirt-node-labeller", "/var/lib/kubevirt-node-labeller", nil},
+		{"libvirt-runtimes", runtimesPath, runtimesPath, nil},
+		{"virt-share-dir", util.VirtShareDir, util.VirtShareDir, &bidi},
+		{"virt-private-dir", util.VirtPrivateDir, util.VirtPrivateDir, nil},
+		{"kubelet-pods", kubeletPodsPath, "/pods", nil},
+		{"kubelet", util.KubeletRoot, util.KubeletRoot, &bidi},
+		{"node-labeller", nodeLabellerVolumePath, nodeLabellerVolumePath, nil},
 	}
 
 	for _, volume := range volumes {
@@ -320,17 +349,20 @@ func NewHandlerDaemonSet(namespace, repository, imagePrefix, version, launcherVe
 
 	container.Resources = corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
-			corev1.ResourceCPU: resource.MustParse("10m"),
-			// 325Mi - base memory request
-			// +32Mi - to account for the buffer used to verify containerdisk checksums
-			corev1.ResourceMemory: resource.MustParse("357Mi"),
+			corev1.ResourceCPU:    resource.MustParse("10m"),
+			corev1.ResourceMemory: resource.MustParse("325Mi"),
 		},
 	}
+	prHelperImage := config.PrHelperImage
 	if prHelperImage == "" {
-		prHelperImage = fmt.Sprintf("%s/%s%s%s", repository, imagePrefix, PrHelperName, AddVersionSeparatorPrefix(prHelperVersion))
+		prHelperImage = fmt.Sprintf("%s/%s%s%s", config.GetImageRegistry(), config.GetImagePrefix(), PrHelperName, AddVersionSeparatorPrefix(config.GetPrHelperVersion()))
+	}
+	sidecarShimImage := config.SidecarShimImage
+	if sidecarShimImage == "" {
+		sidecarShimImage = fmt.Sprintf("%s/%s%s%s", config.GetImageRegistry(), config.GetImagePrefix(), SidecarShimName, AddVersionSeparatorPrefix(config.GetSidecarShimVersion()))
 	}
 
-	if enablePrHelper {
+	if config.PersistentReservationEnabled() {
 		directoryOrCreate := corev1.HostPathDirectoryOrCreate
 		pod.Volumes = append(pod.Volumes, corev1.Volume{
 			Name: prVolumeName,
@@ -339,10 +371,22 @@ func NewHandlerDaemonSet(namespace, repository, imagePrefix, version, launcherVe
 					Path: reservation.GetPrHelperSocketDir(),
 					Type: &directoryOrCreate,
 				},
-			},
-		})
-		pod.Containers = append(pod.Containers, RenderPrHelperContainer(prHelperImage, pullPolicy))
+			}}, corev1.Volume{
+			Name: devDirVol,
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
+					Path: "/dev",
+				},
+			}}, corev1.Volume{
+			Name: etcMultipath,
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
+					Path: "/etc/multipath",
+					Type: pointer.P(corev1.HostPathDirectoryOrCreate),
+				},
+			}})
+		pod.Containers = append(pod.Containers, RenderPrHelperContainer(prHelperImage, config.GetImagePullPolicy()))
 	}
-	return daemonset, nil
+	return daemonset
 
 }

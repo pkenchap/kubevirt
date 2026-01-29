@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2023 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -24,46 +24,57 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"k8s.io/client-go/tools/clientcmd"
+
 	v1 "kubevirt.io/api/core/v1"
 
+	"kubevirt.io/kubevirt/pkg/virtctl/clientconfig"
 	"kubevirt.io/kubevirt/pkg/virtctl/templates"
 )
 
 const COMMAND_MIGRATE = "migrate"
 
-func NewMigrateCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
+type migrateCommand struct {
+	command           string
+	addedNodeSelector map[string]string
+}
+
+func NewMigrateCommand() *cobra.Command {
+	c := migrateCommand{command: COMMAND_MIGRATE}
 	cmd := &cobra.Command{
 		Use:     "migrate (VM)",
 		Short:   "Migrate a virtual machine.",
 		Example: usage(COMMAND_MIGRATE),
-		Args:    templates.ExactArgs("migrate", 1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			c := Command{command: COMMAND_MIGRATE, clientConfig: clientConfig}
-			return c.migrateRun(args)
-		},
+		Args:    cobra.ExactArgs(1),
+		RunE:    c.migrateRun,
 	}
+
+	cmd.Flags().StringToStringVar(&c.addedNodeSelector, "addedNodeSelector", nil, "--addedNodeSelector=key=value1,key2=value2: configure an additional node selector for the one-off migration attempt. AddedNodeSelector can only restrict constraints already set on the VM. By default the scheduler is responsible for finding the best Node, which is the recommended way of migrating VMs.")
 	cmd.Flags().BoolVar(&dryRun, dryRunArg, false, dryRunCommandUsage)
 	cmd.SetUsageTemplate(templates.UsageTemplate())
 	return cmd
 }
 
-func (o *Command) migrateRun(args []string) error {
+func (c *migrateCommand) migrateRun(cmd *cobra.Command, args []string) error {
 	vmiName := args[0]
 
-	virtClient, namespace, err := GetNamespaceAndClient(o.clientConfig)
+	virtClient, namespace, _, err := clientconfig.ClientAndNamespaceFromContext(cmd.Context())
 	if err != nil {
 		return err
 	}
 
 	dryRunOption := setDryRunOption(dryRun)
 
-	err = virtClient.VirtualMachine(namespace).Migrate(context.Background(), vmiName, &v1.MigrateOptions{DryRun: dryRunOption})
+	options := &v1.MigrateOptions{
+		DryRun:            dryRunOption,
+		AddedNodeSelector: c.addedNodeSelector,
+	}
+
+	err = virtClient.VirtualMachine(namespace).Migrate(context.Background(), vmiName, options)
 	if err != nil {
 		return fmt.Errorf("Error migrating VirtualMachine %v", err)
 	}
 
-	fmt.Printf("VM %s was scheduled to %s\n", vmiName, o.command)
+	fmt.Printf("VM %s was scheduled to %s\n", vmiName, c.command)
 
 	return nil
 }

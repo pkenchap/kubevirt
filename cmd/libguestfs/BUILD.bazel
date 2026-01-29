@@ -1,12 +1,9 @@
-load(
-    "@io_bazel_rules_docker//container:container.bzl",
-    "container_image",
-)
+load("@rules_oci//oci:defs.bzl", "oci_image")
 load("@rules_pkg//:pkg.bzl", "pkg_tar")
 
 pkg_tar(
     name = "entrypoint",
-    srcs = [":entrypoint.sh"],
+    srcs = ["entrypoint.sh"],
     mode = "0775",
     package_dir = "/",
 )
@@ -19,42 +16,64 @@ genrule(
 )
 
 pkg_tar(
-    name = "appliance_layer",
+    name = "version",
+    srcs = [
+        "//:get-version",
+    ],
+    package_dir = "/",
+)
+
+pkg_tar(
+    name = "appliance_layer_x86_64",
     srcs = [
         ":done-file",
-        "@libguestfs-appliance//appliance:README.fixed",
-        "@libguestfs-appliance//appliance:initrd",
-        "@libguestfs-appliance//appliance:kernel",
-        "@libguestfs-appliance//appliance:root",
+        "@libguestfs-appliance-x86_64//appliance:README.fixed",
+        "@libguestfs-appliance-x86_64//appliance:initrd",
+        "@libguestfs-appliance-x86_64//appliance:kernel",
+        "@libguestfs-appliance-x86_64//appliance:root",
     ],
     mode = "0444",
     package_dir = "/usr/local/lib/guestfs/appliance",
     visibility = ["//visibility:public"],
 )
 
-container_image(
+pkg_tar(
+    name = "appliance_layer_s390x",
+    srcs = [
+        ":done-file",
+        "@libguestfs-appliance-s390x//appliance:README.fixed",
+        "@libguestfs-appliance-s390x//appliance:initrd",
+        "@libguestfs-appliance-s390x//appliance:kernel",
+        "@libguestfs-appliance-s390x//appliance:root",
+    ],
+    mode = "0444",
+    package_dir = "/usr/local/lib/guestfs/appliance",
+    visibility = ["//visibility:public"],
+)
+
+oci_image(
     name = "version-container",
     base = "//:passwd-image",
-    directory = "/",
-    files = [
-        "//:get-version",
-    ],
     tars = [
-        "//:passwd-tar",
-        "//rpm:libguestfs-tools",
-        ":appliance_layer",
-        ":entrypoint",
+        ":version",
     ],
 )
 
-container_image(
+oci_image(
     name = "libguestfs-tools-image",
-    architecture = select({
-        "@io_bazel_rules_go//go/platform:linux_arm64": "arm64",
-        "//conditions:default": "amd64",
-    }),
     base = ":version-container",
-    directory = "/",
     entrypoint = ["/entrypoint.sh"],
+    tars = select({
+        "@io_bazel_rules_go//go/platform:linux_s390x": [
+            ":appliance_layer_s390x",
+            "//rpm:libguestfs-tools_s390x",
+            ":entrypoint",
+        ],
+        "//conditions:default": [
+            ":appliance_layer_x86_64",
+            "//rpm:libguestfs-tools_x86_64",
+            ":entrypoint",
+        ],
+    }),
     visibility = ["//visibility:public"],
 )

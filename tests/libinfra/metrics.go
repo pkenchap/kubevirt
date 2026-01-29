@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2023 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -99,11 +99,23 @@ func TakeMetricsWithPrefix(output, prefix string) []string {
 func ParseMetricsToMap(lines []string) (map[string]float64, error) {
 	metrics := make(map[string]float64)
 	for _, line := range lines {
+		// <metric_name>{<labels...>} <timestamp> <value>
+		// timestamp might not be present
 		items := strings.Split(line, " ")
-		if len(items) != 2 {
+		lengthItems := len(items)
+
+		var v float64
+		var err error
+
+		switch lengthItems {
+		case 2: // no timestamp
+			v, err = strconv.ParseFloat(items[1], 64)
+		case 3: // with timestamp
+			v, err = strconv.ParseFloat(items[2], 64)
+		default:
 			return nil, fmt.Errorf("can't split properly line '%s'", line)
 		}
-		v, err := strconv.ParseFloat(items[1], 64)
+
 		if err != nil {
 			return nil, err
 		}
@@ -120,14 +132,4 @@ func GetKeysFromMetrics(metrics map[string]float64) []string {
 	// we sort keys only to make debug of test failures easier
 	sort.Strings(keys)
 	return keys
-}
-
-func GetMetricKeyForVmiDisk(keys []string, vmiName string, diskName string) string {
-	for _, key := range keys {
-		if strings.Contains(key, "name=\""+vmiName+"\"") &&
-			strings.Contains(key, "drive=\""+diskName+"\"") {
-			return key
-		}
-	}
-	return ""
 }

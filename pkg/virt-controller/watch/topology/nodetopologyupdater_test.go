@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	g "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -146,7 +146,7 @@ var _ = Describe("Nodetopologyupdater", func() {
 })
 
 func trackNodes(clientset *fake.Clientset, nodes ...*v1.Node) {
-	for i, _ := range nodes {
+	for i := range nodes {
 		g.ExpectWithOffset(1, clientset.Tracker().Add(nodes[i])).To(g.Succeed())
 	}
 }

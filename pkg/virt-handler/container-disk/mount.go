@@ -1,7 +1,25 @@
+/*
+ * This file is part of the KubeVirt project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * Copyright The KubeVirt Authors.
+ *
+ */
+
 package container_disk
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -12,18 +30,18 @@ import (
 	"sync"
 	"time"
 
-	"kubevirt.io/kubevirt/pkg/unsafepath"
-
-	"kubevirt.io/kubevirt/pkg/safepath"
-	"kubevirt.io/kubevirt/pkg/util"
-	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
-	virt_chroot "kubevirt.io/kubevirt/pkg/virt-handler/virt-chroot"
-
 	"kubevirt.io/client-go/log"
 
+	"kubevirt.io/kubevirt/pkg/checkpoint"
 	containerdisk "kubevirt.io/kubevirt/pkg/container-disk"
 	diskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
+	"kubevirt.io/kubevirt/pkg/safepath"
+	"kubevirt.io/kubevirt/pkg/unsafepath"
+	"kubevirt.io/kubevirt/pkg/util"
+	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
+	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
 	"kubevirt.io/kubevirt/pkg/virt-handler/isolation"
+	virt_chroot "kubevirt.io/kubevirt/pkg/virt-handler/virt-chroot"
 
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/types"
@@ -37,8 +55,7 @@ const (
 )
 
 var (
-	ErrChecksumMissing   = errors.New("missing checksum")
-	ErrChecksumMismatch  = errors.New("checksum mismatch")
+	ErrWaitingForDisks   = errors.New("waiting for containerdisks")
 	ErrDiskContainerGone = errors.New("disk container is gone")
 )
 
@@ -46,10 +63,11 @@ var (
 
 type mounter struct {
 	podIsolationDetector       isolation.PodIsolationDetector
-	mountStateDir              string
+	checkpointManager          checkpoint.CheckpointManager
 	mountRecords               map[types.UID]*vmiMountTargetRecord
 	mountRecordsLock           sync.Mutex
 	suppressWarningTimeout     time.Duration
+	needsBindMountFunc         needsBindMountFunc
 	socketPathGetter           containerdisk.SocketPathGetter
 	kernelBootSocketPathGetter containerdisk.KernelBootSocketPathGetter
 	clusterConfig              *virtconfig.ClusterConfig
@@ -58,8 +76,12 @@ type mounter struct {
 
 type Mounter interface {
 	ContainerDisksReady(vmi *v1.VirtualMachineInstance, notInitializedSince time.Time) (bool, error)
-	MountAndVerify(vmi *v1.VirtualMachineInstance) (map[string]*containerdisk.DiskInfo, error)
+	MountAndVerify(vmi *v1.VirtualMachineInstance) error
 	Unmount(vmi *v1.VirtualMachineInstance) error
+	// ComputeChecksums method, along with the code added in this commit, can be removed after the 1.7 release.
+	// By then, we can be sure that during upgrades older versions of virt-handler no longer expect the checksum
+	// in the VMI status.
+	// Therefore, it will no longer be necessary to include this information in the VMI status.
 	ComputeChecksums(vmi *v1.VirtualMachineInstance) (*DiskChecksums, error)
 }
 
@@ -92,8 +114,9 @@ func NewMounter(isoDetector isolation.PodIsolationDetector, mountStateDir string
 	return &mounter{
 		mountRecords:               make(map[types.UID]*vmiMountTargetRecord),
 		podIsolationDetector:       isoDetector,
-		mountStateDir:              mountStateDir,
+		checkpointManager:          checkpoint.NewSimpleCheckpointManager(mountStateDir),
 		suppressWarningTimeout:     1 * time.Minute,
+		needsBindMountFunc:         newNeedsBindMountFunc(""),
 		socketPathGetter:           containerdisk.NewSocketPathGetter(""),
 		kernelBootSocketPathGetter: containerdisk.NewKernelBootSocketPathGetter(""),
 		clusterConfig:              clusterConfig,
@@ -106,25 +129,20 @@ func (m *mounter) deleteMountTargetRecord(vmi *v1.VirtualMachineInstance) error 
 		return fmt.Errorf("unable to find container disk mounted directories for vmi without uid")
 	}
 
-	recordFile := filepath.Join(m.mountStateDir, string(vmi.UID))
-
-	exists, err := diskutils.FileExists(recordFile)
-	if err != nil {
-		return err
+	record := vmiMountTargetRecord{}
+	err := m.checkpointManager.Get(string(vmi.UID), &record)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("failed to get a checkpoint %s, %w", vmi.UID, err)
 	}
-
-	if exists {
-		record, err := m.getMountTargetRecord(vmi)
-		if err != nil {
-			return err
-		}
-
+	if !errors.Is(err, os.ErrNotExist) {
 		for _, target := range record.MountTargetEntries {
 			os.Remove(target.TargetFile)
 			os.Remove(target.SocketFile)
 		}
 
-		os.Remove(recordFile)
+		if err := m.checkpointManager.Delete(string(vmi.UID)); err != nil {
+			return fmt.Errorf("failed to delete checkpoint %s, %w", vmi.UID, err)
+		}
 	}
 
 	m.mountRecordsLock.Lock()
@@ -152,25 +170,13 @@ func (m *mounter) getMountTargetRecord(vmi *v1.VirtualMachineInstance) (*vmiMoun
 	}
 
 	// if not there, see if record is on disk, this can happen if virt-handler restarts
-	recordFile := filepath.Join(m.mountStateDir, filepath.Clean(string(vmi.UID)))
-
-	exists, err := diskutils.FileExists(recordFile)
-	if err != nil {
-		return nil, err
+	record := vmiMountTargetRecord{}
+	err := m.checkpointManager.Get(string(vmi.UID), &record)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("failed to get checkpoint %s, %w", vmi.UID, err)
 	}
 
-	if exists {
-		record := vmiMountTargetRecord{}
-		// #nosec No risk for path injection. Using static base and cleaned filename
-		bytes, err := os.ReadFile(recordFile)
-		if err != nil {
-			return nil, err
-		}
-		err = json.Unmarshal(bytes, &record)
-		if err != nil {
-			return nil, err
-		}
-
+	if err == nil {
 		// XXX: backward compatibility for old unresolved paths, can be removed in July 2023
 		// After a one-time convert and persist, old records are safe too.
 		if !record.UsesSafePaths {
@@ -208,17 +214,16 @@ func (m *mounter) setAddMountTargetRecordHelper(vmi *v1.VirtualMachineInstance, 
 	// After a one-time convert and persist, old records are safe too.
 	record.UsesSafePaths = true
 
-	recordFile := filepath.Join(m.mountStateDir, string(vmi.UID))
-	fileExists, err := diskutils.FileExists(recordFile)
-	if err != nil {
-		return err
+	err := m.checkpointManager.Get(string(vmi.UID), &vmiMountTargetRecord{})
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("failed to get checkpoint %s, %w", vmi.UID, err)
 	}
 
 	m.mountRecordsLock.Lock()
 	defer m.mountRecordsLock.Unlock()
 
 	existingRecord, ok := m.mountRecords[vmi.UID]
-	if ok && fileExists && equality.Semantic.DeepEqual(existingRecord, record) {
+	if ok && !errors.Is(err, os.ErrNotExist) && equality.Semantic.DeepEqual(existingRecord, record) {
 		// already done
 		return nil
 	}
@@ -227,19 +232,8 @@ func (m *mounter) setAddMountTargetRecordHelper(vmi *v1.VirtualMachineInstance, 
 		record.MountTargetEntries = append(record.MountTargetEntries, existingRecord.MountTargetEntries...)
 	}
 
-	bytes, err := json.Marshal(record)
-	if err != nil {
-		return err
-	}
-
-	err = os.MkdirAll(filepath.Dir(recordFile), 0750)
-	if err != nil {
-		return err
-	}
-
-	err = os.WriteFile(recordFile, bytes, 0600)
-	if err != nil {
-		return err
+	if err := m.checkpointManager.Store(string(vmi.UID), record); err != nil {
+		return fmt.Errorf("failed to checkpoint %s, %w", vmi.UID, err)
 	}
 
 	m.mountRecords[vmi.UID] = record
@@ -249,31 +243,39 @@ func (m *mounter) setAddMountTargetRecordHelper(vmi *v1.VirtualMachineInstance, 
 
 // Mount takes a vmi and mounts all container disks of the VMI, so that they are visible for the qemu process.
 // Additionally qcow2 images are validated if "verify" is true. The validation happens with rlimits set, to avoid DOS.
-func (m *mounter) MountAndVerify(vmi *v1.VirtualMachineInstance) (map[string]*containerdisk.DiskInfo, error) {
-	record := vmiMountTargetRecord{}
-	disksInfo := map[string]*containerdisk.DiskInfo{}
+func (m *mounter) MountAndVerify(vmi *v1.VirtualMachineInstance) error {
+	if m.clusterConfig.ImageVolumeEnabled() {
+		bindMountNeeded, err := m.needsBindMountFunc(vmi)
+		if err != nil {
+			return fmt.Errorf("fail to detect if bind mount needed for vmi: %s in namespace: %v. err: %v", vmi.Name, vmi.Namespace, err)
+		}
+		if !bindMountNeeded {
+			return nil
+		}
+	}
 
+	record := vmiMountTargetRecord{}
 	for i, volume := range vmi.Spec.Volumes {
 		if volume.ContainerDisk != nil {
 			diskTargetDir, err := containerdisk.GetDiskTargetDirFromHostView(vmi)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			diskName := containerdisk.GetDiskTargetName(i)
 			// If diskName is a symlink it will fail if the target exists.
 			if err := safepath.TouchAtNoFollow(diskTargetDir, diskName, os.ModePerm); err != nil {
-				if err != nil && !os.IsExist(err) {
-					return nil, fmt.Errorf("failed to create mount point target: %v", err)
+				if !os.IsExist(err) {
+					return fmt.Errorf("failed to create mount point target: %v", err)
 				}
 			}
 			targetFile, err := safepath.JoinNoFollow(diskTargetDir, diskName)
 			if err != nil {
-				return nil, err
+				return err
 			}
 
 			sock, err := m.socketPathGetter(vmi, i)
 			if err != nil {
-				return nil, err
+				return err
 			}
 
 			record.MountTargetEntries = append(record.MountTargetEntries, vmiMountTargetEntry{
@@ -286,59 +288,45 @@ func (m *mounter) MountAndVerify(vmi *v1.VirtualMachineInstance) (map[string]*co
 	if len(record.MountTargetEntries) > 0 {
 		err := m.setMountTargetRecord(vmi, &record)
 		if err != nil {
-			return nil, err
+			return err
 		}
-	}
-
-	vmiRes, err := m.podIsolationDetector.Detect(vmi)
-	if err != nil {
-		return nil, fmt.Errorf("failed to detect VMI pod: %v", err)
 	}
 
 	for i, volume := range vmi.Spec.Volumes {
 		if volume.ContainerDisk != nil {
 			diskTargetDir, err := containerdisk.GetDiskTargetDirFromHostView(vmi)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			diskName := containerdisk.GetDiskTargetName(i)
 			targetFile, err := safepath.JoinNoFollow(diskTargetDir, diskName)
 			if err != nil {
-				return nil, err
+				return err
 			}
 
 			if isMounted, err := isolation.IsMounted(targetFile); err != nil {
-				return nil, fmt.Errorf("failed to determine if %s is already mounted: %v", targetFile, err)
+				return fmt.Errorf("failed to determine if %s is already mounted: %v", targetFile, err)
 			} else if !isMounted {
 
 				sourceFile, err := m.getContainerDiskPath(vmi, &volume, i)
 				if err != nil {
-					return nil, fmt.Errorf("failed to find a sourceFile in containerDisk %v: %v", volume.Name, err)
+					return fmt.Errorf("failed to find a sourceFile in containerDisk %v: %v", volume.Name, err)
 				}
 
 				log.DefaultLogger().Object(vmi).Infof("Bind mounting container disk at %s to %s", sourceFile, targetFile)
 				out, err := virt_chroot.MountChroot(sourceFile, targetFile, true).CombinedOutput()
 				if err != nil {
-					return nil, fmt.Errorf("failed to bindmount containerDisk %v: %v : %v", volume.Name, string(out), err)
+					return fmt.Errorf("failed to bindmount containerDisk %v: %v : %v", volume.Name, string(out), err)
 				}
 			}
-
-			imageInfo, err := isolation.GetImageInfo(containerdisk.GetDiskTargetPathFromLauncherView(i), vmiRes, m.clusterConfig.GetDiskVerification())
-			if err != nil {
-				return nil, fmt.Errorf("failed to get image info: %v", err)
-			}
-			if err := containerdisk.VerifyImage(imageInfo); err != nil {
-				return nil, fmt.Errorf("invalid image in containerDisk %v: %v", volume.Name, err)
-			}
-			disksInfo[volume.Name] = imageInfo
 		}
 	}
-	err = m.mountKernelArtifacts(vmi, true)
+	err := m.mountKernelArtifacts(vmi, true)
 	if err != nil {
-		return nil, fmt.Errorf("error mounting kernel artifacts: %v", err)
+		return fmt.Errorf("error mounting kernel artifacts: %v", err)
 	}
 
-	return disksInfo, nil
+	return nil
 }
 
 // Unmount unmounts all container disks of a given VMI.
@@ -377,7 +365,7 @@ func (m *mounter) Unmount(vmi *v1.VirtualMachineInstance) error {
 			return fmt.Errorf(failedCheckMountPointFmt, file, err)
 		} else if mounted {
 			log.DefaultLogger().Object(vmi).Infof("unmounting container disk at path %s", file)
-			// #nosec No risk for attacket injection. Parameters are predefined strings
+			// #nosec No risk for attacker injection. Parameters are predefined strings
 			out, err := virt_chroot.UmountChroot(file.Path()).CombinedOutput()
 			if err != nil {
 				return fmt.Errorf(failedUnmountFmt, file, string(out), err)
@@ -393,9 +381,22 @@ func (m *mounter) Unmount(vmi *v1.VirtualMachineInstance) error {
 }
 
 func (m *mounter) ContainerDisksReady(vmi *v1.VirtualMachineInstance, notInitializedSince time.Time) (bool, error) {
+	if m.clusterConfig.ImageVolumeEnabled() {
+		bindMountNeeded, err := m.needsBindMountFunc(vmi)
+		if err != nil {
+			return false, fmt.Errorf("fail to detect if bind mount needed for vmi: %s in namespace: %v. err: %v", vmi.Name, vmi.Namespace, err)
+		}
+		if !bindMountNeeded {
+			return true, nil
+		}
+	}
 	for i, volume := range vmi.Spec.Volumes {
 		if volume.ContainerDisk != nil {
-			_, err := m.socketPathGetter(vmi, i)
+			sock, err := m.socketPathGetter(vmi, i)
+			if err == nil {
+				_, err = m.podIsolationDetector.DetectForSocket(sock)
+			}
+
 			if err != nil {
 				log.DefaultLogger().Object(vmi).Reason(err).Infof("containerdisk %s not yet ready", volume.Name)
 				if time.Now().After(notInitializedSince.Add(m.suppressWarningTimeout)) {
@@ -403,11 +404,15 @@ func (m *mounter) ContainerDisksReady(vmi *v1.VirtualMachineInstance, notInitial
 				}
 				return false, nil
 			}
+
 		}
 	}
 
 	if util.HasKernelBootContainerImage(vmi) {
-		_, err := m.kernelBootSocketPathGetter(vmi)
+		sock, err := m.kernelBootSocketPathGetter(vmi)
+		if err == nil {
+			_, err = m.podIsolationDetector.DetectForSocket(sock)
+		}
 		if err != nil {
 			log.DefaultLogger().Object(vmi).Reason(err).Info("kernelboot container not yet ready")
 			if time.Now().After(notInitializedSince.Add(m.suppressWarningTimeout)) {
@@ -628,7 +633,7 @@ func (m *mounter) getContainerDiskPath(vmi *v1.VirtualMachineInstance, volume *v
 		return nil, ErrDiskContainerGone
 	}
 
-	res, err := m.podIsolationDetector.DetectForSocket(vmi, sock)
+	res, err := m.podIsolationDetector.DetectForSocket(sock)
 	if err != nil {
 		return nil, fmt.Errorf("failed to detect socket for containerDisk %v: %v", volume.Name, err)
 	}
@@ -647,7 +652,7 @@ func (m *mounter) getKernelArtifactPaths(vmi *v1.VirtualMachineInstance) (*kerne
 		return nil, ErrDiskContainerGone
 	}
 
-	res, err := m.podIsolationDetector.DetectForSocket(vmi, sock)
+	res, err := m.podIsolationDetector.DetectForSocket(sock)
 	if err != nil {
 		return nil, fmt.Errorf("failed to detect socket for kernelboot container: %v", err)
 	}
@@ -752,66 +757,27 @@ func (m *mounter) ComputeChecksums(vmi *v1.VirtualMachineInstance) (*DiskChecksu
 	return diskChecksums, nil
 }
 
-func compareChecksums(expectedChecksum, computedChecksum uint32) error {
-	if expectedChecksum == 0 {
-		return ErrChecksumMissing
-	}
-	if expectedChecksum != computedChecksum {
-		return ErrChecksumMismatch
-	}
-	// checksum ok
-	return nil
-}
+type needsBindMountFunc func(vmi *v1.VirtualMachineInstance) (bool, error)
 
-func VerifyChecksums(mounter Mounter, vmi *v1.VirtualMachineInstance) error {
-	diskChecksums, err := mounter.ComputeChecksums(vmi)
-	if err != nil {
-		return fmt.Errorf("failed to compute checksums: %s", err)
-	}
-
-	// verify containerdisks
-	for _, volumeStatus := range vmi.Status.VolumeStatus {
-		if volumeStatus.ContainerDiskVolume == nil {
-			continue
-		}
-
-		expectedChecksum := volumeStatus.ContainerDiskVolume.Checksum
-		computedChecksum := diskChecksums.ContainerDiskChecksums[volumeStatus.Name]
-		if err := compareChecksums(expectedChecksum, computedChecksum); err != nil {
-			return fmt.Errorf("checksum error for volume %s: %w", volumeStatus.Name, err)
-		}
-	}
-
-	// verify kernel and initrd
-	if util.HasKernelBootContainerImage(vmi) {
-		if vmi.Status.KernelBootStatus == nil {
-			return ErrChecksumMissing
-		}
-
-		if diskChecksums.KernelBootChecksum.Kernel != nil {
-			if vmi.Status.KernelBootStatus.KernelInfo == nil {
-				return fmt.Errorf("checksum missing for kernel image: %w", ErrChecksumMissing)
+func newNeedsBindMountFunc(baseDir string) needsBindMountFunc {
+	return func(vmi *v1.VirtualMachineInstance) (bool, error) {
+		for podUID := range vmi.Status.ActivePods {
+			virtLauncherSocketPath := cmdclient.SocketDirectoryOnHost(string(podUID))
+			launcherSocketExists, err := diskutils.FileExists(virtLauncherSocketPath)
+			if err != nil {
+				return false, err
 			}
-
-			expectedChecksum := vmi.Status.KernelBootStatus.KernelInfo.Checksum
-			computedChecksum := *diskChecksums.KernelBootChecksum.Kernel
-			if err := compareChecksums(expectedChecksum, computedChecksum); err != nil {
-				return fmt.Errorf("checksum error for kernel image: %w", err)
+			basePath := fmt.Sprintf("%s/pods/%s/containers", baseDir, string(podUID))
+			containerDiskPath := filepath.Join(basePath, "container-disk-binary")
+			containerDiskInitContainerExists, err := diskutils.FileExists(containerDiskPath)
+			if err != nil {
+				return false, err
+			}
+			// we must check for launcherSocket to make sure this isn't an old launcher that is already completed
+			if launcherSocketExists && containerDiskInitContainerExists {
+				return true, nil
 			}
 		}
-
-		if diskChecksums.KernelBootChecksum.Initrd != nil {
-			if vmi.Status.KernelBootStatus.InitrdInfo == nil {
-				return fmt.Errorf("checksum missing for initrd image: %w", ErrChecksumMissing)
-			}
-
-			expectedChecksum := vmi.Status.KernelBootStatus.InitrdInfo.Checksum
-			computedChecksum := *diskChecksums.KernelBootChecksum.Initrd
-			if err := compareChecksums(expectedChecksum, computedChecksum); err != nil {
-				return fmt.Errorf("checksum error for initrd image: %w", err)
-			}
-		}
+		return false, nil
 	}
-
-	return nil
 }

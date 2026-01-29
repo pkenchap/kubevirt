@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2020 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -34,13 +34,12 @@ import (
 	"k8s.io/client-go/util/workqueue"
 
 	kubevirtv1 "kubevirt.io/api/core/v1"
-	snapshotv1 "kubevirt.io/api/snapshot/v1alpha1"
+	snapshotv1 "kubevirt.io/api/snapshot/v1beta1"
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
 
 	"kubevirt.io/kubevirt/pkg/controller"
-	"kubevirt.io/kubevirt/pkg/util/status"
 	watchutil "kubevirt.io/kubevirt/pkg/virt-controller/watch/util"
 )
 
@@ -74,6 +73,7 @@ type VMSnapshotController struct {
 	VMInformer                cache.SharedIndexInformer
 	VMIInformer               cache.SharedIndexInformer
 	StorageClassInformer      cache.SharedIndexInformer
+	StorageProfileInformer    cache.SharedIndexInformer
 	PVCInformer               cache.SharedIndexInformer
 	CRDInformer               cache.SharedIndexInformer
 	PodInformer               cache.SharedIndexInformer
@@ -84,27 +84,40 @@ type VMSnapshotController struct {
 
 	ResyncPeriod time.Duration
 
-	vmSnapshotQueue        workqueue.RateLimitingInterface
-	vmSnapshotContentQueue workqueue.RateLimitingInterface
-	crdQueue               workqueue.RateLimitingInterface
-	vmSnapshotStatusQueue  workqueue.RateLimitingInterface
-	vmQueue                workqueue.RateLimitingInterface
+	vmSnapshotQueue        workqueue.TypedRateLimitingInterface[string]
+	vmSnapshotContentQueue workqueue.TypedRateLimitingInterface[string]
+	crdQueue               workqueue.TypedRateLimitingInterface[string]
+	vmSnapshotStatusQueue  workqueue.TypedRateLimitingInterface[string]
+	vmQueue                workqueue.TypedRateLimitingInterface[string]
 
 	dynamicInformerMap map[string]*dynamicInformer
 	eventHandlerMap    map[string]cache.ResourceEventHandlerFuncs
-
-	vmStatusUpdater *status.VMStatusUpdater
 }
 
 var supportedCRDVersions = []string{"v1"}
 
 // Init initializes the snapshot controller
 func (ctrl *VMSnapshotController) Init() error {
-	ctrl.vmSnapshotQueue = workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "virt-controller-snapshot-vmsnapshot")
-	ctrl.vmSnapshotContentQueue = workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "virt-controller-snapshot-vmsnapshotcontent")
-	ctrl.crdQueue = workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "virt-controller-snapshot-crd")
-	ctrl.vmSnapshotStatusQueue = workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "virt-controller-snapshot-vmsnashotstatus")
-	ctrl.vmQueue = workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "virt-controller-snapshot-vm")
+	ctrl.vmSnapshotQueue = workqueue.NewTypedRateLimitingQueueWithConfig[string](
+		workqueue.DefaultTypedControllerRateLimiter[string](),
+		workqueue.TypedRateLimitingQueueConfig[string]{Name: "virt-controller-snapshot-vmsnapshot"},
+	)
+	ctrl.vmSnapshotContentQueue = workqueue.NewTypedRateLimitingQueueWithConfig[string](
+		workqueue.DefaultTypedControllerRateLimiter[string](),
+		workqueue.TypedRateLimitingQueueConfig[string]{Name: "virt-controller-snapshot-vmsnapshotcontent"},
+	)
+	ctrl.crdQueue = workqueue.NewTypedRateLimitingQueueWithConfig[string](
+		workqueue.DefaultTypedControllerRateLimiter[string](),
+		workqueue.TypedRateLimitingQueueConfig[string]{Name: "virt-controller-snapshot-crd"},
+	)
+	ctrl.vmSnapshotStatusQueue = workqueue.NewTypedRateLimitingQueueWithConfig[string](
+		workqueue.DefaultTypedControllerRateLimiter[string](),
+		workqueue.TypedRateLimitingQueueConfig[string]{Name: "virt-controller-snapshot-vmsnashotstatus"},
+	)
+	ctrl.vmQueue = workqueue.NewTypedRateLimitingQueueWithConfig[string](
+		workqueue.DefaultTypedControllerRateLimiter[string](),
+		workqueue.TypedRateLimitingQueueConfig[string]{Name: "virt-controller-snapshot-vm"},
+	)
 
 	ctrl.dynamicInformerMap = map[string]*dynamicInformer{
 		volumeSnapshotCRD:      {informerFunc: controller.VolumeSnapshotInformer},
@@ -151,6 +164,7 @@ func (ctrl *VMSnapshotController) Init() error {
 		cache.ResourceEventHandlerFuncs{
 			AddFunc:    ctrl.handleVM,
 			UpdateFunc: func(oldObj, newObj interface{}) { ctrl.handleVM(newObj) },
+			DeleteFunc: ctrl.handleVM,
 		},
 		ctrl.ResyncPeriod,
 	)
@@ -162,6 +176,7 @@ func (ctrl *VMSnapshotController) Init() error {
 		cache.ResourceEventHandlerFuncs{
 			AddFunc:    ctrl.handleVMI,
 			UpdateFunc: func(oldObj, newObj interface{}) { ctrl.handleVMI(newObj) },
+			DeleteFunc: ctrl.handleVMI,
 		},
 		ctrl.ResyncPeriod,
 	)
@@ -205,7 +220,6 @@ func (ctrl *VMSnapshotController) Init() error {
 		return err
 	}
 
-	ctrl.vmStatusUpdater = status.NewVMStatusUpdater(ctrl.Client)
 	return nil
 }
 
@@ -232,6 +246,7 @@ func (ctrl *VMSnapshotController) Run(threadiness int, stopCh <-chan struct{}) e
 		ctrl.PVCInformer.HasSynced,
 		ctrl.DVInformer.HasSynced,
 		ctrl.StorageClassInformer.HasSynced,
+		ctrl.StorageProfileInformer.HasSynced,
 	) {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
@@ -559,7 +574,6 @@ func (ctrl *VMSnapshotController) handleDV(obj interface{}) {
 	if dv, ok := obj.(*cdiv1.DataVolume); ok {
 		key, _ := cache.MetaNamespaceKeyFunc(dv)
 		log.Log.V(3).Infof("Processing DV %s", key)
-		// TODO come back when DV/PVC name may differ
 		for _, idx := range []string{"dv", "pvc"} {
 			keys, err := ctrl.VMInformer.GetIndexer().IndexKeys(idx, key)
 			if err != nil {
@@ -590,6 +604,23 @@ func (ctrl *VMSnapshotController) handlePVC(obj interface{}) {
 			ctrl.vmSnapshotStatusQueue.Add(k)
 		}
 	}
+}
+
+func (ctrl *VMSnapshotController) getVolumeSnapshotClass(vscName string) (*vsv1.VolumeSnapshotClass, error) {
+	di := ctrl.dynamicInformerMap[volumeSnapshotClassCRD]
+	di.mutex.Lock()
+	defer di.mutex.Unlock()
+
+	if di.informer == nil {
+		return nil, nil
+	}
+
+	obj, exists, err := di.informer.GetStore().GetByKey(vscName)
+	if !exists || err != nil {
+		return nil, err
+	}
+
+	return obj.(*vsv1.VolumeSnapshotClass).DeepCopy(), nil
 }
 
 func (ctrl *VMSnapshotController) getVolumeSnapshotClasses() []vsv1.VolumeSnapshotClass {

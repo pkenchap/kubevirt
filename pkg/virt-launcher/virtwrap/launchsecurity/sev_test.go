@@ -23,10 +23,9 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"k8s.io/utils/pointer"
-
 	v1 "kubevirt.io/api/core/v1"
 
+	"kubevirt.io/kubevirt/pkg/pointer"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/launchsecurity"
 )
 
@@ -43,12 +42,12 @@ var _ = Describe("LaunchSecurity: AMD Secure Encrypted Virtualization (SEV)", fu
 			Expect(launchsecurity.SEVPolicyToBits(&policy)).To(Equal(launchsecurity.SEVPolicyNoDebug))
 
 			policy = v1.SEVPolicy{
-				EncryptedState: pointer.Bool(false),
+				EncryptedState: pointer.P(false),
 			}
 			Expect(launchsecurity.SEVPolicyToBits(&policy)).To(Equal(launchsecurity.SEVPolicyNoDebug))
 
 			policy = v1.SEVPolicy{
-				EncryptedState: pointer.Bool(true),
+				EncryptedState: pointer.P(true),
 			}
 			Expect(launchsecurity.SEVPolicyToBits(&policy)).ToNot(Equal(launchsecurity.SEVPolicyNoDebug))
 			Expect(launchsecurity.SEVPolicyToBits(&policy) & launchsecurity.SEVPolicyNoDebug).To(Equal(launchsecurity.SEVPolicyNoDebug))
@@ -58,12 +57,22 @@ var _ = Describe("LaunchSecurity: AMD Secure Encrypted Virtualization (SEV)", fu
 			Expect(field).ToNot(BeNil())
 			*field = nil
 			Expect(launchsecurity.SEVPolicyToBits(&policy)).To(Equal(launchsecurity.SEVPolicyNoDebug))
-			*field = pointer.Bool(true)
+			*field = pointer.P(true)
 			Expect(launchsecurity.SEVPolicyToBits(&policy)).To(Equal(launchsecurity.SEVPolicyNoDebug | expectedBit))
-			*field = pointer.Bool(false)
+			*field = pointer.P(false)
 			Expect(launchsecurity.SEVPolicyToBits(&policy)).To(Equal(launchsecurity.SEVPolicyNoDebug))
 		},
 			Entry("EncryptedState", launchsecurity.SEVPolicyEncryptedState, &policy.EncryptedState),
 		)
+
+		It("should correctly set SNP-specific bits set when SNP is enabled", func() {
+			snpPolicy := v1.SEVSNP{}
+			Expect(launchsecurity.SEVSNPPolicyToBits(&snpPolicy) & launchsecurity.SNPPolicySmt).To(Equal(launchsecurity.SNPPolicySmt))
+			Expect(launchsecurity.SEVSNPPolicyToBits(&snpPolicy) & launchsecurity.SNPPolicyReserved).To(Equal(launchsecurity.SNPPolicyReserved))
+		})
+
+		It("should return zero when SNP policy is nil", func() {
+			Expect(launchsecurity.SEVSNPPolicyToBits(nil)).To(Equal(uint(0)))
+		})
 	})
 })

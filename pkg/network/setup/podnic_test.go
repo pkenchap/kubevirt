@@ -1,3 +1,21 @@
+/*
+ * This file is part of the KubeVirt project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * Copyright The KubeVirt Authors.
+ */
+
 package network
 
 import (
@@ -7,7 +25,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/golang/mock/gomock"
+	"go.uber.org/mock/gomock"
 
 	v1 "kubevirt.io/api/core/v1"
 
@@ -20,10 +38,6 @@ import (
 )
 
 var _ = Describe("podNIC", func() {
-	const (
-		masqueradeCidr     = "10.0.2.0/30"
-		masqueradeIpv6Cidr = "fd10:0:2::0/120"
-	)
 	var (
 		mockNetwork          *netdriver.MockNetworkHandler
 		baseCacheCreator     tempCacheCreator
@@ -31,13 +45,11 @@ var _ = Describe("podNIC", func() {
 		ctrl                 *gomock.Controller
 	)
 
-	newPhase2PodNICWithMocks := func(vmi *v1.VirtualMachineInstance) (*podNIC, error) {
-		podnic, err := newPodNIC(vmi, &vmi.Spec.Networks[0], &vmi.Spec.Domain.Devices.Interfaces[0], mockNetwork, &baseCacheCreator, nil)
-		if err != nil {
-			return nil, err
-		}
+	newPhase2PodNICWithMocks := func(vmi *v1.VirtualMachineInstance) *podNIC {
+		podnic := newPodNIC(vmi, &vmi.Spec.Networks[0], &vmi.Spec.Domain.Devices.Interfaces[0], mockNetwork, &baseCacheCreator)
 		podnic.dhcpConfigurator = mockDHCPConfigurator
-		return podnic, nil
+
+		return podnic
 	}
 	BeforeEach(func() {
 		dutils.MockDefaultOwnershipManager()
@@ -57,26 +69,18 @@ var _ = Describe("podNIC", func() {
 			vmi    *v1.VirtualMachineInstance
 		)
 		BeforeEach(func() {
-			var err error
 			domain = NewDomainWithBridgeInterface()
 			vmi = newVMIBridgeInterface("testnamespace", "testVmName")
 			api.NewDefaulter(runtime.GOARCH).SetObjectDefaults_Domain(domain)
-			podnic, err = newPhase2PodNICWithMocks(vmi)
-			Expect(err).ToNot(HaveOccurred())
+			podnic = newPhase2PodNICWithMocks(vmi)
+
+			const launcherPID = "self"
 			Expect(
 				cache.WriteDHCPInterfaceCache(
 					podnic.cacheCreator,
-					getPIDString(podnic.launcherPID),
+					launcherPID,
 					podnic.podInterfaceName,
 					&cache.DHCPConfig{Name: podnic.podInterfaceName},
-				),
-			).To(Succeed())
-			Expect(
-				cache.WriteDomainInterfaceCache(
-					podnic.cacheCreator,
-					getPIDString(podnic.launcherPID),
-					podnic.vmiSpecIface.Name,
-					&domain.Spec.Devices.Interfaces[0],
 				),
 			).To(Succeed())
 		})

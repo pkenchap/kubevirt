@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2018 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -46,7 +46,10 @@ const (
 )
 
 type Device interface {
-	Start(stop <-chan struct{}) (err error)
+	Start(stop <-chan struct{}) error
+	ListAndWatch(*pluginapi.Empty, pluginapi.DevicePlugin_ListAndWatchServer) error
+	PreStartContainer(context.Context, *pluginapi.PreStartContainerRequest) (*pluginapi.PreStartContainerResponse, error)
+	Allocate(context.Context, *pluginapi.AllocateRequest) (*pluginapi.AllocateResponse, error)
 	GetDeviceName() string
 	GetInitialized() bool
 }

@@ -1,13 +1,29 @@
+/*
+ * This file is part of the KubeVirt project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * Copyright The KubeVirt Authors.
+ *
+ */
+
 package virtiofs
 
 import (
 	"fmt"
 	"path/filepath"
 
-	v1 "kubevirt.io/api/core/v1"
-
 	"kubevirt.io/kubevirt/pkg/util"
-	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 )
 
 // This is empty dir
@@ -17,12 +33,4 @@ var VirtioFSContainersMountBaseDir = filepath.Join(util.VirtShareDir, VirtioFSCo
 func VirtioFSSocketPath(volumeName string) string {
 	socketName := fmt.Sprintf("%s.sock", volumeName)
 	return filepath.Join(VirtioFSContainersMountBaseDir, socketName)
-}
-
-// CanRunWithPrivileges returns true if the virtiofs container of the volume
-// can run as user root
-func CanRunWithPrivileges(config *virtconfig.ClusterConfig, volume *v1.Volume) bool {
-	// config volumes does not require a privileged container
-	return config.VirtiofsEnabled() && volume.ConfigMap == nil && volume.Secret == nil &&
-		volume.ServiceAccount == nil && volume.DownwardAPI == nil
 }

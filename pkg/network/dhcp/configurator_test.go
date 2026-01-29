@@ -1,12 +1,30 @@
+/*
+ * This file is part of the KubeVirt project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * Copyright The KubeVirt Authors.
+ */
+
 package dhcp
 
 import (
 	"fmt"
 	"os"
 
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
 
 	"github.com/vishvananda/netlink"
 
@@ -22,7 +40,6 @@ var _ = Describe("DHCP configurator", func() {
 		advertisingCIDR    = "10.10.10.0/24"
 		bridgeName         = "br0"
 		ifaceName          = "eth0"
-		launcherPID        = "self"
 		fakeDhcpStartedDir = "/tmp/dhcpStartedPath"
 	)
 
@@ -39,7 +56,7 @@ var _ = Describe("DHCP configurator", func() {
 	})
 
 	newBridgeConfigurator := func(advertisingIfaceName string) *configurator {
-		configurator := NewBridgeConfigurator(&cacheCreator, launcherPID, advertisingIfaceName, netdriver.NewMockNetworkHandler(gomock.NewController(GinkgoT())), "", nil, nil, "")
+		configurator := NewBridgeConfigurator(&cacheCreator, advertisingIfaceName, netdriver.NewMockNetworkHandler(gomock.NewController(GinkgoT())), "", nil, nil, "")
 		configurator.dhcpStartedDirectory = fakeDhcpStartedDir
 		return configurator
 	}

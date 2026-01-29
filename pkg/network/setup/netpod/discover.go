@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2023 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -37,7 +37,7 @@ import (
 // the relevant data (for recovery and data sharing).
 func (n NetPod) discover(currentStatus *nmstate.Status) error {
 	podIfaceStatusByName := ifaceStatusByName(currentStatus.Interfaces)
-	podIfaceNameByVMINetwork := createNetworkNameScheme(n.vmiSpecNets, currentStatus.Interfaces)
+	podIfaceNameByVMINetwork := createNetworkNameScheme(n.vmiSpecNets, n.vmiIfaceStatuses, currentStatus.Interfaces)
 
 	for _, vmiSpecIface := range n.vmiSpecIfaces {
 		podIfaceName := podIfaceNameByVMINetwork[vmiSpecIface.Name]
@@ -63,31 +63,7 @@ func (n NetPod) discover(currentStatus *nmstate.Status) error {
 				return err
 			}
 
-			// This cache is no longer used by vit-launcher, the dummy interface is used instead to store the data.
-			// It is kept here for backward compatibility.
-			if err := n.storeBridgeDomainInterfaceData(podIfaceStatus, vmiSpecIface); err != nil {
-				return err
-			}
-
 		case vmiSpecIface.Masquerade != nil:
-			if !podIfaceExists {
-				return fmt.Errorf("pod link (%s) is missing", podIfaceName)
-			}
-
-			if err := n.storePodInterfaceData(vmiSpecIface, podIfaceStatus); err != nil {
-				return err
-			}
-
-		case vmiSpecIface.Passt != nil:
-			if !podIfaceExists {
-				return fmt.Errorf("pod link (%s) is missing", podIfaceName)
-			}
-
-			if err := n.storePodInterfaceData(vmiSpecIface, podIfaceStatus); err != nil {
-				return err
-			}
-
-		case vmiSpecIface.Slirp != nil:
 			if !podIfaceExists {
 				return fmt.Errorf("pod link (%s) is missing", podIfaceName)
 			}
@@ -104,8 +80,7 @@ func (n NetPod) discover(currentStatus *nmstate.Status) error {
 				}
 			}
 
-		// Skip the discovery for all other known network interface bindings.
-		case vmiSpecIface.Macvtap != nil:
+		// Skip the discovery for other known network interface bindings.
 		case vmiSpecIface.SRIOV != nil:
 		default:
 			return fmt.Errorf("undefined binding method: %v", vmiSpecIface)

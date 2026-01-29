@@ -24,6 +24,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"kubevirt.io/api/backup"
 	"kubevirt.io/api/clone"
 	virtv1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/api/export"
@@ -101,9 +102,11 @@ var _ = Describe("Cluster role and cluster role bindings", func() {
 				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMInstancesRemoveVolume), virtv1.SubresourceGroupName, apiVMInstancesRemoveVolume, "update"),
 				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMInstancesFreeze), virtv1.SubresourceGroupName, apiVMInstancesFreeze, "update"),
 				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMInstancesUnfreeze), virtv1.SubresourceGroupName, apiVMInstancesUnfreeze, "update"),
+				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMInstancesReset), virtv1.SubresourceGroupName, apiVMInstancesReset, "update"),
 				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMInstancesSoftReboot), virtv1.SubresourceGroupName, apiVMInstancesSoftReboot, "update"),
 				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMInstancesSEVSetupSession), virtv1.SubresourceGroupName, apiVMInstancesSEVSetupSession, "update"),
 				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMInstancesSEVInjectLaunchSecret), virtv1.SubresourceGroupName, apiVMInstancesSEVInjectLaunchSecret, "update"),
+				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMInstancesEvacuateCancel), virtv1.SubresourceGroupName, apiVMInstancesEvacuateCancel, "update"),
 
 				Entry(fmt.Sprintf("get %s/%s", virtv1.SubresourceGroupName, apiVMExpandSpec), virtv1.SubresourceGroupName, apiVMExpandSpec, "get"),
 				Entry(fmt.Sprintf("get %s/%s", virtv1.SubresourceGroupName, apiVMPortForward), virtv1.SubresourceGroupName, apiVMPortForward, "get"),
@@ -113,8 +116,8 @@ var _ = Describe("Cluster role and cluster role bindings", func() {
 				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMRestart), virtv1.SubresourceGroupName, apiVMStop, "update"),
 				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMAddVolume), virtv1.SubresourceGroupName, apiVMRestart, "update"),
 				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMRemoveVolume), virtv1.SubresourceGroupName, apiVMAddVolume, "update"),
-				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMMigrate), virtv1.SubresourceGroupName, apiVMMigrate, "update"),
 				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMMemoryDump), virtv1.SubresourceGroupName, apiVMMemoryDump, "update"),
+				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMEvacuateCancel), virtv1.SubresourceGroupName, apiVMEvacuateCancel, "update"),
 
 				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiExpandVmSpec), virtv1.SubresourceGroupName, apiExpandVmSpec, "update"),
 
@@ -122,7 +125,6 @@ var _ = Describe("Cluster role and cluster role bindings", func() {
 				Entry(fmt.Sprintf("do all operations to %s/%s", GroupName, apiVMInstances), GroupName, apiVMInstances, "get", "delete", "create", "update", "patch", "list", "watch", "deletecollection"),
 				Entry(fmt.Sprintf("do all operations to %s/%s", GroupName, apiVMIPresets), GroupName, apiVMIPresets, "get", "delete", "create", "update", "patch", "list", "watch", "deletecollection"),
 				Entry(fmt.Sprintf("do all operations to %s/%s", GroupName, apiVMIReplicasets), GroupName, apiVMIReplicasets, "get", "delete", "create", "update", "patch", "list", "watch", "deletecollection"),
-				Entry(fmt.Sprintf("do all operations to %s/%s", GroupName, apiVMIMigrations), GroupName, apiVMIMigrations, "get", "delete", "create", "update", "patch", "list", "watch", "deletecollection"),
 
 				Entry(fmt.Sprintf("do all operations to %s/%s", snapshot.GroupName, apiVMSnapshots), snapshot.GroupName, apiVMSnapshots, "get", "delete", "create", "update", "patch", "list", "watch", "deletecollection"),
 				Entry(fmt.Sprintf("do all operations to %s/%s", snapshot.GroupName, apiVMSnapshotContents), snapshot.GroupName, apiVMSnapshotContents, "get", "delete", "create", "update", "patch", "list", "watch", "deletecollection"),
@@ -140,6 +142,9 @@ var _ = Describe("Cluster role and cluster role bindings", func() {
 				Entry(fmt.Sprintf("do all operations to %s/%s", pool.GroupName, apiVMPools), pool.GroupName, apiVMPools, "get", "delete", "create", "update", "patch", "list", "watch", "deletecollection"),
 
 				Entry(fmt.Sprintf("get, list, watch %s/%s", migrations.GroupName, migrations.ResourceMigrationPolicies), migrations.GroupName, migrations.ResourceMigrationPolicies, "get", "list", "watch"),
+				Entry(fmt.Sprintf("get, list, watch %s/%s", GroupName, apiVMIMigrations), GroupName, apiVMIMigrations, "get", "list", "watch"),
+
+				Entry(fmt.Sprintf("do all operations to %s/%s", backup.GroupName, apiVMBackups), backup.GroupName, apiVMBackups, "get", "delete", "create", "update", "patch", "list", "watch", "deletecollection"),
 			)
 		})
 
@@ -166,9 +171,11 @@ var _ = Describe("Cluster role and cluster role bindings", func() {
 				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMInstancesRemoveVolume), virtv1.SubresourceGroupName, apiVMInstancesRemoveVolume, "update"),
 				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMInstancesFreeze), virtv1.SubresourceGroupName, apiVMInstancesFreeze, "update"),
 				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMInstancesUnfreeze), virtv1.SubresourceGroupName, apiVMInstancesUnfreeze, "update"),
+				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMInstancesReset), virtv1.SubresourceGroupName, apiVMInstancesReset, "update"),
 				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMInstancesSoftReboot), virtv1.SubresourceGroupName, apiVMInstancesSoftReboot, "update"),
 				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMInstancesSEVSetupSession), virtv1.SubresourceGroupName, apiVMInstancesSEVSetupSession, "update"),
 				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMInstancesSEVInjectLaunchSecret), virtv1.SubresourceGroupName, apiVMInstancesSEVInjectLaunchSecret, "update"),
+				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMInstancesEvacuateCancel), virtv1.SubresourceGroupName, apiVMInstancesEvacuateCancel, "update"),
 
 				Entry(fmt.Sprintf("get %s/%s", virtv1.SubresourceGroupName, apiVMExpandSpec), virtv1.SubresourceGroupName, apiVMExpandSpec, "get"),
 				Entry(fmt.Sprintf("get %s/%s", virtv1.SubresourceGroupName, apiVMPortForward), virtv1.SubresourceGroupName, apiVMPortForward, "get"),
@@ -178,8 +185,8 @@ var _ = Describe("Cluster role and cluster role bindings", func() {
 				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMRestart), virtv1.SubresourceGroupName, apiVMStop, "update"),
 				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMAddVolume), virtv1.SubresourceGroupName, apiVMRestart, "update"),
 				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMRemoveVolume), virtv1.SubresourceGroupName, apiVMAddVolume, "update"),
-				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMMigrate), virtv1.SubresourceGroupName, apiVMMigrate, "update"),
 				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMMemoryDump), virtv1.SubresourceGroupName, apiVMMemoryDump, "update"),
+				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMEvacuateCancel), virtv1.SubresourceGroupName, apiVMEvacuateCancel, "update"),
 
 				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiExpandVmSpec), virtv1.SubresourceGroupName, apiExpandVmSpec, "update"),
 
@@ -187,7 +194,6 @@ var _ = Describe("Cluster role and cluster role bindings", func() {
 				Entry(fmt.Sprintf("get, delete, create, update, patch, list, watch %s/%s", GroupName, apiVMInstances), GroupName, apiVMInstances, "get", "delete", "create", "update", "patch", "list", "watch"),
 				Entry(fmt.Sprintf("get, delete, create, update, patch, list, watch %s/%s", GroupName, apiVMIPresets), GroupName, apiVMIPresets, "get", "delete", "create", "update", "patch", "list", "watch"),
 				Entry(fmt.Sprintf("get, delete, create, update, patch, list, watch %s/%s", GroupName, apiVMIReplicasets), GroupName, apiVMIReplicasets, "get", "delete", "create", "update", "patch", "list", "watch"),
-				Entry(fmt.Sprintf("get, delete, create, update, patch, list, watch %s/%s", GroupName, apiVMIMigrations), GroupName, apiVMIMigrations, "get", "delete", "create", "update", "patch", "list", "watch"),
 
 				Entry(fmt.Sprintf("get, delete, create, update, patch, list, watch %s/%s", snapshot.GroupName, apiVMSnapshots), snapshot.GroupName, apiVMSnapshots, "get", "delete", "create", "update", "patch", "list", "watch"),
 				Entry(fmt.Sprintf("get, delete, create, update, patch, list, watch %s/%s", snapshot.GroupName, apiVMSnapshotContents), snapshot.GroupName, apiVMSnapshotContents, "get", "delete", "create", "update", "patch", "list", "watch"),
@@ -207,6 +213,21 @@ var _ = Describe("Cluster role and cluster role bindings", func() {
 				Entry(fmt.Sprintf("get, list %s/%s", GroupName, apiKubevirts), GroupName, apiKubevirts, "get", "list"),
 
 				Entry(fmt.Sprintf("get, list, watch %s/%s", migrations.GroupName, migrations.ResourceMigrationPolicies), migrations.GroupName, migrations.ResourceMigrationPolicies, "get", "list", "watch"),
+				Entry(fmt.Sprintf("get, list, watch %s/%s", GroupName, apiVMIMigrations), GroupName, apiVMIMigrations, "get", "list", "watch"),
+
+				Entry(fmt.Sprintf("get, delete, create, update, patch, list, watch %s/%s", backup.GroupName, apiVMBackups), backup.GroupName, apiVMBackups, "get", "delete", "create", "update", "patch", "list", "watch"),
+			)
+		})
+
+		Context("migrate cluster role", func() {
+
+			DescribeTable("should contain rule to", func(apiGroup, resource string, verbs ...string) {
+				clusterRole := getObject(clusterObjects, reflect.TypeOf(&rbacv1.ClusterRole{}), "kubevirt.io:migrate").(*rbacv1.ClusterRole)
+				Expect(clusterRole).ToNot(BeNil())
+				expectExactRuleExists(clusterRole.Rules, apiGroup, resource, verbs...)
+			},
+				Entry(fmt.Sprintf("update %s/%s", virtv1.SubresourceGroupName, apiVMMigrate), virtv1.SubresourceGroupName, apiVMMigrate, "update"),
+				Entry(fmt.Sprintf("get, delete, create, update, patch, list, watch %s/%s", GroupName, apiVMIMigrations), GroupName, apiVMIMigrations, "get", "delete", "create", "update", "patch", "list", "watch", "deletecollection"),
 			)
 		})
 
@@ -250,6 +271,8 @@ var _ = Describe("Cluster role and cluster role bindings", func() {
 				Entry(fmt.Sprintf("get, list, watch %s/%s", pool.GroupName, apiVMPools), pool.GroupName, apiVMPools, "get", "list", "watch"),
 
 				Entry(fmt.Sprintf("get, list, watch %s/%s", migrations.GroupName, migrations.ResourceMigrationPolicies), migrations.GroupName, migrations.ResourceMigrationPolicies, "get", "list", "watch"),
+
+				Entry(fmt.Sprintf("get, list, watch %s/%s", backup.GroupName, apiVMBackups), backup.GroupName, apiVMBackups, "get", "list", "watch"),
 			)
 		})
 

@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2022 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -37,20 +37,14 @@ import (
 	typesutil "kubevirt.io/kubevirt/pkg/storage/types"
 )
 
-func ProcessWorkItem(queue workqueue.RateLimitingInterface, handler func(string) (time.Duration, error)) bool {
+func ProcessWorkItem(queue workqueue.TypedRateLimitingInterface[string], handler func(string) (time.Duration, error)) bool {
 	obj, shutdown := queue.Get()
 	if shutdown {
 		return false
 	}
 
-	err := func(obj interface{}) error {
+	err := func(key string) error {
 		defer queue.Done(obj)
-		key, ok := obj.(string)
-		if !ok {
-			queue.Forget(obj)
-			utilruntime.HandleError(fmt.Errorf("expected string in workqueue but got %#v", obj))
-			return nil
-		}
 
 		if requeueAfter, err := handler(key); requeueAfter > 0 || err != nil {
 			if requeueAfter > 0 {
@@ -92,6 +86,10 @@ func PodsUsingPVCs(podInformer cache.SharedIndexInformer, namespace string, pvcN
 		pod, ok := obj.(*corev1.Pod)
 		if !ok {
 			return nil, fmt.Errorf("expected Pod, got %T", obj)
+		}
+
+		if pod.Status.Phase == corev1.PodSucceeded {
+			continue
 		}
 
 		for _, volume := range pod.Spec.Volumes {

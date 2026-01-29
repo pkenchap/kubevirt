@@ -23,7 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"libvirt.org/go/libvirt"
 
-	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/compute"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
@@ -34,7 +34,7 @@ import (
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/cli"
 )
 
-const QEMUSeaBiosDebugPipe = converter.QEMUSeaBiosDebugPipe
+const QEMUSeaBiosDebugPipe = compute.QEMUSeaBiosDebugPipe
 const (
 	qemuConfPath        = "/etc/libvirt/qemu.conf"
 	virtqemudConfPath   = "/etc/libvirt/virtqemud.conf"
@@ -209,7 +209,25 @@ func GetDomainSpecWithFlags(dom cli.VirDomain, flags libvirt.DomainXMLFlags) (*a
 	return domain, nil
 }
 
-func (l LibvirtWrapper) StartVirtquemud(stopChan chan struct{}) {
+// GetAllDomainDevices returns all devices from a domain
+func GetAllDomainDevices(dom cli.VirDomain) (api.Devices, error) {
+	domSpec, err := GetDomainSpecWithFlags(dom, 0)
+	if err != nil {
+		return api.Devices{}, err
+	}
+	return domSpec.Devices, nil
+}
+
+// GetAllDomainDisks returns all disks from a domain
+func GetAllDomainDisks(dom cli.VirDomain) ([]api.Disk, error) {
+	devices, err := GetAllDomainDevices(dom)
+	if err != nil {
+		return nil, err
+	}
+	return devices.Disks, nil
+}
+
+func (l LibvirtWrapper) StartVirtqemud(stopChan chan struct{}) {
 	// we spawn libvirt from virt-launcher in order to ensure the virtqemud+qemu process
 	// doesn't exit until virt-launcher is ready for it to. Virt-launcher traps signals
 	// to perform special shutdown logic. These processes need to live in the same
@@ -330,7 +348,7 @@ func startVirtlogdLogging(stopChan chan struct{}, domainName string, nonRoot boo
 			log.Log.Errorf("virtlogd exited, restarting")
 		}
 
-		// this sleep is to avoid consumming all resources in the
+		// this sleep is to avoid consuming all resources in the
 		// event of a virtlogd crash loop.
 		time.Sleep(time.Second)
 	}
@@ -380,7 +398,7 @@ func startQEMUSeaBiosLogging(stopChan chan struct{}) {
 			return
 		}
 
-		log.Log.Errorf(fmt.Sprintf("%s exited, restarting", logLinePrefix))
+		log.Log.Errorf("%s exited, restarting", logLinePrefix)
 	}
 }
 
@@ -446,8 +464,18 @@ func configureQemuConf(qemuFilename string) (err error) {
 		return err
 	}
 
-	if envVarValue, ok := os.LookupEnv("VIRTIOFSD_DEBUG_LOGS"); ok && (envVarValue == "1") {
+	if debugLogsStr, ok := os.LookupEnv("VIRTIOFSD_DEBUG_LOGS"); ok && (debugLogsStr == "1") {
 		_, err = qemuConf.WriteString("virtiofsd_debug = 1\n")
+		if err != nil {
+			return err
+		}
+	}
+
+	if pathsStr, ok := os.LookupEnv(services.ENV_VAR_SHARED_FILESYSTEM_PATHS); ok {
+		paths := strings.Split(pathsStr, ":")
+		formatted := strings.Join(paths, "\", \"")
+		sharedFsEntry := fmt.Sprintf("shared_filesystems = [ \"%s\" ]\n", formatted)
+		_, err = qemuConf.WriteString(sharedFsEntry)
 		if err != nil {
 			return err
 		}

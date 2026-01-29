@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2017 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -21,76 +21,76 @@ package tests_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
-	"kubevirt.io/kubevirt/tests/decorators"
-	"kubevirt.io/kubevirt/tests/framework/kubevirt"
+	k8sversion "k8s.io/apimachinery/pkg/version"
 
 	expect "github.com/google/goexpect"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"kubevirt.io/kubevirt/tests/exec"
-	"kubevirt.io/kubevirt/tests/testsuite"
-	"kubevirt.io/kubevirt/tests/util"
-
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
-	"kubevirt.io/kubevirt/tests"
+	"kubevirt.io/kubevirt/pkg/libvmi"
+	"kubevirt.io/kubevirt/pkg/virt-config/featuregate"
+
 	"kubevirt.io/kubevirt/tests/console"
 	cd "kubevirt.io/kubevirt/tests/containerdisk"
-	"kubevirt.io/kubevirt/tests/libvmi"
+	"kubevirt.io/kubevirt/tests/decorators"
+	"kubevirt.io/kubevirt/tests/exec"
+	"kubevirt.io/kubevirt/tests/framework/kubevirt"
+	"kubevirt.io/kubevirt/tests/framework/matcher"
+	"kubevirt.io/kubevirt/tests/libkubevirt"
+	"kubevirt.io/kubevirt/tests/libkubevirt/config"
+	"kubevirt.io/kubevirt/tests/libmigration"
+	"kubevirt.io/kubevirt/tests/libpod"
+	"kubevirt.io/kubevirt/tests/libvmifact"
+	"kubevirt.io/kubevirt/tests/libvmops"
 	"kubevirt.io/kubevirt/tests/libwait"
+	"kubevirt.io/kubevirt/tests/testsuite"
+	"kubevirt.io/kubevirt/tools/vms-generator/utils"
 )
 
 var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:component][sig-compute]ContainerDisk", decorators.SigCompute, func() {
 
 	var virtClient kubecli.KubevirtClient
-	var err error
 
 	BeforeEach(func() {
 		virtClient = kubevirt.Client()
 	})
 
-	DescribeTable("should", func(image string, policy k8sv1.PullPolicy, expectedPolicy k8sv1.PullPolicy) {
-		vmi := tests.NewRandomVMIWithEphemeralDisk(image)
-		vmi.Spec.Volumes[0].ContainerDisk.ImagePullPolicy = policy
-		vmi = tests.RunVMIAndExpectScheduling(vmi, 60)
-		Expect(vmi.Spec.Volumes[0].ContainerDisk.ImagePullPolicy).To(Equal(expectedPolicy))
-		pod, err := libvmi.GetPodByVirtualMachineInstance(vmi, vmi.Namespace)
-		Expect(err).ToNot(HaveOccurred())
-		container := getContainerDiskContainerOfPod(pod, vmi.Spec.Volumes[0].Name)
-		Expect(container.ImagePullPolicy).To(Equal(expectedPolicy))
-	},
-		Entry("[test_id:3246]generate and set Always pull policy", "test", k8sv1.PullPolicy(""), k8sv1.PullAlways),
-		Entry("[test_id:3247]generate and set Always pull policy", "test:latest", k8sv1.PullPolicy(""), k8sv1.PullAlways),
-		Entry("[test_id:3248]generate and set IfNotPresent pull policy", "test@sha256:9c2b78e11c25b3fd0b24b0ed684a112052dff03eee4ca4bdcc4f3168f9a14396", k8sv1.PullPolicy(""), k8sv1.PullIfNotPresent),
-		Entry("[test_id:3249]pass through Never pull policy to the pod", "test@sha256:9c2b78e11c25b3fd0b24b0ed684a112052dff03eee4ca4bdcc4f3168f9a14396", k8sv1.PullNever, k8sv1.PullNever),
-		Entry("[test_id:3250]pass through IfNotPresent pull policy to the pod", "test:latest", k8sv1.PullIfNotPresent, k8sv1.PullIfNotPresent),
-	)
-
-	Describe("[rfe_id:273][crit:medium][vendor:cnv-qe@redhat.com][level:component]Starting and stopping the same VirtualMachineInstance", func() {
+	Describe("[rfe_id:273][crit:medium][vendor:cnv-qe@redhat.com][level:component]Starting and stopping the same VirtualMachine", func() {
 		Context("with ephemeral registry disk", func() {
-			It("[test_id:1463][Conformance] should success multiple times", func() {
-				vmi := tests.NewRandomVMIWithEphemeralDiskAndUserdata(cd.ContainerDiskFor(cd.ContainerDiskCirros), "#!/bin/bash\necho 'hello'\n")
-				num := 2
-				for i := 0; i < num; i++ {
-					By("Starting the VirtualMachineInstance")
-					obj, err := virtClient.RestClient().Post().Resource("virtualmachineinstances").Namespace(testsuite.GetTestNamespace(vmi)).Body(vmi).Do(context.Background()).Get()
+			It("[test_id:1463] should success multiple times", decorators.Conformance, func() {
+				By("Creating the VirtualMachine")
+				vm := libvmi.NewVirtualMachine(libvmifact.NewAlpine())
+				vm, err := virtClient.VirtualMachine(testsuite.GetTestNamespace(vm)).Create(context.TODO(), vm, metav1.CreateOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				for range 5 {
+					By("Starting the VirtualMachine")
+					err := virtClient.VirtualMachine(vm.Namespace).Start(context.TODO(), vm.Name, &v1.StartOptions{})
 					Expect(err).ToNot(HaveOccurred())
-					vmiObj, ok := obj.(*v1.VirtualMachineInstance)
-					Expect(ok).To(BeTrue(), "Object is not of type *v1.VirtualMachineInstance")
-					libwait.WaitForSuccessfulVMIStart(vmiObj)
 
-					By("Stopping the VirtualMachineInstance")
-					_, err = virtClient.RestClient().Delete().Resource("virtualmachineinstances").Namespace(vmi.GetObjectMeta().GetNamespace()).Name(vmi.GetObjectMeta().GetName()).Do(context.Background()).Get()
+					By("Waiting for VMI to be running")
+					Eventually(matcher.ThisVMIWith(vm.Namespace, vm.Name), 2*time.Minute, 1*time.Second).Should(matcher.BeRunning())
+
+					By("Expecting to be able to login")
+					vmi, err := virtClient.VirtualMachineInstance(vm.Namespace).Get(context.TODO(), vm.Name, metav1.GetOptions{})
 					Expect(err).ToNot(HaveOccurred())
+					Expect(console.LoginToAlpine(vmi)).To(Succeed())
+
+					By("Stopping the VirtualMachine")
+					err = virtClient.VirtualMachine(vm.Namespace).Stop(context.TODO(), vm.Name, &v1.StopOptions{})
+					Expect(err).ToNot(HaveOccurred())
+
 					By("Waiting until the VirtualMachineInstance is gone")
 					libwait.WaitForVirtualMachineToDisappearWithTimeout(vmi, 120)
 				}
@@ -99,38 +99,22 @@ var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 	})
 
 	Describe("[rfe_id:273][crit:medium][vendor:cnv-qe@redhat.com][level:component]Starting a VirtualMachineInstance", func() {
-		Context("with ephemeral registry disk", func() {
-			It("[test_id:1464]should not modify the spec on status update", func() {
-				vmi := libvmi.NewCirros()
-				v1.SetObjectDefaults_VirtualMachineInstance(vmi)
-
-				By("Starting the VirtualMachineInstance")
-				vmi, err := virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Create(context.Background(), vmi)
-				Expect(err).ToNot(HaveOccurred())
-				libwait.WaitForSuccessfulVMIStart(vmi)
-				startedVMI, err := virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Get(context.Background(), vmi.ObjectMeta.Name, &metav1.GetOptions{})
-				Expect(err).ToNot(HaveOccurred())
-				By("Checking that the VirtualMachineInstance spec did not change")
-				Expect(startedVMI.Spec).To(Equal(vmi.Spec))
-			})
-		})
-		Context("[Serial]should obey the disk verification limits in the KubeVirt CR", Serial, func() {
+		Context("should obey the disk verification limits in the KubeVirt CR", Serial, func() {
 			It("[test_id:7182]disk verification should fail when the memory limit is too low", func() {
 				By("Reducing the diskVerificaton memory usage limit")
-				kv := util.GetCurrentKv(virtClient)
+				kv := libkubevirt.GetCurrentKv(virtClient)
 				kv.Spec.Configuration.DeveloperConfiguration.DiskVerification = &v1.DiskVerification{
 					MemoryLimit: resource.NewScaledQuantity(42, resource.Kilo),
 				}
-				tests.UpdateKubeVirtConfigValueAndWait(kv.Spec.Configuration)
-				Expect(err).ToNot(HaveOccurred())
+				config.UpdateKubeVirtConfigValueAndWait(kv.Spec.Configuration)
 
 				By("Starting the VirtualMachineInstance")
-				vmi := libvmi.NewCirros()
-				_, err = virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Create(context.Background(), vmi)
+				vmi := libvmifact.NewAlpine()
+				_, err := virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Create(context.Background(), vmi, metav1.CreateOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				By("Checking that the VMI failed")
 				Eventually(func() bool {
-					vmi, err := virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Get(context.Background(), vmi.Name, &metav1.GetOptions{})
+					vmi, err := virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Get(context.Background(), vmi.Name, metav1.GetOptions{})
 					Expect(err).ToNot(HaveOccurred())
 					for _, condition := range vmi.Status.Conditions {
 						if condition.Type == v1.VirtualMachineInstanceSynchronized && condition.Status == k8sv1.ConditionFalse {
@@ -143,42 +127,15 @@ var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 		})
 	})
 
-	Describe("[rfe_id:273][crit:medium][vendor:cnv-qe@redhat.com][level:component]Starting multiple VMIs", func() {
-		Context("with ephemeral registry disk", func() {
-			It("[test_id:1465]should success", func() {
-				const count = 5
-				var vmis []*v1.VirtualMachineInstance
-				for i := 0; i < count; i++ {
-					// Provide 1Mi of memory to prevent VMIs from actually booting.
-					// We only care about the volume containers inside the virt-launcher Pod.
-					vmi := libvmi.NewCirros(libvmi.WithResourceMemory("1Mi"))
-					vmi, err := virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Create(context.Background(), vmi)
-					Expect(err).ToNot(HaveOccurred())
-					vmis = append(vmis, vmi)
-				}
-
-				By("Verifying the containerdisks are online")
-				for _, vmi := range vmis {
-					libwait.WaitForSuccessfulVMIStart(vmi)
-					pods, err := virtClient.CoreV1().Pods(testsuite.GetTestNamespace(vmi)).List(context.Background(), tests.UnfinishedVMIPodSelector(vmi))
-					Expect(err).ToNot(HaveOccurred())
-					Expect(hasContainerDisk(pods.Items)).To(BeTrue())
-				}
-			})
-		})
-	})
-
 	Describe("[rfe_id:273][crit:medium][vendor:cnv-qe@redhat.com][level:component]Starting from custom image location", func() {
 		Context("with disk at /custom-disk/downloaded", func() {
+			// Skip on s390x to avoid building and deploying an additional alpine image
 			It("[test_id:1466]should boot normally", func() {
-				vmi := tests.NewRandomVMIWithEphemeralDiskAndUserdata(cd.ContainerDiskFor(cd.ContainerDiskCirrosCustomLocation), "#!/bin/bash\necho 'hello'\n")
-				for ind, volume := range vmi.Spec.Volumes {
-					if volume.ContainerDisk != nil {
-						vmi.Spec.Volumes[ind].ContainerDisk.Path = "/custom-disk/downloaded"
-					}
-				}
 				By("Starting the VirtualMachineInstance")
-				vmi = tests.RunVMIAndExpectLaunch(vmi, 60)
+				vmi := libvmops.RunVMIAndExpectLaunch(libvmifact.NewCirros(overrideCustomLocation), libvmops.StartupTimeoutSecondsSmall)
+
+				By("Verify VMI is booted")
+				Expect(console.LoginToCirros(vmi)).To(Succeed())
 			})
 		})
 
@@ -187,9 +144,10 @@ var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 	Describe("[rfe_id:273][crit:medium][vendor:cnv-qe@redhat.com][level:component]Starting with virtio-win", func() {
 		Context("with virtio-win as secondary disk", func() {
 			It("[test_id:1467]should boot and have the virtio as sata CDROM", func() {
-				vmi := libvmi.NewAlpine()
-				tests.AddEphemeralCdrom(vmi, "disk4", v1.DiskBusSATA, cd.ContainerDiskFor(cd.ContainerDiskVirtio))
-				vmi = tests.RunVMIAndExpectLaunch(vmi, 60)
+				vmi := libvmifact.NewAlpine(
+					libvmi.WithEphemeralCDRom("disk4", v1.DiskBusSATA, cd.ContainerDiskFor(cd.ContainerDiskVirtio)),
+				)
+				vmi = libvmops.RunVMIAndExpectLaunch(vmi, libvmops.StartupTimeoutSecondsSmall)
 
 				By("Checking whether the second disk really contains virtio drivers")
 				Expect(console.LoginToAlpine(vmi)).To(Succeed(), "expected alpine to login properly")
@@ -197,13 +155,13 @@ var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 					// mount virtio cdrom and check files are there
 					&expect.BSnd{S: "mount -t iso9600 /dev/cdrom\n"},
-					&expect.BExp{R: console.PromptExpression},
+					&expect.BExp{R: ""},
 					&expect.BSnd{S: "echo $?\n"},
 					&expect.BExp{R: console.RetValue("0")},
 					&expect.BSnd{S: "cd /media/cdrom\n"},
-					&expect.BExp{R: console.PromptExpression},
+					&expect.BExp{R: ""},
 					&expect.BSnd{S: "ls virtio-win_license.txt guest-agent\n"},
-					&expect.BExp{R: console.PromptExpression},
+					&expect.BExp{R: ""},
 					&expect.BSnd{S: "echo $?\n"},
 					&expect.BExp{R: console.RetValue("0")},
 				}, 200)).To(Succeed(), "expected virtio files to be mounted properly")
@@ -211,23 +169,21 @@ var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 		})
 	})
 
-	Describe("[rfe_id:4052][crit:high][arm64][vendor:cnv-qe@redhat.com][level:component]VMI disk permissions", func() {
+	Describe("[rfe_id:4052][crit:high][vendor:cnv-qe@redhat.com][level:component]VMI disk permissions", decorators.WgS390x, decorators.WgArm64, func() {
 		Context("with ephemeral registry disk", func() {
 			It("[test_id:4299]should not have world write permissions", func() {
-				vmi := libvmi.NewAlpine()
-				vmi = tests.RunVMIAndExpectLaunch(vmi, 60)
+				vmi := libvmops.RunVMIAndExpectLaunch(libvmifact.NewAlpine(), libvmops.StartupTimeoutSecondsSmall)
 
 				By("Ensuring VMI is running by logging in")
 				libwait.WaitUntilVMIReady(vmi, console.LoginToAlpine)
 
 				By("Fetching virt-launcher Pod")
-				pod, err := libvmi.GetPodByVirtualMachineInstance(vmi, testsuite.GetTestNamespace(vmi))
+				pod, err := libpod.GetPodByVirtualMachineInstance(vmi, testsuite.GetTestNamespace(vmi))
 				Expect(err).ToNot(HaveOccurred())
 
 				writableImagePath := fmt.Sprintf("/var/run/kubevirt-ephemeral-disks/disk-data/%v/disk.qcow2", vmi.Spec.Domain.Devices.Disks[0].Name)
 
 				writableImageOctalMode, err := exec.ExecuteCommandOnPod(
-					virtClient,
 					pod,
 					"compute",
 					[]string{"/usr/bin/bash", "-c", fmt.Sprintf("stat -c %%a %s", writableImagePath)},
@@ -238,7 +194,6 @@ var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 				Expect(strings.Trim(writableImageOctalMode, "\n")).To(Equal("640"), "Octal Mode of writable Image should be 640")
 
 				readonlyImageOctalMode, err := exec.ExecuteCommandOnPod(
-					virtClient,
 					pod,
 					"compute",
 					[]string{"/usr/bin/bash", "-c", "stat -c %a /var/run/kubevirt/container-disks/disk_0.img"},
@@ -253,8 +208,9 @@ var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 	})
 	Describe("Bogus container disk path", func() {
 		Context("that points to outside of the volume", func() {
+			//TODO this could be unit test
 			It("should be rejected on VMI creation", func() {
-				vmi := libvmi.NewAlpine()
+				vmi := libvmifact.NewAlpine()
 				vmi.Spec.Volumes[0].ContainerDisk.Path = "../test"
 				By("Starting the VirtualMachineInstance")
 				_, err := virtClient.RestClient().Post().Resource("virtualmachineinstances").Namespace(testsuite.GetTestNamespace(vmi)).Body(vmi).Do(context.Background()).Get()
@@ -265,26 +221,93 @@ var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 			})
 		})
 	})
+
+	Describe("Simulate an upgrade from a version where ImageVolume was disabled to a version where it is enabled", Serial, decorators.ImageVolume, decorators.NoFlakeCheck, func() {
+		BeforeEach(func() {
+			v, err := getKubernetesVersion()
+			Expect(err).ToNot(HaveOccurred())
+			if v < "1.35" {
+				// Fail the test if the Kubernetes version is lower than 1.33
+				// ImageVolume won't work for versions < 1.33 because of this bug:
+				// https://github.com/kubernetes/kubernetes/pull/130394
+				// Additionally there is currently no way to enable k8s ImageVolume FG
+				// through kubevirtci. It is enabled by default since 1.35.
+				Fail("this test requires Kubernetes version >= 1.35")
+			}
+		})
+
+		DescribeTable("Migration from a source launcher with the bind mount workaround to a target launcher without the bind mount workaround should succeed when ", func(vmi *v1.VirtualMachineInstance) {
+			config.DisableFeatureGate(featuregate.ImageVolume)
+			vmi = libvmops.RunVMIAndExpectLaunch(vmi, libvmops.StartupTimeoutSecondsSmall)
+			By("Fetching virt-launcher pod without ImageVolume")
+			sourcePod, err := libpod.GetPodByVirtualMachineInstance(vmi, vmi.Namespace)
+			Expect(sourcePod.Spec.InitContainers).ToNot(BeEmpty(), "without ImageVolume should include container-disk-binary init container to copy the container-disk binary")
+			config.EnableFeatureGate(featuregate.ImageVolume)
+			By("Starting new migration and waiting for it to succeed")
+			migration := libmigration.New(vmi.Name, vmi.Namespace)
+			migration = libmigration.RunMigrationAndExpectToCompleteWithDefaultTimeout(virtClient, migration)
+
+			By("Verifying Migration Succeeeds")
+			libmigration.ConfirmVMIPostMigration(virtClient, vmi, migration)
+
+			By("Fetching virt-launcher pod with ImageVolume")
+			vmi, err = virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Get(context.Background(), vmi.Name, metav1.GetOptions{})
+			Expect(err).ToNot(HaveOccurred())
+			targetPod, err := libpod.GetPodByVirtualMachineInstance(vmi, vmi.Namespace)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(targetPod.Spec.InitContainers).To(BeEmpty(), "with ImageVolume should not include container-disk-binary init container")
+
+			By("Expecting to be able to login")
+			Expect(console.LoginToAlpine(vmi)).To(Succeed())
+		},
+			Entry("using simple Alpine vmi",
+				libvmifact.NewAlpine(
+					libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding()),
+					libvmi.WithNetwork(v1.DefaultPodNetwork()),
+				),
+			),
+			Entry("using  Alpine vmi with custom location", decorators.Periodic,
+				libvmifact.NewAlpine(
+					libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding()),
+					libvmi.WithNetwork(v1.DefaultPodNetwork()),
+					overrideCustomLocation,
+				),
+			),
+			Entry("using  Alpine vmi with kernel boot", decorators.Periodic,
+				newAlpineWithKernelBoot(),
+			),
+		)
+	})
 })
 
-func getContainerDiskContainerOfPod(pod *k8sv1.Pod, volumeName string) *k8sv1.Container {
-	diskContainerName := fmt.Sprintf("volume%s", volumeName)
-	return tests.GetContainerOfPod(pod, diskContainerName)
+func overrideCustomLocation(vmi *v1.VirtualMachineInstance) {
+	vmi.Spec.Volumes[0].ContainerDisk.Image = cd.ContainerDiskFor(cd.ContainerDiskCirrosCustomLocation)
+	vmi.Spec.Volumes[0].ContainerDisk.Path = "/custom-disk/downloaded"
 }
 
-func hasContainerDisk(pods []k8sv1.Pod) bool {
-	for _, pod := range pods {
-		if pod.ObjectMeta.DeletionTimestamp != nil {
-			continue
-		}
-		for _, containerStatus := range pod.Status.ContainerStatuses {
-			// only check readiness of containerdisk container
-			if strings.HasPrefix(containerStatus.Name, "volume") &&
-				containerStatus.Ready && containerStatus.State.Running != nil {
-				return true
-			}
-		}
-	}
+func newAlpineWithKernelBoot() *v1.VirtualMachineInstance {
+	vmi := libvmifact.NewAlpine(
+		libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding()),
+		libvmi.WithNetwork(v1.DefaultPodNetwork()),
+	)
+	utils.AddKernelBootToVMI(vmi)
+	return vmi
+}
 
-	return false
+func getKubernetesVersion() (string, error) {
+	var info k8sversion.Info
+	virtClient, err := kubecli.GetKubevirtClient()
+	if err != nil {
+		return "", err
+	}
+	response, err := virtClient.RestClient().Get().AbsPath("/version").DoRaw(context.Background())
+	if err != nil {
+		return "", err
+	}
+	if err := json.Unmarshal(response, &info); err != nil {
+		return "", err
+	}
+	curVersion := strings.Split(info.GitVersion, "+")[0]
+	curVersion = strings.Trim(curVersion, "v")
+	return curVersion, nil
 }

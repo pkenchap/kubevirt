@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2023 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -28,8 +28,6 @@ import (
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
-
-	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 
 	"kubevirt.io/kubevirt/pkg/network/cache"
 	"kubevirt.io/kubevirt/pkg/network/driver/nmstate"
@@ -81,22 +79,6 @@ func (n NetPod) storeBridgeBindingDHCPInterfaceData(currentStatus *nmstate.Statu
 	return nil
 }
 
-func (n NetPod) storeBridgeDomainInterfaceData(podIfaceStatus nmstate.Interface, vmiSpecIface v1.Interface) error {
-	mac, err := resolveMacAddress(podIfaceStatus.MacAddress, vmiSpecIface.MacAddress)
-	if err != nil {
-		return err
-	}
-
-	domainIface := api.Interface{MAC: &api.MAC{MAC: mac.String()}}
-
-	log.Log.V(4).Infof("The generated domain interface data: mac = %s", domainIface.MAC.MAC)
-	if err := cache.WriteDomainInterfaceCache(n.cacheCreator, strconv.Itoa(n.podPID), vmiSpecIface.Name, &domainIface); err != nil {
-		return fmt.Errorf("failed to save domain interface data: %v", err)
-	}
-
-	return nil
-}
-
 func translateNmstateToNetlinkRoutes(otherRoutes []nmstate.Route) ([]vishnetlink.Route, error) {
 	var dhcpRoutes []vishnetlink.Route
 	for _, nmstateRoute := range otherRoutes {
@@ -121,6 +103,13 @@ func translateNmstateToNetlinkRoutes(otherRoutes []nmstate.Route) ([]vishnetlink
 // filterRoutesByNonLocalDestination filters out local routes (the destination is of the local link).
 // Default routes should not be filter out.
 func filterRoutesByNonLocalDestination(linkRoutes []nmstate.Route, addr *vishnetlink.Addr) ([]nmstate.Route, error) {
+	_, localNetwork, err := net.ParseCIDR(addr.String())
+	if err != nil {
+		return nil, err
+	}
+
+	localNetworkStr := localNetwork.String()
+
 	var otherRoutes []nmstate.Route
 	for _, route := range linkRoutes {
 		_, dstIPNet, perr := net.ParseCIDR(route.Destination)
@@ -128,7 +117,7 @@ func filterRoutesByNonLocalDestination(linkRoutes []nmstate.Route, addr *vishnet
 			return nil, perr
 		}
 		isDefaultRoute := route.Destination == nmstate.DefaultDestinationRoute(vishnetlink.FAMILY_V4).String()
-		localDestination := !isDefaultRoute && dstIPNet.Contains(addr.IP)
+		localDestination := !isDefaultRoute && dstIPNet.String() == localNetworkStr
 		if !localDestination {
 			otherRoutes = append(otherRoutes, route)
 		}

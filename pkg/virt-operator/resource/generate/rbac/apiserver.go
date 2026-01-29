@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2018 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 package rbac
@@ -110,6 +110,7 @@ func newApiServerClusterRole() *rbacv1.ClusterRole {
 				},
 				Verbs: []string{
 					"get",
+					"list",
 				},
 			},
 			{
@@ -208,6 +209,28 @@ func newApiServerClusterRole() *rbacv1.ClusterRole {
 			},
 			{
 				APIGroups: []string{
+					"backup.kubevirt.io",
+				},
+				Resources: []string{
+					"virtualmachinebackups",
+				},
+				Verbs: []string{
+					"get", "list", "watch",
+				},
+			},
+			{
+				APIGroups: []string{
+					"backup.kubevirt.io",
+				},
+				Resources: []string{
+					"virtualmachinebackuptrackers",
+				},
+				Verbs: []string{
+					"get", "list", "watch",
+				},
+			},
+			{
+				APIGroups: []string{
 					"cdi.kubevirt.io",
 				},
 				Resources: []string{
@@ -266,6 +289,17 @@ func newApiServerClusterRole() *rbacv1.ClusterRole {
 				Verbs: []string{
 					"create",
 					"list",
+					"get",
+				},
+			},
+			{
+				APIGroups: []string{
+					"",
+				},
+				Resources: []string{
+					"nodes",
+				},
+				Verbs: []string{
 					"get",
 				},
 			},

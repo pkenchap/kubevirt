@@ -1,5 +1,5 @@
 ---
-apiVersion: pool.kubevirt.io/v1alpha1
+apiVersion: pool.kubevirt.io/v1beta1
 kind: VirtualMachinePool
 metadata:
   name: vm-pool-cirros
@@ -10,14 +10,12 @@ spec:
       kubevirt.io/vmpool: vm-pool-cirros
   virtualMachineTemplate:
     metadata:
-      creationTimestamp: null
       labels:
         kubevirt.io/vmpool: vm-pool-cirros
     spec:
-      running: true
+      runStrategy: Always
       template:
         metadata:
-          creationTimestamp: null
           labels:
             kubevirt.io/vmpool: vm-pool-cirros
         spec:
@@ -27,9 +25,9 @@ spec:
               - disk:
                   bus: virtio
                 name: containerdisk
-            resources:
-              requests:
-                memory: 128Mi
+            memory:
+              guest: 128Mi
+            resources: {}
           terminationGracePeriodSeconds: 0
           volumes:
           - containerDisk:

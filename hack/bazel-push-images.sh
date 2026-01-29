@@ -23,6 +23,7 @@ source hack/common.sh
 source hack/bootstrap.sh
 source hack/config.sh
 
+# Build core images for all architectures
 default_targets="
     virt-operator
     virt-api
@@ -31,28 +32,35 @@ default_targets="
     virt-launcher
     virt-exportserver
     virt-exportproxy
-    conformance
-    libguestfs-tools
-    pr-helper
-    example-hook-sidecar
-    example-disk-mutation-hook-sidecar
-    example-cloudinit-hook-sidecar
+    virt-synchronization-controller
     alpine-container-disk-demo
-    cirros-container-disk-demo
-    cirros-custom-container-disk-demo
-    virtio-container-disk
-    alpine-ext-kernel-boot-demo
     fedora-with-test-tooling-container-disk
-    alpine-with-test-tooling-container-disk
-    fedora-realtime-container-disk
-    disks-images-provider
-    nfs-server
     vm-killer
-    winrmcli
     sidecar-shim
-    network-slirp-binding
-    network-passt-binding
+    disks-images-provider
+    libguestfs-tools
 "
+
+# Add additional images for non-s390x architectures only
+if [[ "${ARCHITECTURE}" != "s390x" && "${ARCHITECTURE}" != "crossbuild-s390x" ]]; then
+    default_targets+="
+        conformance
+        pr-helper
+        example-hook-sidecar
+        example-disk-mutation-hook-sidecar
+        example-cloudinit-hook-sidecar
+        cirros-container-disk-demo
+        cirros-custom-container-disk-demo
+        virtio-container-disk
+        alpine-ext-kernel-boot-demo
+        alpine-with-test-tooling-container-disk
+        fedora-realtime-container-disk
+        winrmcli
+        network-slirp-binding
+        network-passt-binding
+        network-passt-binding-cni
+    "
+fi
 
 PUSH_TARGETS=(${PUSH_TARGETS:-${default_targets}})
 
@@ -61,10 +69,7 @@ for tag in ${docker_tag} ${docker_tag_alt}; do
 
         bazel run \
             --config=${ARCHITECTURE} \
-            --define container_prefix=${docker_prefix} \
-            --define image_prefix=${image_prefix} \
-            --define container_tag=${tag} \
-            //:push-${target}
+            //:push-${target} -- --repository ${docker_prefix}/${image_prefix}${target} --tag ${tag}
 
     done
 done
@@ -75,10 +80,7 @@ if [[ $image_prefix_alt ]]; then
 
         bazel run \
             --config=${ARCHITECTURE} \
-            --define container_prefix=${docker_prefix} \
-            --define image_prefix=${image_prefix_alt} \
-            --define container_tag=${docker_tag} \
-            //:push-${target}
+            //:push-${target} -- --repository ${docker_prefix}/${image_prefix_alt}${target} --tag ${docker_tag}
 
     done
 fi
@@ -86,8 +88,8 @@ fi
 rm -rf ${DIGESTS_DIR}/${ARCHITECTURE}
 mkdir -p ${DIGESTS_DIR}/${ARCHITECTURE}
 
-for f in $(find bazel-bin/ -name '*.digest'); do
-    dir=${DIGESTS_DIR}/${ARCHITECTURE}/$(dirname $f)
+for target in ${PUSH_TARGETS[@]}; do
+    dir=${DIGESTS_DIR}/${ARCHITECTURE}/${target}
     mkdir -p ${dir}
-    cp -f ${f} ${dir}/$(basename ${f})
+    touch ${dir}/${target}.image
 done

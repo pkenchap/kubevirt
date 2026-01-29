@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2023 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -22,15 +22,16 @@ package vm_test
 import (
 	"context"
 
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
 
 	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
-	"kubevirt.io/kubevirt/tests/clientcmd"
+	"kubevirt.io/kubevirt/pkg/virtctl/testing"
 )
 
 var _ = Describe("Migrate command", func() {
@@ -46,28 +47,61 @@ var _ = Describe("Migrate command", func() {
 	})
 
 	It("should fail with missing input parameters", func() {
-		cmd := clientcmd.NewRepeatableVirtctlCommand("migrate")
+		cmd := testing.NewRepeatableVirtctlCommand("migrate")
 		err := cmd()
 		Expect(err).To(HaveOccurred())
-		Expect(err).Should(MatchError("argument validation failed"))
+		Expect(err).Should(MatchError("accepts 1 arg(s), received 0"))
 	})
 
-	DescribeTable("should migrate a vm according to options", func(migrateOptions *v1.MigrateOptions) {
+	DescribeTable("should migrate a vm according to options", func(expectedMigrateOptions *v1.MigrateOptions, extraArgs ...string) {
 		vm := kubecli.NewMinimalVM(vmName)
 
 		kubecli.MockKubevirtClientInstance.EXPECT().VirtualMachine(k8smetav1.NamespaceDefault).Return(vmInterface).Times(1)
-		vmInterface.EXPECT().Migrate(context.Background(), vm.Name, migrateOptions).Return(nil).Times(1)
+		vmInterface.EXPECT().Migrate(context.Background(), vm.Name, expectedMigrateOptions).Return(nil).Times(1)
 
-		var cmd func() error
-		if len(migrateOptions.DryRun) == 0 {
-			cmd = clientcmd.NewRepeatableVirtctlCommand("migrate", vmName)
-		} else {
-			cmd = clientcmd.NewRepeatableVirtctlCommand("migrate", "--dry-run", vmName)
-		}
-
-		Expect(cmd()).To(Succeed())
+		args := []string{"migrate", vmName}
+		args = append(args, extraArgs...)
+		Expect(testing.NewRepeatableVirtctlCommand(args...)()).To(Succeed())
 	},
-		Entry("with default", &v1.MigrateOptions{}),
-		Entry("with dry-run option", &v1.MigrateOptions{DryRun: []string{k8smetav1.DryRunAll}}),
+		Entry(
+			"with default",
+			&v1.MigrateOptions{}),
+		Entry(
+			"with dry-run option",
+			&v1.MigrateOptions{
+				DryRun: []string{k8smetav1.DryRunAll}},
+			"--dry-run"),
+		Entry(
+			"with addedNodeSelector option",
+			&v1.MigrateOptions{
+				AddedNodeSelector: map[string]string{"key1": "value1", "key2": "value2"}},
+			"--addedNodeSelector", "key1=value1,key2=value2"),
+		Entry(
+			"with dry-run and addedNodeSelector options",
+			&v1.MigrateOptions{
+				AddedNodeSelector: map[string]string{"key1": "value1", "key2": "value2"},
+				DryRun:            []string{k8smetav1.DryRunAll}},
+			"--dry-run", "--addedNodeSelector", "key1=value1,key2=value2"),
+		Entry(
+			"with repeated addedNodeSelector",
+			&v1.MigrateOptions{
+				AddedNodeSelector: map[string]string{"key1": "value1", "key2": "value2"}},
+			"--addedNodeSelector", "key1=value1", "--addedNodeSelector", "key2=value2"),
 	)
+
+	DescribeTable("should fail with badly formatted addedNodeSelector", func(extraArgs ...string) {
+		args := []string{"migrate", vmName}
+		args = append(args, extraArgs...)
+		err := testing.NewRepeatableVirtctlCommand(args...)()
+		Expect(err).To(HaveOccurred())
+		Expect(err).Should(MatchError(ContainSubstring("must be formatted as key=value")))
+	},
+		Entry(
+			"with key only",
+			"--addedNodeSelector", "key1"),
+		Entry(
+			"with multiple keys only",
+			"--addedNodeSelector", "key1,key2"),
+	)
+
 })

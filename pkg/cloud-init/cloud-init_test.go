@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2017 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -189,9 +189,6 @@ var _ = Describe("CloudInit", func() {
 				}
 				buf, err := json.MarshalIndent(metadataStruct, "", "  ")
 				Expect(err).ToNot(HaveOccurred())
-				fmt.Println("expected: ", string(buf))
-				fmt.Println("exmapleJsob: ", exampleJSONParsed)
-
 				Expect(string(buf)).To(Equal(exampleJSONParsed))
 			})
 			It("should match the generated nocloud metadata", func() {

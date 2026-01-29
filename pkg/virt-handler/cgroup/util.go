@@ -1,3 +1,22 @@
+/*
+ * This file is part of the KubeVirt project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * Copyright The KubeVirt Authors.
+ *
+ */
+
 package cgroup
 
 import (
@@ -24,21 +43,15 @@ import (
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
 
+	k8sv1 "k8s.io/api/core/v1"
+
 	"kubevirt.io/kubevirt/pkg/safepath"
+	storagetypes "kubevirt.io/kubevirt/pkg/storage/types"
+	"kubevirt.io/kubevirt/pkg/util"
 	"kubevirt.io/kubevirt/pkg/virt-handler/isolation"
 )
 
 type CgroupVersion string
-
-const (
-	cgroupStr = "cgroup"
-
-	procMountPoint = "/proc"
-
-	HostRootPath       = procMountPoint + "/1/root"
-	cgroupBasePath     = "/sys/fs/" + cgroupStr
-	HostCgroupBasePath = HostRootPath + cgroupBasePath
-)
 
 // Templates for logging / error messages
 const (
@@ -91,18 +104,42 @@ func addCurrentRules(currentRules, newRules []*devices.Rule) ([]*devices.Rule, e
 	return newRules, nil
 }
 
+func getSourceBlockToFsMigratedVolumes(vmi *v1.VirtualMachineInstance, host string) map[string]bool {
+	vols := make(map[string]bool)
+	if vmi.Status.MigrationState != nil && vmi.Status.MigrationState.SourceNode != host {
+		return vols
+	}
+	for _, vol := range vmi.Status.MigratedVolumes {
+		if vol.SourcePVCInfo != nil && vol.SourcePVCInfo.VolumeMode != nil &&
+			*vol.SourcePVCInfo.VolumeMode == k8sv1.PersistentVolumeBlock {
+			vols[vol.VolumeName] = true
+		}
+	}
+	// Remove the hotplugged volumes from the list since they are handled differently
+	for _, vol := range vmi.Spec.Volumes {
+		_, ok := vols[vol.Name]
+		if storagetypes.IsHotplugVolume(&vol) && ok {
+			delete(vols, vol.Name)
+		}
+	}
+
+	return vols
+}
+
 // This builds up the known persistent block devices allow list for a VMI (as in, hotplugged volumes are handled separately)
 // This will be maintained and extended as new devices likely have to end up on this list as well
 // For example - https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/
-func generateDeviceRulesForVMI(vmi *v1.VirtualMachineInstance, isolationRes isolation.IsolationResult) ([]*devices.Rule, error) {
+func generateDeviceRulesForVMI(vmi *v1.VirtualMachineInstance, isolationRes isolation.IsolationResult, host string) ([]*devices.Rule, error) {
 	mountRoot, err := isolationRes.MountRoot()
 	if err != nil {
 		return nil, err
 	}
-
+	migSrcBlockVols := getSourceBlockToFsMigratedVolumes(vmi, host)
 	var vmiDeviceRules []*devices.Rule
 	for _, volume := range vmi.Spec.Volumes {
+		_, ok := migSrcBlockVols[volume.Name]
 		switch {
+		case ok:
 		case volume.VolumeSource.PersistentVolumeClaim != nil:
 			if volume.VolumeSource.PersistentVolumeClaim.Hotpluggable {
 				continue
@@ -129,6 +166,31 @@ func generateDeviceRulesForVMI(vmi *v1.VirtualMachineInstance, isolationRes isol
 			vmiDeviceRules = append(vmiDeviceRules, deviceRule)
 		}
 	}
+	if vmi.Spec.Domain.Devices.Rng != nil {
+		path, err := safepath.JoinNoFollow(mountRoot, "/dev/urandom")
+		if err != nil {
+			return nil, err
+		}
+		if deviceRule, err := newAllowedDeviceRule(path); err != nil {
+			return nil, fmt.Errorf("failed to create device rule for %s: %v", path, err)
+		} else if deviceRule != nil {
+			log.Log.V(loggingVerbosity).Infof("device rule for volume rng: %v", deviceRule)
+			vmiDeviceRules = append(vmiDeviceRules, deviceRule)
+		}
+	}
+	if util.IsAutoAttachVSOCK(vmi) {
+		path, err := safepath.JoinNoFollow(mountRoot, "/dev/vhost-vsock")
+		if err != nil {
+			return nil, err
+		}
+		if deviceRule, err := newAllowedDeviceRule(path); err != nil {
+			return nil, fmt.Errorf("failed to create device rule for %s: %v", path, err)
+		} else if deviceRule != nil {
+			log.Log.V(loggingVerbosity).Infof("device rule for volume vsock: %v", deviceRule)
+			vmiDeviceRules = append(vmiDeviceRules, deviceRule)
+		}
+	}
+
 	return vmiDeviceRules, nil
 }
 

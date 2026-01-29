@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2023 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -37,14 +37,14 @@ import (
 
 	"kubevirt.io/client-go/log"
 
+	metricsScraper "kubevirt.io/kubevirt/pkg/downwardmetrics/scraper"
 	"kubevirt.io/kubevirt/pkg/downwardmetrics/vhostmd/api"
 	diskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
-	metricsScraper "kubevirt.io/kubevirt/pkg/monitoring/domainstats/downwardmetrics"
 )
 
 const (
 	maxConnectAttempts   = 6
-	maxRequestsPerSecond = 5
+	maxRequestsPerSecond = 1
 	maxRequestsBurst     = 1 // must be >= 1, otherwise `rateLimiter.Wait()` will fail
 	invalidRequest       = "INVALID REQUEST\n\n"
 	emptyMetrics         = "<metrics><!-- host metrics not available --><!-- VM metrics not available --></metrics>"

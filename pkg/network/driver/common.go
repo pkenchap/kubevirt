@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2018 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -26,8 +26,6 @@ import (
 	"os"
 
 	"github.com/vishvananda/netlink"
-
-	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter"
 
 	netutils "k8s.io/utils/net"
 
@@ -162,7 +160,7 @@ func (h *NetworkUtilsHandler) ReadIPAddressesFromLink(interfaceName string) (str
 
 func (h *NetworkUtilsHandler) StartDHCP(nic *cache.DHCPConfig, bridgeInterfaceName string, dhcpOptions *v1.DHCPOptions) error {
 	log.Log.V(4).Infof("StartDHCP network Nic: %+v", nic)
-	nameservers, searchDomains, err := converter.GetResolvConfDetailsFromPod()
+	nameservers, searchDomains, err := dns.GetResolvConfDetailsFromPod()
 	if err != nil {
 		return fmt.Errorf("Failed to get DNS servers from resolv.conf: %v", err)
 	}
@@ -183,7 +181,7 @@ func (h *NetworkUtilsHandler) StartDHCP(nic *cache.DHCPConfig, bridgeInterfaceNa
 				bridgeInterfaceName,
 				nic.AdvertisingIPAddr,
 				nic.Gateway,
-				nameservers,
+				nameservers.IPv4,
 				nic.Routes,
 				searchDomains,
 				nic.Mtu,
@@ -200,6 +198,7 @@ func (h *NetworkUtilsHandler) StartDHCP(nic *cache.DHCPConfig, bridgeInterfaceNa
 			if err = DHCPv6Server(
 				nic.IPv6.IP,
 				bridgeInterfaceName,
+				nameservers.IPv6,
 			); err != nil {
 				log.Log.Reason(err).Error("failed to run DHCPv6 Server")
 				panic(err)

@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2021 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -26,8 +26,8 @@ import (
 )
 
 func ProxyInjectionEnabled(vmi *v1.VirtualMachineInstance) bool {
-	if val, ok := vmi.GetAnnotations()[ISTIO_INJECT_ANNOTATION]; ok {
-		return strings.ToLower(val) == "true"
+	if val, ok := vmi.GetAnnotations()[InjectSidecarAnnotation]; ok {
+		return strings.EqualFold(val, "true")
 	}
 	return false
 }

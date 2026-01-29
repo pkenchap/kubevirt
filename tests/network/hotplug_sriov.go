@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2023 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -21,11 +21,7 @@ package network
 
 import (
 	"context"
-	"fmt"
 	"time"
-
-	"kubevirt.io/kubevirt/pkg/network/vmispec"
-	"kubevirt.io/kubevirt/tests/libnet"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -34,49 +30,75 @@ import (
 
 	v1 "kubevirt.io/api/core/v1"
 
-	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
+	"kubevirt.io/kubevirt/pkg/libvmi"
+	"kubevirt.io/kubevirt/pkg/network/vmispec"
+	"kubevirt.io/kubevirt/pkg/pointer"
 
 	"kubevirt.io/kubevirt/tests/console"
 	"kubevirt.io/kubevirt/tests/decorators"
-	"kubevirt.io/kubevirt/tests/framework/checks"
 	"kubevirt.io/kubevirt/tests/framework/kubevirt"
-	"kubevirt.io/kubevirt/tests/libwait"
+	"kubevirt.io/kubevirt/tests/framework/matcher"
+	"kubevirt.io/kubevirt/tests/libkubevirt"
+	"kubevirt.io/kubevirt/tests/libkubevirt/config"
+	"kubevirt.io/kubevirt/tests/libmigration"
+	"kubevirt.io/kubevirt/tests/libnet"
+	"kubevirt.io/kubevirt/tests/libvmifact"
 	"kubevirt.io/kubevirt/tests/testsuite"
 )
 
-var _ = SIGDescribe("[Serial] SRIOV nic-hotplug", Serial, decorators.SRIOV, func() {
-
+var _ = Describe(SIG(" SRIOV nic-hotplug", Serial, decorators.SRIOV, func() {
 	sriovResourceName := readSRIOVResourceName()
 
 	BeforeEach(func() {
-		if !checks.HasFeature(virtconfig.HotplugNetworkIfacesGate) {
-			Skip("HotplugNICs feature gate is disabled.")
-		}
+		// Check if the hardware supports SRIOV
+		Expect(validateSRIOVSetup(sriovResourceName, 1)).To(Succeed(),
+			"Sriov is not enabled in this environment: %v. Skip these tests using - export FUNC_TEST_ARGS='--label-filter=!SRIOV'")
+
 	})
 
 	BeforeEach(func() {
-		// Check if the hardware supports SRIOV
-		if err := validateSRIOVSetup(kubevirt.Client(), sriovResourceName, 1); err != nil {
-			Skip("Sriov is not enabled in this environment. Skip these tests using - export FUNC_TEST_ARGS='--skip=SRIOV'")
+		virtClient := kubevirt.Client()
+		updateStrategy := &v1.KubeVirtWorkloadUpdateStrategy{
+			WorkloadUpdateMethods: []v1.WorkloadUpdateMethod{v1.WorkloadUpdateMethodLiveMigrate},
 		}
+		rolloutStrategy := pointer.P(v1.VMRolloutStrategyLiveUpdate)
+		err := config.RegisterKubevirtConfigChange(
+			config.WithWorkloadUpdateStrategy(updateStrategy),
+			config.WithVMRolloutStrategy(rolloutStrategy),
+		)
+		Expect(err).ToNot(HaveOccurred())
+
+		currentKv := libkubevirt.GetCurrentKv(virtClient)
+		config.WaitForConfigToBePropagatedToComponent(
+			"kubevirt.io=virt-controller",
+			currentKv.ResourceVersion,
+			config.ExpectResourceVersionToBeLessEqualThanConfigVersion,
+			time.Minute)
 	})
 
 	Context("a running VM", func() {
+		const (
+			ifaceName = "iface1"
+			nadName   = "skynet"
+		)
+
 		var hotPluggedVM *v1.VirtualMachine
 		var hotPluggedVMI *v1.VirtualMachineInstance
 
 		BeforeEach(func() {
 			By("Creating a VM")
-			hotPluggedVM = newVMWithOneInterface()
+			vmi := libvmifact.NewAlpineWithTestTooling(
+				libvmi.WithInterface(*v1.DefaultMasqueradeNetworkInterface()),
+				libvmi.WithNetwork(v1.DefaultPodNetwork()),
+			)
+			hotPluggedVM = libvmi.NewVirtualMachine(vmi, libvmi.WithRunStrategy(v1.RunStrategyAlways))
 			var err error
-			hotPluggedVM, err = kubevirt.Client().VirtualMachine(testsuite.GetTestNamespace(nil)).Create(context.Background(), hotPluggedVM)
+			hotPluggedVM, err = kubevirt.Client().VirtualMachine(testsuite.GetTestNamespace(nil)).Create(context.Background(), hotPluggedVM, metav1.CreateOptions{})
 			Expect(err).NotTo(HaveOccurred())
-			Eventually(func() error {
-				var err error
-				hotPluggedVMI, err = kubevirt.Client().VirtualMachineInstance(hotPluggedVM.Namespace).Get(context.Background(), hotPluggedVM.GetName(), &metav1.GetOptions{})
-				return err
-			}, 120*time.Second, 1*time.Second).ShouldNot(HaveOccurred())
-			libwait.WaitUntilVMIReady(hotPluggedVMI, console.LoginToAlpine)
+			Eventually(matcher.ThisVM(hotPluggedVM)).WithTimeout(6 * time.Minute).WithPolling(3 * time.Second).Should(matcher.HaveConditionTrue(v1.VirtualMachineInstanceAgentConnected))
+			hotPluggedVMI, err = kubevirt.Client().VirtualMachineInstance(testsuite.GetTestNamespace(nil)).Get(context.Background(), hotPluggedVM.Name, metav1.GetOptions{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(console.LoginToAlpine(hotPluggedVMI)).To(Succeed())
 
 			By("Creating a NAD")
 			Expect(createSRIOVNetworkAttachmentDefinition(testsuite.GetTestNamespace(nil), nadName, sriovResourceName)).To(Succeed())
@@ -86,18 +108,44 @@ var _ = SIGDescribe("[Serial] SRIOV nic-hotplug", Serial, decorators.SRIOV, func
 		})
 
 		It("can hotplug a network interface", func() {
-			waitForSingleHotPlugIfaceOnVMISpec(hotPluggedVMI)
-			hotPluggedVMI = verifySriovDynamicInterfaceChange(hotPluggedVMI, migrationBased)
-			Expect(libnet.InterfaceExists(hotPluggedVMI, vmIfaceName)).To(Succeed())
+			libnet.WaitForSingleHotPlugIfaceOnVMISpec(hotPluggedVMI, ifaceName, nadName)
 
-			updatedVM, err := kubevirt.Client().VirtualMachine(hotPluggedVM.Namespace).Get(context.Background(), hotPluggedVM.Name, &metav1.GetOptions{})
+			virtClient := kubevirt.Client()
+
+			By("Waiting for MigrationRequired condition to appear")
+			Eventually(matcher.ThisVMI(hotPluggedVMI), 1*time.Minute, 2*time.Second).Should(matcher.HaveConditionTrue(v1.VirtualMachineInstanceMigrationRequired))
+
+			By("Ensuring live-migration started")
+			var migration *v1.VirtualMachineInstanceMigration
+			Eventually(func() *v1.VirtualMachineInstanceMigration {
+				migrations, err := virtClient.VirtualMachineInstanceMigration(hotPluggedVMI.Namespace).List(context.Background(), metav1.ListOptions{})
+				Expect(err).ToNot(HaveOccurred())
+
+				for _, mig := range migrations.Items {
+					if mig.Spec.VMIName == hotPluggedVMI.Name {
+						migration = mig.DeepCopy()
+						return migration
+					}
+				}
+				return nil
+			}).WithTimeout(30 * time.Second).WithPolling(time.Second).Should(Not(BeNil()))
+
+			libmigration.ExpectMigrationToSucceedWithDefaultTimeout(virtClient, migration)
+			libmigration.ConfirmVMIPostMigration(kubevirt.Client(), hotPluggedVMI, migration)
+
+			hotPluggedVMI = verifySriovDynamicInterfaceChange(hotPluggedVMI)
+
+			const guestSecondaryIfaceName = "eth1"
+			Expect(libnet.InterfaceExists(hotPluggedVMI, guestSecondaryIfaceName)).To(Succeed())
+
+			updatedVM, err := kubevirt.Client().VirtualMachine(hotPluggedVM.Namespace).Get(context.Background(), hotPluggedVM.Name, metav1.GetOptions{})
 			Expect(err).NotTo(HaveOccurred())
 			vmIfaceSpec := vmispec.LookupInterfaceByName(updatedVM.Spec.Template.Spec.Domain.Devices.Interfaces, ifaceName)
 			Expect(vmIfaceSpec).NotTo(BeNil(), "VM spec should contain the new interface")
 			Expect(vmIfaceSpec.MacAddress).NotTo(BeEmpty(), "VM iface spec should have MAC address")
 
 			Eventually(func(g Gomega) {
-				updatedVMI, err := kubevirt.Client().VirtualMachineInstance(hotPluggedVMI.Namespace).Get(context.Background(), hotPluggedVMI.Name, &metav1.GetOptions{})
+				updatedVMI, err := kubevirt.Client().VirtualMachineInstance(hotPluggedVMI.Namespace).Get(context.Background(), hotPluggedVMI.Name, metav1.GetOptions{})
 				Expect(err).NotTo(HaveOccurred())
 
 				vmiIfaceStatus := vmispec.LookupInterfaceStatusByName(updatedVMI.Status.Interfaces, ifaceName)
@@ -108,14 +156,13 @@ var _ = SIGDescribe("[Serial] SRIOV nic-hotplug", Serial, decorators.SRIOV, func
 			}, time.Second*30, time.Second*3).Should(Succeed())
 		})
 	})
-})
+}))
 
-func createSRIOVNetworkAttachmentDefinition(namespace, networkName string, sriovResourceName string) error {
-	return libnet.CreateNetworkAttachmentDefinition(
-		networkName,
-		namespace,
-		fmt.Sprintf(sriovConfNAD, networkName, namespace, sriovResourceName),
-	)
+func createSRIOVNetworkAttachmentDefinition(namespace, networkName, sriovResourceName string) error {
+	netAttachDef := libnet.NewSriovNetAttachDef(networkName, 0)
+	netAttachDef.Annotations = map[string]string{libnet.ResourceNameAnnotation: sriovResourceName}
+	_, err := libnet.CreateNetAttachDef(context.Background(), namespace, netAttachDef)
+	return err
 }
 
 func newSRIOVNetworkInterface(name, netAttachDefName string) (v1.Network, v1.Interface) {
@@ -136,15 +183,15 @@ func newSRIOVNetworkInterface(name, netAttachDefName string) (v1.Network, v1.Int
 
 func addSRIOVInterface(vm *v1.VirtualMachine, name, netAttachDefName string) error {
 	newNetwork, newIface := newSRIOVNetworkInterface(name, netAttachDefName)
-	mac, err := GenerateRandomMac()
+	mac, err := libnet.GenerateRandomMac()
 	if err != nil {
 		return err
 	}
 	newIface.MacAddress = mac.String()
-	return patchVMWithNewInterface(vm, newNetwork, newIface)
+	return libnet.PatchVMWithNewInterface(vm, newNetwork, newIface)
 }
 
-func verifySriovDynamicInterfaceChange(vmi *v1.VirtualMachineInstance, plugMethod hotplugMethod) *v1.VirtualMachineInstance {
+func verifySriovDynamicInterfaceChange(vmi *v1.VirtualMachineInstance) *v1.VirtualMachineInstance {
 	const queueCount = 0
-	return verifyDynamicInterfaceChange(vmi, plugMethod, queueCount)
+	return libnet.VerifyDynamicInterfaceChange(vmi, queueCount, 30*time.Second, time.Second)
 }

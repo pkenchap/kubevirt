@@ -13,21 +13,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2022 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 package export
 
 import (
-	"crypto/tls"
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
 
 	vsv1 "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
 	routev1 "github.com/openshift/api/route/v1"
@@ -42,19 +39,21 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 
+	v1 "kubevirt.io/api/core/v1"
 	virtv1 "kubevirt.io/api/core/v1"
-	exportv1 "kubevirt.io/api/export/v1alpha1"
+	exportv1 "kubevirt.io/api/export/v1beta1"
 	instancetypev1beta1 "kubevirt.io/api/instancetype/v1beta1"
-	snapshotv1 "kubevirt.io/api/snapshot/v1alpha1"
-	kubevirtfake "kubevirt.io/client-go/generated/kubevirt/clientset/versioned/fake"
+	snapshotv1 "kubevirt.io/api/snapshot/v1beta1"
 	"kubevirt.io/client-go/kubecli"
+	kubevirtfake "kubevirt.io/client-go/kubevirt/fake"
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
 
-	"kubevirt.io/kubevirt/pkg/certificates/bootstrap"
+	"kubevirt.io/kubevirt/pkg/pointer"
+	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/components"
+
 	virtcontroller "kubevirt.io/kubevirt/pkg/controller"
 	"kubevirt.io/kubevirt/pkg/testutils"
 	"kubevirt.io/kubevirt/pkg/virt-controller/services"
-	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/components"
 )
 
 const (
@@ -89,22 +88,14 @@ var _ = Describe("PVC source", func() {
 		k8sClient                   *k8sfake.Clientset
 		vmExportClient              *kubevirtfake.Clientset
 		fakeVolumeSnapshotProvider  *MockVolumeSnapshotProvider
-		mockVMExportQueue           *testutils.MockWorkQueue
+		fakeCertManager             *MockCertManager
+		mockVMExportQueue           *testutils.MockWorkQueue[string]
 		routeCache                  cache.Store
 		ingressCache                cache.Store
-		certDir                     string
-		certFilePath                string
-		keyFilePath                 string
 	)
 
 	BeforeEach(func() {
 		ctrl = gomock.NewController(GinkgoT())
-		var err error
-		certDir, err = os.MkdirTemp("", "certs")
-		Expect(err).ToNot(HaveOccurred())
-		certFilePath = filepath.Join(certDir, "tls.crt")
-		keyFilePath = filepath.Join(certDir, "tls.key")
-		writeCertsToDir(certDir)
 		virtClient := kubecli.NewMockKubevirtClient(ctrl)
 		pvcInformer, _ = testutils.NewFakeInformerFor(&k8sv1.PersistentVolumeClaim{})
 		podInformer, _ = testutils.NewFakeInformerFor(&k8sv1.Pod{})
@@ -133,6 +124,7 @@ var _ = Describe("PVC source", func() {
 		fakeVolumeSnapshotProvider = &MockVolumeSnapshotProvider{
 			volumeSnapshots: []*vsv1.VolumeSnapshot{},
 		}
+		fakeCertManager = &MockCertManager{}
 
 		config, _, _ := testutils.NewFakeClusterConfigUsingKVConfig(&virtv1.KubeVirtConfiguration{})
 		k8sClient = k8sfake.NewSimpleClientset()
@@ -141,7 +133,7 @@ var _ = Describe("PVC source", func() {
 
 		virtClient.EXPECT().CoreV1().Return(k8sClient.CoreV1()).AnyTimes()
 		virtClient.EXPECT().VirtualMachineExport(testNamespace).
-			Return(vmExportClient.ExportV1alpha1().VirtualMachineExports(testNamespace)).AnyTimes()
+			Return(vmExportClient.ExportV1beta1().VirtualMachineExports(testNamespace)).AnyTimes()
 
 		controller = &VMExportController{
 			Client:                      virtClient,
@@ -153,8 +145,8 @@ var _ = Describe("PVC source", func() {
 			ServiceInformer:             serviceInformer,
 			DataVolumeInformer:          dvInformer,
 			KubevirtNamespace:           "kubevirt",
-			TemplateService:             services.NewTemplateService("a", 240, "b", "c", "d", "e", "f", "g", pvcInformer.GetStore(), virtClient, config, qemuGid, "h", rqInformer.GetStore(), nsInformer.GetStore()),
-			caCertManager:               bootstrap.NewFileCertificateManager(certFilePath, keyFilePath),
+			ManifestRenderer:            services.NewTemplateService("a", 240, "b", "c", "d", "e", "f", pvcInformer.GetStore(), virtClient, config, qemuGid, "g", rqInformer.GetStore(), nsInformer.GetStore()),
+			caCertManager:               fakeCertManager,
 			RouteCache:                  routeCache,
 			IngressCache:                ingressCache,
 			RouteConfigMapInformer:      cmInformer,
@@ -173,11 +165,8 @@ var _ = Describe("PVC source", func() {
 			ControllerRevisionInformer:  controllerRevisionInformer,
 		}
 		initCert = func(ctrl *VMExportController) {
-			go controller.caCertManager.Start()
-			// Give the thread time to read the certs.
-			Eventually(func() *tls.Certificate {
-				return controller.caCertManager.Current()
-			}, time.Second, time.Millisecond).ShouldNot(BeNil())
+			ctrl.caCertManager.Start()
+			Expect(ctrl.caCertManager.Current()).ToNot(BeNil())
 		}
 
 		controller.Init()
@@ -223,11 +212,6 @@ var _ = Describe("PVC source", func() {
 		).To(Succeed())
 	})
 
-	AfterEach(func() {
-		controller.caCertManager.Stop()
-		os.RemoveAll(certDir)
-	})
-
 	createExporterPod := func(name string, phase k8sv1.PodPhase) *k8sv1.Pod {
 		return &k8sv1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
@@ -271,6 +255,20 @@ var _ = Describe("PVC source", func() {
 			VolumeSource: virtv1.VolumeSource{
 				DataVolume: &virtv1.DataVolumeSource{
 					Name: "volume2",
+				},
+			},
+		})
+		return vm
+	}
+
+	createVMWithBackendPVC := func() *virtv1.VirtualMachine {
+		vm := createVMWithoutVolumes()
+		vm.Spec.Template.Spec.Domain.Devices.TPM = &v1.TPMDevice{Persistent: pointer.P(true)}
+		vm.Spec.Template.Spec.Volumes = append(vm.Spec.Template.Spec.Volumes, virtv1.Volume{
+			Name: "volume1",
+			VolumeSource: virtv1.VolumeSource{
+				DataVolume: &virtv1.DataVolumeSource{
+					Name: "volume1",
 				},
 			},
 		})
@@ -355,6 +353,9 @@ var _ = Describe("PVC source", func() {
 					},
 				},
 			},
+			Status: virtv1.VirtualMachineInstanceStatus{
+				Phase: virtv1.Running,
+			},
 		}
 	}
 
@@ -407,6 +408,69 @@ var _ = Describe("PVC source", func() {
 		Entry("DataVolumes", createVMWithDataVolumes, "kubevirt", "kubevirt", verifyKubevirtInternal),
 		Entry("PVCs", createVMWithPVCs, "kubevirt", "kubevirt", verifyKubevirtInternal),
 		Entry("Memorydump and pvc", createVMWithPVCandMemoryDump, "kubevirt", "archive", verifyMixedInternal),
+	)
+
+	It("Should create VM export, when VM is using backend storage", func() {
+		testVMExport := createVMVMExport()
+		vm := createVMWithBackendPVC()
+		controller.VMInformer.GetStore().Add(vm)
+		controller.PVCInformer.GetStore().Add(createPVC("volume1", "kubevirt"))
+		backendPVC := createBackendPVC(vm.Name)
+		controller.PVCInformer.GetStore().Add(backendPVC)
+		expectExporterCreate(k8sClient, k8sv1.PodRunning)
+		k8sClient.Fake.PrependReactor("list", "persistentvolumeclaims", func(action testing.Action) (handled bool, obj runtime.Object, err error) {
+			return true, &k8sv1.PersistentVolumeClaimList{Items: []k8sv1.PersistentVolumeClaim{*backendPVC}}, nil
+		})
+		vmExportClient.Fake.PrependReactor("update", "virtualmachineexports", func(action testing.Action) (handled bool, obj runtime.Object, err error) {
+			update, ok := action.(testing.UpdateAction)
+			Expect(ok).To(BeTrue())
+			vmExport, ok := update.GetObject().(*exportv1.VirtualMachineExport)
+			Expect(ok).To(BeTrue())
+			verifyMixedInternal(vmExport, vmExport.Name, testNamespace, "volume1", backendPVC.Name)
+			for _, condition := range vmExport.Status.Conditions {
+				if condition.Type == exportv1.ConditionReady {
+					Expect(condition.Status).To(Equal(k8sv1.ConditionTrue))
+					Expect(condition.Reason).To(Equal(podReadyReason))
+				}
+			}
+			return true, vmExport, nil
+		})
+		retry, err := controller.updateVMExport(testVMExport)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(retry).To(BeEquivalentTo(0))
+		testutils.ExpectEvent(recorder, serviceCreatedEvent)
+	})
+
+	DescribeTable("Should create VM export, when VM is stopped, but VMI exists", func(vmiPhase virtv1.VirtualMachineInstancePhase) {
+		testVMExport := createVMVMExport()
+		controller.VMInformer.GetStore().Add(createVMWithDataVolumes())
+		vmi := createVMIWithDataVolumes()
+		vmi.Status.Phase = vmiPhase
+		controller.VMIInformer.GetStore().Add(vmi)
+		controller.PVCInformer.GetStore().Add(createPVC("volume1", "kubevirt"))
+		controller.PVCInformer.GetStore().Add(createPVC("volume2", "kubevirt"))
+		expectExporterCreate(k8sClient, k8sv1.PodRunning)
+		vmExportClient.Fake.PrependReactor("update", "virtualmachineexports", func(action testing.Action) (handled bool, obj runtime.Object, err error) {
+			update, ok := action.(testing.UpdateAction)
+			Expect(ok).To(BeTrue())
+			vmExport, ok := update.GetObject().(*exportv1.VirtualMachineExport)
+			Expect(ok).To(BeTrue())
+			verifyKubevirtInternal(vmExport, vmExport.Name, testNamespace, "volume1", "volume2")
+			for _, condition := range vmExport.Status.Conditions {
+				if condition.Type == exportv1.ConditionReady {
+					Expect(condition.Status).To(Equal(k8sv1.ConditionTrue))
+					Expect(condition.Reason).To(Equal(podReadyReason))
+				}
+			}
+			return true, vmExport, nil
+		})
+		retry, err := controller.updateVMExport(testVMExport)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(retry).To(BeEquivalentTo(0))
+		testutils.ExpectEvent(recorder, serviceCreatedEvent)
+	},
+		Entry("with succeeded phase", virtv1.Succeeded),
+		Entry("with failed phase", virtv1.Failed),
 	)
 
 	It("Should NOT create VM export, when VM is started", func() {
@@ -471,7 +535,7 @@ var _ = Describe("PVC source", func() {
 			for _, condition := range vmExport.Status.Conditions {
 				if condition.Type == exportv1.ConditionReady {
 					Expect(condition.Status).To(Equal(k8sv1.ConditionFalse))
-					Expect(condition.Reason).To(Equal(inUseReason))
+					Expect(condition.Reason).To(Equal(volumesNotPopulatedReason))
 					Expect(condition.Message).To(Equal(fmt.Sprintf("Not all volumes in the Virtual Machine %s/%s are populated", vm.Namespace, vm.Name)))
 				}
 			}
@@ -529,6 +593,29 @@ var _ = Describe("PVC source", func() {
 				if condition.Type == exportv1.ConditionReady {
 					Expect(condition.Status).To(Equal(k8sv1.ConditionFalse))
 					Expect(condition.Reason).To(Equal(noVolumeVMReason))
+				}
+			}
+			return true, vmExport, nil
+		})
+		retry, err := controller.updateVMExport(testVMExport)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(retry).To(BeEquivalentTo(0))
+	})
+
+	It("Should be in skipped phase when VM does not exist", func() {
+		testVMExport := createVMVMExport()
+		vmExportClient.Fake.PrependReactor("update", "virtualmachineexports", func(action testing.Action) (handled bool, obj runtime.Object, err error) {
+			update, ok := action.(testing.UpdateAction)
+			Expect(ok).To(BeTrue())
+			vmExport, ok := update.GetObject().(*exportv1.VirtualMachineExport)
+			Expect(ok).To(BeTrue())
+			verifyLinksEmpty(vmExport)
+			Expect(vmExport.Status.Phase).To(Equal(exportv1.Skipped))
+			for _, condition := range vmExport.Status.Conditions {
+				if condition.Type == exportv1.ConditionReady {
+					Expect(condition.Status).To(Equal(k8sv1.ConditionFalse))
+					Expect(condition.Reason).To(Equal(vmNotFoundReason))
+					Expect(condition.Message).To(Equal(fmt.Sprintf("Virtual Machine %s/%s not found", testNamespace, testVmName)))
 				}
 			}
 			return true, vmExport, nil

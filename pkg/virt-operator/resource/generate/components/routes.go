@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2022 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 package components
@@ -46,7 +46,8 @@ func NewExportProxyRoute(namespace string) *routev1.Route {
 	route.Spec.To.Kind = "Service"
 	route.Spec.To.Name = VirtExportProxyName
 	route.Spec.TLS = &routev1.TLSConfig{
-		Termination: routev1.TLSTerminationReencrypt,
+		Termination:                   routev1.TLSTerminationReencrypt,
+		InsecureEdgeTerminationPolicy: routev1.InsecureEdgeTerminationPolicyRedirect,
 	}
 
 	return route

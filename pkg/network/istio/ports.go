@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2021 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -30,11 +30,11 @@ const (
 	EnvoyHealthCheckPort               = 15021
 	EnvoyDNSPort                       = 15053
 	EnvoyPrometheusTelemetryPort       = 15090
-	SshPort                            = 22
+	SSHPort                            = 22
 )
 
-func ReservedPorts() []int {
-	return []int{
+func ReservedPorts() []uint {
+	return []uint{
 		EnvoyAdminPort,
 		EnvoyOutboundPort,
 		EnvoyDebugPort,
@@ -50,6 +50,6 @@ func ReservedPorts() []int {
 
 func NonProxiedPorts() []int {
 	return []int{
-		SshPort,
+		SSHPort,
 	}
 }

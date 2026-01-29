@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2022 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -24,9 +24,6 @@ import (
 	"fmt"
 	"time"
 
-	"kubevirt.io/kubevirt/tests/framework/kubevirt"
-
-	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	k8sv1 "k8s.io/api/core/v1"
@@ -34,21 +31,26 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
-	"k8s.io/utils/pointer"
 
 	v1 "kubevirt.io/api/core/v1"
 
-	"kubevirt.io/kubevirt/pkg/util/net/ip"
-	"kubevirt.io/kubevirt/tests/flags"
+	"kubevirt.io/kubevirt/pkg/pointer"
 	"kubevirt.io/kubevirt/tests/framework/cleanup"
+	"kubevirt.io/kubevirt/tests/framework/kubevirt"
 	"kubevirt.io/kubevirt/tests/libnode"
-	"kubevirt.io/kubevirt/tests/util"
+	"kubevirt.io/kubevirt/tests/libregistry"
 )
 
 const (
 	DefaultPvcMountPath                = "/pvc"
 	StorageClassHostPathSeparateDevice = "host-path-sd"
+
+	// LabelApplyStorageProfile is a label used by the CDI mutating webhook
+	// to modify the PVC according to the storage profile.
+	LabelApplyStorageProfile = "cdi.kubevirt.io/applyStorageProfile"
 )
+
+type Option func(pvc *k8sv1.PersistentVolumeClaim)
 
 func RenderPodWithPVC(name string, cmd []string, args []string, pvc *k8sv1.PersistentVolumeClaim) *k8sv1.Pod {
 	volumeName := "disk0"
@@ -68,17 +70,17 @@ func RenderPodWithPVC(name string, cmd []string, args []string, pvc *k8sv1.Persi
 			Containers: []k8sv1.Container{
 				{
 					Name:    name,
-					Image:   fmt.Sprintf("%s/vm-killer:%s", flags.KubeVirtUtilityRepoPrefix, flags.KubeVirtUtilityVersionTag),
+					Image:   libregistry.GetUtilityImageFromRegistry("vm-killer"),
 					Command: cmd,
 					Args:    args,
 					SecurityContext: &k8sv1.SecurityContext{
 						Capabilities: &k8sv1.Capabilities{
 							Drop: []k8sv1.Capability{"ALL"},
 						},
-						Privileged:               pointer.Bool(false),
+						Privileged:               pointer.P(false),
 						RunAsUser:                &nonRootUser,
-						RunAsNonRoot:             pointer.Bool(true),
-						AllowPrivilegeEscalation: pointer.Bool(false),
+						RunAsNonRoot:             pointer.P(true),
+						AllowPrivilegeEscalation: pointer.P(false),
 						SeccompProfile: &k8sv1.SeccompProfile{
 							Type: k8sv1.SeccompProfileTypeRuntimeDefault,
 						},
@@ -134,64 +136,76 @@ func addVolumeMounts(volumeName string) []k8sv1.VolumeMount {
 	return volumeMounts
 }
 
-func NewPVC(name, size, storageClass string) *k8sv1.PersistentVolumeClaim {
-	quantity, err := resource.ParseQuantity(size)
-	util.PanicOnError(err)
+func WithStorageClass(sc string) Option {
+	return func(pvc *k8sv1.PersistentVolumeClaim) {
+		pvc.Spec.StorageClassName = &sc
+	}
+}
 
-	return &k8sv1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+func WithStorageProfile() Option {
+	return WithLabels(map[string]string{LabelApplyStorageProfile: "true"})
+}
+
+func WithLabels(labels map[string]string) Option {
+	return func(pvc *k8sv1.PersistentVolumeClaim) {
+		if pvc.Labels == nil {
+			pvc.Labels = map[string]string{}
+		}
+		for key, value := range labels {
+			pvc.Labels[key] = value
+		}
+	}
+}
+
+func WithVolumeMode(volumeMode k8sv1.PersistentVolumeMode) Option {
+	return func(pvc *k8sv1.PersistentVolumeClaim) {
+		pvc.Spec.VolumeMode = &volumeMode
+	}
+}
+
+func NewPVC(name, size, storageClass string, opts ...Option) *k8sv1.PersistentVolumeClaim {
+	pvc := &k8sv1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+		},
 		Spec: k8sv1.PersistentVolumeClaimSpec{
 			AccessModes: []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteOnce},
-			Resources: k8sv1.ResourceRequirements{
+			Resources: k8sv1.VolumeResourceRequirements{
 				Requests: k8sv1.ResourceList{
-					"storage": quantity,
+					"storage": resource.MustParse(size),
 				},
 			},
 			StorageClassName: &storageClass,
 		},
 	}
+
+	for _, opt := range opts {
+		opt(pvc)
+	}
+
+	return pvc
 }
 
 func createPVC(pvc *k8sv1.PersistentVolumeClaim, namespace string) *k8sv1.PersistentVolumeClaim {
 	virtCli := kubevirt.Client()
 
 	createdPvc, err := virtCli.CoreV1().PersistentVolumeClaims(namespace).Create(context.Background(), pvc, metav1.CreateOptions{})
-	if !errors.IsAlreadyExists(err) {
-		util.PanicOnError(err)
-	}
+	Expect(err).To(Or(
+		Not(HaveOccurred()),
+		MatchError(errors.IsAlreadyExists, "errors.IsAlreadyExists"),
+	))
 
 	return createdPvc
 }
 
-func CreateFSPVC(name, namespace, size string, labels map[string]string) *k8sv1.PersistentVolumeClaim {
-	sc, exists := GetRWOFileSystemStorageClass()
-	if !exists {
-		Skip("Skip test when RWOFileSystem storage class is not present")
-	}
-	pvc := NewPVC(name, size, sc)
-	volumeMode := k8sv1.PersistentVolumeFilesystem
-	pvc.Spec.VolumeMode = &volumeMode
-	if labels != nil && pvc.Labels == nil {
-		pvc.Labels = map[string]string{}
-	}
-
-	for key, value := range labels {
-		pvc.Labels[key] = value
-	}
-
-	return createPVC(pvc, namespace)
+func CreateFSPVC(name, namespace, size string, opts ...Option) *k8sv1.PersistentVolumeClaim {
+	sc, _ := GetRWOFileSystemStorageClass()
+	return createPVC(NewPVC(name, size, sc, opts...), namespace)
 }
 
-func CreateBlockPVC(name, namespace, size string) *k8sv1.PersistentVolumeClaim {
-	sc, exists := GetRWOBlockStorageClass()
-	if !exists {
-		Skip("Skip test when RWOBlock storage class is not present")
-	}
-	pvc := NewPVC(name, size, sc)
-	volumeMode := k8sv1.PersistentVolumeBlock
-	pvc.Spec.VolumeMode = &volumeMode
-
-	return createPVC(pvc, namespace)
+func CreateBlockPVC(name, namespace, size string, opts ...Option) *k8sv1.PersistentVolumeClaim {
+	sc, _ := GetRWOBlockStorageClass()
+	return createPVC(NewPVC(name, size, sc, append(opts, WithVolumeMode(k8sv1.PersistentVolumeBlock))...), namespace)
 }
 
 func CreateHostPathPVC(os, namespace, size string) {
@@ -203,7 +217,7 @@ func CreatePVC(os, namespace, size, storageClass string, recycledPV bool) *k8sv1
 	pvcName := fmt.Sprintf("disk-%s", os)
 
 	selector := map[string]string{
-		util.KubevirtIoTest: os,
+		kubevirtIoTest: os,
 	}
 
 	// If the PV is not recycled, it will have a namespace related test label which  we should match
@@ -222,7 +236,7 @@ func DeleteAllSeparateDeviceHostPathPvs() {
 	virtClient := kubevirt.Client()
 
 	pvList, err := virtClient.CoreV1().PersistentVolumes().List(context.Background(), metav1.ListOptions{})
-	util.PanicOnError(err)
+	Expect(err).ToNot(HaveOccurred())
 	for _, pv := range pvList.Items {
 		if pv.Spec.StorageClassName == StorageClassHostPathSeparateDevice {
 			// ignore error we want to attempt to delete them all.
@@ -254,7 +268,7 @@ func createSeparateDeviceHostPathPv(osName, namespace, nodeName string) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: fmt.Sprintf("%s-%s", name, namespace),
 			Labels: map[string]string{
-				util.KubevirtIoTest:                      osName,
+				kubevirtIoTest:                           osName,
 				cleanup.TestLabelForNamespace(namespace): "",
 			},
 		},
@@ -276,7 +290,7 @@ func createSeparateDeviceHostPathPv(osName, namespace, nodeName string) {
 						{
 							MatchExpressions: []k8sv1.NodeSelectorRequirement{
 								{
-									Key:      util.KubernetesIoHostName,
+									Key:      k8sv1.LabelHostname,
 									Operator: k8sv1.NodeSelectorOpIn,
 									Values:   []string{nodeName},
 								},
@@ -289,9 +303,10 @@ func createSeparateDeviceHostPathPv(osName, namespace, nodeName string) {
 	}
 
 	_, err := virtCli.CoreV1().PersistentVolumes().Create(context.Background(), pv, metav1.CreateOptions{})
-	if !errors.IsAlreadyExists(err) {
-		util.PanicOnError(err)
-	}
+	Expect(err).To(Or(
+		Not(HaveOccurred()),
+		MatchError(errors.IsAlreadyExists, "errors.IsAlreadyExists"),
+	))
 }
 
 func CreateHostPathPv(osName, namespace, hostPath string) string {
@@ -307,7 +322,7 @@ func CreateHostPathPvWithSizeAndStorageClass(osName, namespace, hostPath, size, 
 	virtCli := kubevirt.Client()
 
 	quantity, err := resource.ParseQuantity(size)
-	util.PanicOnError(err)
+	Expect(err).ToNot(HaveOccurred())
 
 	hostPathType := k8sv1.HostPathDirectoryOrCreate
 
@@ -316,7 +331,7 @@ func CreateHostPathPvWithSizeAndStorageClass(osName, namespace, hostPath, size, 
 		ObjectMeta: metav1.ObjectMeta{
 			Name: fmt.Sprintf("%s-%s", name, namespace),
 			Labels: map[string]string{
-				util.KubevirtIoTest:                      osName,
+				kubevirtIoTest:                           osName,
 				cleanup.TestLabelForNamespace(namespace): "",
 			},
 		},
@@ -339,7 +354,7 @@ func CreateHostPathPvWithSizeAndStorageClass(osName, namespace, hostPath, size, 
 						{
 							MatchExpressions: []k8sv1.NodeSelectorRequirement{
 								{
-									Key:      util.KubernetesIoHostName,
+									Key:      k8sv1.LabelHostname,
 									Operator: k8sv1.NodeSelectorOpIn,
 									Values:   []string{libnode.SchedulableNode},
 								},
@@ -352,9 +367,10 @@ func CreateHostPathPvWithSizeAndStorageClass(osName, namespace, hostPath, size, 
 	}
 
 	_, err = virtCli.CoreV1().PersistentVolumes().Create(context.Background(), pv, metav1.CreateOptions{})
-	if !errors.IsAlreadyExists(err) {
-		util.PanicOnError(err)
-	}
+	Expect(err).To(Or(
+		Not(HaveOccurred()),
+		MatchError(errors.IsAlreadyExists, "errors.IsAlreadyExists"),
+	))
 	return libnode.SchedulableNode
 }
 
@@ -363,9 +379,10 @@ func DeletePVC(os, namespace string) {
 
 	name := fmt.Sprintf("disk-%s", os)
 	err := virtCli.CoreV1().PersistentVolumeClaims(namespace).Delete(context.Background(), name, metav1.DeleteOptions{})
-	if !errors.IsNotFound(err) {
-		util.PanicOnError(err)
-	}
+	Expect(err).To(Or(
+		Not(HaveOccurred()),
+		MatchError(errors.IsNotFound, "errors.IsNotFound"),
+	))
 }
 
 func DeletePV(os string) {
@@ -373,90 +390,8 @@ func DeletePV(os string) {
 
 	name := fmt.Sprintf("%s-disk-for-tests", os)
 	err := virtCli.CoreV1().PersistentVolumes().Delete(context.Background(), name, metav1.DeleteOptions{})
-	if !errors.IsNotFound(err) {
-		util.PanicOnError(err)
-	}
-}
-
-func CreateNFSPvAndPvc(name string, namespace string, size string, nfsTargetIP string, os string) {
-	virtCli := kubevirt.Client()
-
-	_, err := virtCli.CoreV1().PersistentVolumes().Create(context.Background(), newNFSPV(name, namespace, size, nfsTargetIP, os), metav1.CreateOptions{})
-	if !errors.IsAlreadyExists(err) {
-		util.PanicOnError(err)
-	}
-
-	_, err = virtCli.CoreV1().PersistentVolumeClaims(namespace).Create(context.Background(), newNFSPVC(name, namespace, size, os), metav1.CreateOptions{})
-	if !errors.IsAlreadyExists(err) {
-		util.PanicOnError(err)
-	}
-}
-
-func newNFSPV(name string, namespace string, size string, nfsTargetIP string, os string) *k8sv1.PersistentVolume {
-	quantity := resource.MustParse(size)
-
-	storageClass, exists := GetRWOFileSystemStorageClass()
-	if !exists {
-		Skip("Skip test when Filesystem storage is not present")
-	}
-	volumeMode := k8sv1.PersistentVolumeFilesystem
-
-	nfsTargetIP = ip.NormalizeIPAddress(nfsTargetIP)
-
-	return &k8sv1.PersistentVolume{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-			Labels: map[string]string{
-				util.KubevirtIoTest:                      os,
-				cleanup.TestLabelForNamespace(namespace): "",
-			},
-		},
-		Spec: k8sv1.PersistentVolumeSpec{
-			AccessModes: []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteMany},
-			Capacity: k8sv1.ResourceList{
-				"storage": quantity,
-			},
-			StorageClassName: storageClass,
-			VolumeMode:       &volumeMode,
-			PersistentVolumeSource: k8sv1.PersistentVolumeSource{
-				NFS: &k8sv1.NFSVolumeSource{
-					Server: nfsTargetIP,
-					Path:   "/",
-				},
-			},
-		},
-	}
-}
-
-func newNFSPVC(name string, namespace string, size string, os string) *k8sv1.PersistentVolumeClaim {
-	quantity, err := resource.ParseQuantity(size)
-	util.PanicOnError(err)
-
-	storageClass, exists := GetRWOFileSystemStorageClass()
-	if !exists {
-		Skip("Skip test when Filesystem storage is not present")
-	}
-	volumeMode := k8sv1.PersistentVolumeFilesystem
-
-	return &k8sv1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-		},
-		Spec: k8sv1.PersistentVolumeClaimSpec{
-			AccessModes: []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteMany},
-			Resources: k8sv1.ResourceRequirements{
-				Requests: k8sv1.ResourceList{
-					"storage": quantity,
-				},
-			},
-			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					util.KubevirtIoTest:                      os,
-					cleanup.TestLabelForNamespace(namespace): "",
-				},
-			},
-			StorageClassName: &storageClass,
-			VolumeMode:       &volumeMode,
-		},
-	}
+	Expect(err).To(Or(
+		Not(HaveOccurred()),
+		MatchError(errors.IsNotFound, "errors.IsNotFound"),
+	))
 }

@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2019 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -21,7 +21,6 @@ package apply
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -42,6 +41,7 @@ import (
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
 
+	"kubevirt.io/kubevirt/pkg/apimachinery/patch"
 	"kubevirt.io/kubevirt/pkg/controller"
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/install"
 	"kubevirt.io/kubevirt/pkg/virt-operator/util"
@@ -50,7 +50,6 @@ import (
 const (
 	castFailedFmt   = "Cast failed! obj: %+v"
 	deleteFailedFmt = "Failed to delete %s: %v"
-	finalizerPath   = "/metadata/finalizers"
 )
 
 func deleteDummyWebhookValidators(kv *v1.KubeVirt,
@@ -114,7 +113,7 @@ func DeleteAll(kv *v1.KubeVirt,
 		return err
 	}
 
-	if !util.IsStoreEmpty(stores.CrdCache) {
+	if !util.IsStoreEmpty(stores.OperatorCrdCache) {
 		// wait until CRDs are gone
 		return nil
 	}
@@ -464,9 +463,84 @@ func DeleteAll(kv *v1.KubeVirt,
 		}
 	}
 
+	objects = stores.ValidatingAdmissionPolicyBindingCache.List()
+	for _, obj := range objects {
+		if validatingAdmissionPolicyBinding, ok := obj.(*admissionregistrationv1.ValidatingAdmissionPolicyBinding); ok && validatingAdmissionPolicyBinding.DeletionTimestamp == nil {
+			if key, err := controller.KeyFunc(validatingAdmissionPolicyBinding); err == nil {
+				expectations.ValidatingAdmissionPolicyBinding.AddExpectedDeletion(kvkey, key)
+				err := clientset.AdmissionregistrationV1().ValidatingAdmissionPolicyBindings().Delete(context.Background(), validatingAdmissionPolicyBinding.Name, deleteOptions)
+				if err != nil {
+					expectations.ValidatingAdmissionPolicyBinding.DeletionObserved(kvkey, key)
+					log.Log.Errorf("Failed to delete validatingAdmissionPolicyBinding %+v: %v", validatingAdmissionPolicyBinding, err)
+					return err
+				}
+			}
+		} else if !ok {
+			log.Log.Errorf(castFailedFmt, obj)
+			return nil
+		}
+	}
+
+	objects = stores.ValidatingAdmissionPolicyCache.List()
+	for _, obj := range objects {
+		if validatingAdmissionPolicy, ok := obj.(*admissionregistrationv1.ValidatingAdmissionPolicy); ok && validatingAdmissionPolicy.DeletionTimestamp == nil {
+			if key, err := controller.KeyFunc(validatingAdmissionPolicy); err == nil {
+				expectations.ValidatingAdmissionPolicy.AddExpectedDeletion(kvkey, key)
+				err := clientset.AdmissionregistrationV1().ValidatingAdmissionPolicies().Delete(context.Background(), validatingAdmissionPolicy.Name, deleteOptions)
+				if err != nil {
+					expectations.ValidatingAdmissionPolicy.DeletionObserved(kvkey, key)
+					log.Log.Errorf("Failed to delete validatingAdmissionPolicy %+v: %v", validatingAdmissionPolicy, err)
+					return err
+				}
+			}
+		} else if !ok {
+			log.Log.Errorf(castFailedFmt, obj)
+			return nil
+		}
+	}
+
+	if err = deleteKubeVirtLabelsFromNodes(clientset); err != nil {
+		return err
+	}
+
 	err = deleteDummyWebhookValidators(kv, clientset, stores, expectations)
 	if err != nil {
 		return err
+	}
+	return nil
+}
+
+func deleteKubeVirtLabelsFromNodes(clientset kubecli.KubevirtClient) error {
+	nodeList, err := clientset.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{LabelSelector: v1.NodeSchedulable})
+	if err != nil {
+		return fmt.Errorf("failed to list nodes: %v", err)
+	}
+
+	for _, node := range nodeList.Items {
+		labels := node.GetLabels()
+		if labels == nil {
+			continue
+		}
+		patchSet := patch.New()
+		for labelkey := range labels {
+			if strings.HasPrefix(labelkey, "kubevirt.io/") {
+				patchSet.AddOption(patch.WithRemove(fmt.Sprintf("/metadata/labels/%s", patch.EscapeJSONPointer(labelkey))))
+			}
+		}
+
+		if patchSet.IsEmpty() {
+			continue
+		}
+
+		payload, err := patchSet.GeneratePayload()
+		if err != nil {
+			return fmt.Errorf("failed to generate patch payload: %v", err)
+		}
+
+		if _, err = clientset.CoreV1().Nodes().Patch(context.Background(), node.Name, types.JSONPatchType, payload, metav1.PatchOptions{}); err != nil {
+			return fmt.Errorf("failed to update labels for node %s: %v", node.Name, err)
+		}
+		log.Log.Infof("removed kubevirt labels from node %s", node.Name)
 	}
 	return nil
 }
@@ -537,7 +611,7 @@ func crdHandleDeletion(kvkey string,
 	expectations *util.Expectations) error {
 
 	ext := clientset.ExtensionsClient()
-	objects := stores.CrdCache.List()
+	objects := stores.OperatorCrdCache.List()
 
 	finalizerPath := "/metadata/finalizers"
 
@@ -559,12 +633,13 @@ func crdHandleDeletion(kvkey string,
 		crdCopy := crd.DeepCopy()
 		controller.AddFinalizer(crdCopy, v1.VirtOperatorComponentFinalizer)
 
-		patchBytes, err := json.Marshal(crdCopy.Finalizers)
+		payload, err := patch.New(patch.WithAdd(finalizerPath, crdCopy.Finalizers)).GeneratePayload()
+
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to generate patch payload: %v", err)
 		}
-		ops := fmt.Sprintf(`[{ "op": "add", "path": "%s", "value": %s }]`, finalizerPath, string(patchBytes))
-		_, err = ext.ApiextensionsV1().CustomResourceDefinitions().Patch(context.Background(), crd.Name, types.JSONPatchType, []byte(ops), metav1.PatchOptions{})
+
+		_, err = ext.ApiextensionsV1().CustomResourceDefinitions().Patch(context.Background(), crd.Name, types.JSONPatchType, payload, metav1.PatchOptions{})
 		if err != nil {
 			return err
 		}
@@ -576,41 +651,33 @@ func crdHandleDeletion(kvkey string,
 			return err
 		}
 
-		expectations.Crd.AddExpectedDeletion(kvkey, key)
+		expectations.OperatorCrd.AddExpectedDeletion(kvkey, key)
 		err = ext.ApiextensionsV1().CustomResourceDefinitions().Delete(context.Background(), crd.Name, metav1.DeleteOptions{})
 		if err != nil {
-			expectations.Crd.DeletionObserved(kvkey, key)
+			expectations.OperatorCrd.DeletionObserved(kvkey, key)
 			log.Log.Errorf("Failed to delete crd %+v: %v", crd, err)
 			return err
 		}
 	}
 
 	for _, crd := range needFinalizerRemoved {
-		var ops string
+		patchSet := patch.New()
 		if len(crd.Finalizers) > 1 {
 			crdCopy := crd.DeepCopy()
 			controller.RemoveFinalizer(crdCopy, v1.VirtOperatorComponentFinalizer)
 
-			newPatchBytes, err := json.Marshal(crdCopy.Finalizers)
-			if err != nil {
-				return err
-			}
-
-			oldPatchBytes, err := json.Marshal(crd.Finalizers)
-			if err != nil {
-				return err
-			}
-
-			ops = fmt.Sprintf(`[{ "op": "test", "path": "%s", "value": %s }, { "op": "replace", "path": "%s", "value": %s }]`,
-				finalizerPath,
-				string(oldPatchBytes),
-				finalizerPath,
-				string(newPatchBytes))
+			patchSet.AddOption(
+				patch.WithTest(finalizerPath, crd.Finalizers),
+				patch.WithReplace(finalizerPath, crdCopy.Finalizers),
+			)
 		} else {
-			ops = fmt.Sprintf(`[{ "op": "remove", "path": "%s" }]`, finalizerPath)
+			patchSet.AddOption(patch.WithRemove(finalizerPath))
 		}
-
-		_, err := ext.ApiextensionsV1().CustomResourceDefinitions().Patch(context.Background(), crd.Name, types.JSONPatchType, []byte(ops), metav1.PatchOptions{})
+		payload, err := patchSet.GeneratePayload()
+		if err != nil {
+			return fmt.Errorf("failed to generate patch payload: %v", err)
+		}
+		_, err = ext.ApiextensionsV1().CustomResourceDefinitions().Patch(context.Background(), crd.Name, types.JSONPatchType, payload, metav1.PatchOptions{})
 		if err != nil {
 			return err
 		}

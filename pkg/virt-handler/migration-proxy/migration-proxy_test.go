@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2018 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -28,12 +28,11 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"k8s.io/utils/pointer"
-
 	v1 "kubevirt.io/api/core/v1"
 
 	"kubevirt.io/kubevirt/pkg/certificates"
 	ephemeraldiskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
+	"kubevirt.io/kubevirt/pkg/pointer"
 	"kubevirt.io/kubevirt/pkg/testutils"
 )
 
@@ -115,7 +114,7 @@ var _ = Describe("MigrationProxy", func() {
 
 				defer virtqemudListener.Close()
 
-				targetProxy := NewTargetProxy("0.0.0.0", 12345, tlsConfig, tlsConfig, virtqemudSock, "123")
+				targetProxy := NewTargetProxy("0.0.0.0", 12345, tlsConfig, virtqemudSock, "123")
 				sourceProxy := NewSourceProxy(sourceSock, "127.0.0.1:12345", tlsConfig, tlsConfig, "123")
 				defer targetProxy.Stop()
 				defer sourceProxy.Stop()
@@ -163,7 +162,7 @@ var _ = Describe("MigrationProxy", func() {
 				config, _, _ := testutils.NewFakeClusterConfigUsingKVConfig(&v1.KubeVirtConfiguration{
 					MigrationConfiguration: migrationConfig,
 				})
-				manager := NewMigrationProxyManager(tlsConfig, tlsConfig, config)
+				manager := NewMigrationProxyManager(tlsConfig, tlsConfig, tlsConfig, config)
 				manager.StartTargetListener("mykey", []string{virtqemudSock, directSock})
 				destSrcPortMap := manager.GetTargetListenerPorts("mykey")
 				manager.StartSourceListener("mykey", "127.0.0.1", destSrcPortMap, tmpDir)
@@ -209,8 +208,8 @@ var _ = Describe("MigrationProxy", func() {
 					}
 				}
 			},
-				Entry("with TLS enabled", &v1.MigrationConfiguration{DisableTLS: pointer.BoolPtr(false)}),
-				Entry("with TLS disabled", &v1.MigrationConfiguration{DisableTLS: pointer.BoolPtr(true)}),
+				Entry("with TLS enabled", &v1.MigrationConfiguration{DisableTLS: pointer.P(false)}),
+				Entry("with TLS disabled", &v1.MigrationConfiguration{DisableTLS: pointer.P(true)}),
 			)
 
 			DescribeTable("by ensuring no new listeners can be created after shutdown", func(migrationConfig *v1.MigrationConfiguration) {
@@ -221,17 +220,18 @@ var _ = Describe("MigrationProxy", func() {
 				directMigrationPort := "49152"
 				virtqemudSock := filepath.Join(tmpDir, "virtqemud-sock")
 				virtqemudListener, err := net.Listen("unix", virtqemudSock)
-				defer virtqemudListener.Close()
 				Expect(err).ShouldNot(HaveOccurred())
+				defer virtqemudListener.Close()
+
 				directSock := filepath.Join(tmpDir, key1+"-"+directMigrationPort)
 				directListener, err := net.Listen("unix", directSock)
+				Expect(err).ShouldNot(HaveOccurred())
 				defer directListener.Close()
 
-				Expect(err).ShouldNot(HaveOccurred())
 				config, _, _ := testutils.NewFakeClusterConfigUsingKVConfig(&v1.KubeVirtConfiguration{
 					MigrationConfiguration: migrationConfig,
 				})
-				manager := NewMigrationProxyManager(tlsConfig, tlsConfig, config)
+				manager := NewMigrationProxyManager(tlsConfig, tlsConfig, tlsConfig, config)
 				err = manager.StartTargetListener(key1, []string{virtqemudSock, directSock})
 				Expect(err).ShouldNot(HaveOccurred())
 				destSrcPortMap := manager.GetTargetListenerPorts(key1)
@@ -255,8 +255,8 @@ var _ = Describe("MigrationProxy", func() {
 				Expect(err.Error()).To(Equal("unable to process new migration connections during virt-handler shutdown"))
 
 			},
-				Entry("with TLS enabled", &v1.MigrationConfiguration{DisableTLS: pointer.BoolPtr(false)}),
-				Entry("with TLS disabled", &v1.MigrationConfiguration{DisableTLS: pointer.BoolPtr(true)}),
+				Entry("with TLS enabled", &v1.MigrationConfiguration{DisableTLS: pointer.P(false)}),
+				Entry("with TLS disabled", &v1.MigrationConfiguration{DisableTLS: pointer.P(true)}),
 			)
 		})
 	})

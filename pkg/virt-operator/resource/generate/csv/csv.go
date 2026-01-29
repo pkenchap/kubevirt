@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2019 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 package csv
@@ -21,8 +21,6 @@ package csv
 import (
 	"encoding/json"
 	"fmt"
-
-	"k8s.io/utils/pointer"
 
 	"github.com/coreos/go-semver/semver"
 	csvv1 "github.com/operator-framework/operator-lifecycle-manager/pkg/api/apis/operators/v1alpha1"
@@ -33,6 +31,7 @@ import (
 
 	virtv1 "kubevirt.io/api/core/v1"
 
+	"kubevirt.io/kubevirt/pkg/pointer"
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/components"
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/rbac"
 )
@@ -40,36 +39,30 @@ import (
 const xDescriptorText = "urn:alm:descriptor:text"
 
 type NewClusterServiceVersionData struct {
-	Namespace             string
-	KubeVirtVersion       string
-	OperatorImageVersion  string
-	DockerPrefix          string
-	ImagePrefix           string
-	ImagePullPolicy       string
-	Verbosity             string
-	CsvVersion            string
-	VirtApiSha            string
-	VirtControllerSha     string
-	VirtHandlerSha        string
-	VirtLauncherSha       string
-	VirtExportProxySha    string
-	VirtExportServerSha   string
-	GsSha                 string
-	PrHelperSha           string
-	RunbookURLTemplate    string
-	Replicas              int
-	IconBase64            string
-	ReplacesCsvVersion    string
-	CreatedAtTimestamp    string
-	VirtOperatorImage     string
-	VirtApiImage          string
-	VirtControllerImage   string
-	VirtHandlerImage      string
-	VirtLauncherImage     string
-	VirtExportProxyImage  string
-	VirtExportServerImage string
-	GsImage               string
-	PrHelperImage         string
+	Namespace                          string
+	KubeVirtVersion                    string
+	OperatorImageVersion               string
+	DockerPrefix                       string
+	ImagePrefix                        string
+	ImagePullPolicy                    string
+	Verbosity                          string
+	CsvVersion                         string
+	RunbookURLTemplate                 string
+	Replicas                           int
+	IconBase64                         string
+	ReplacesCsvVersion                 string
+	CreatedAtTimestamp                 string
+	VirtOperatorImage                  string
+	VirtApiImage                       string
+	VirtControllerImage                string
+	VirtHandlerImage                   string
+	VirtLauncherImage                  string
+	VirtExportProxyImage               string
+	VirtExportServerImage              string
+	VirtSynchronizationControllerImage string
+	GsImage                            string
+	PrHelperImage                      string
+	SidecarShimImage                   string
 }
 
 type csvClusterPermissions struct {
@@ -158,21 +151,13 @@ KubeVirt is distributed under the
 
 func NewClusterServiceVersion(data *NewClusterServiceVersionData) (*csvv1.ClusterServiceVersion, error) {
 
-	deployment, err := components.NewOperatorDeployment(
+	deployment := components.NewOperatorDeployment(
 		data.Namespace,
 		data.DockerPrefix,
 		data.ImagePrefix,
 		data.OperatorImageVersion,
 		data.Verbosity,
 		data.KubeVirtVersion,
-		data.VirtApiSha,
-		data.VirtControllerSha,
-		data.VirtHandlerSha,
-		data.VirtLauncherSha,
-		data.VirtExportProxySha,
-		data.VirtExportServerSha,
-		data.GsSha,
-		data.PrHelperSha,
 		data.RunbookURLTemplate,
 		data.VirtApiImage,
 		data.VirtControllerImage,
@@ -180,18 +165,17 @@ func NewClusterServiceVersion(data *NewClusterServiceVersionData) (*csvv1.Cluste
 		data.VirtLauncherImage,
 		data.VirtExportProxyImage,
 		data.VirtExportServerImage,
+		data.VirtSynchronizationControllerImage,
 		data.GsImage,
 		data.PrHelperImage,
+		data.SidecarShimImage,
 		data.VirtOperatorImage,
 		v1.PullPolicy(data.ImagePullPolicy))
-	if err != nil {
-		return nil, err
-	}
 
 	imageVersion := components.AddVersionSeparatorPrefix(data.OperatorImageVersion)
 
 	if data.Replicas > 0 && *deployment.Spec.Replicas != int32(data.Replicas) {
-		deployment.Spec.Replicas = pointer.Int32(int32(data.Replicas))
+		deployment.Spec.Replicas = pointer.P(int32(data.Replicas))
 	}
 
 	clusterRules := rbac.NewOperatorClusterRole().Rules

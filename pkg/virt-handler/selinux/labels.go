@@ -1,7 +1,25 @@
+/*
+ * This file is part of the KubeVirt project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * Copyright The KubeVirt Authors.
+ *
+ */
+
 package selinux
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,7 +28,6 @@ import (
 
 	v1 "kubevirt.io/api/core/v1"
 
-	"kubevirt.io/kubevirt/pkg/util"
 	"kubevirt.io/kubevirt/pkg/virt-handler/isolation"
 
 	"kubevirt.io/kubevirt/pkg/safepath"
@@ -26,11 +43,9 @@ type execFunc = func(binary string, args ...string) ([]byte, error)
 type copyPolicy = func(policyName string, dir string) (err error)
 
 func defaultExecFunc(binary string, args ...string) ([]byte, error) {
-	// #nosec No risk for attacket injection. args get specific selinux exec parameters
+	// #nosec No risk for attacker injection. args get specific selinux exec parameters
 	return exec.Command(binary, args...).CombinedOutput()
 }
-
-var POLICY_FILES = []string{"virt_launcher"}
 
 type SELinuxImpl struct {
 	Paths          []string
@@ -70,49 +85,6 @@ func (se *SELinuxImpl) IsPresent() (present bool, mode string, err error) {
 	return true, outStr, nil
 }
 
-func lookupPath(binary string, prefix string, paths []string) (string, bool, error) {
-	for _, path := range paths {
-		fullPath := filepath.Join(prefix, path, binary)
-		_, err := os.Stat(fullPath)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		} else if err != nil {
-			return "", false, err
-		} else {
-			return filepath.Join(path, binary), true, nil
-		}
-	}
-	return "", false, nil
-}
-
-func (se *SELinuxImpl) semodule(args ...string) (out []byte, err error) {
-	path, exists, err := lookupPath("semodule", se.procOnePrefix, se.Paths)
-	if err != nil {
-		return []byte{}, err
-	} else if !exists {
-		// on some environments some selinux related binaries are missing, e.g. when the cluster runs in containers (kind).
-		// In such a case, inform the admin, but continue.
-		if se.IsPermissive() {
-			log.DefaultLogger().Warning("Permissive mode, ignoring missing 'semodule' binary. SELinux policies will not be installed.")
-			return []byte{}, nil
-		}
-		return []byte{}, fmt.Errorf("could not find 'semodule' binary")
-	}
-
-	argsArray := []string{"--mount", virt_chroot.GetChrootMountNamespace(), "exec", "--", path}
-	for _, arg := range args {
-		argsArray = append(argsArray, arg)
-	}
-
-	out, err = se.execFunc(virt_chroot.GetChrootBinaryPath(), argsArray...)
-	if err != nil && se.IsPermissive() {
-		log.DefaultLogger().Warningf("Permissive mode, ignoring 'semodule' failure: out: %q, error: %v", string(out), err)
-		return []byte{}, nil
-	}
-
-	return out, err
-}
-
 func (se *SELinuxImpl) IsPermissive() bool {
 	return se.mode == "permissive"
 }
@@ -146,40 +118,22 @@ func defaultCopyPolicyFunc(policyName string, dir string) (err error) {
 	return nil
 }
 
-func (se *SELinuxImpl) InstallPolicy(dir string) (err error) {
-	for _, policyName := range POLICY_FILES {
-		fileDest := filepath.Join(dir, policyName+".cil")
-		err := se.copyPolicyFunc(policyName, dir)
-		if err != nil {
-			return fmt.Errorf("failed to copy policy %v - err: %v", fileDest, err)
-		}
-		out, err := se.semodule("-i", fileDest)
-		if err != nil {
-			if len(out) > 0 {
-				return fmt.Errorf("failed to install policy %v - out: %q, error: %v", fileDest, string(out), err)
-			} else {
-				return fmt.Errorf("failed to install policy %v - err: %v", fileDest, err)
-			}
-		}
-	}
-	return nil
-}
-
+//go:generate mockgen -source $GOFILE -package=$GOPACKAGE -destination=generated_mock_$GOFILE
 type SELinux interface {
-	InstallPolicy(dir string) (err error)
 	Mode() string
 	IsPermissive() bool
 }
 
-func RelabelFiles(newLabel string, continueOnError bool, files ...*safepath.Path) error {
-	relabelArgs := []string{"selinux", "relabel", newLabel}
+func RelabelFilesUnprivileged(continueOnError bool, files ...*safepath.Path) error {
+	const unprivilegedContainerSELinuxLabel = "system_u:object_r:container_file_t:s0"
+	relabelArgs := []string{"selinux", "relabel", unprivilegedContainerSELinuxLabel}
 	for _, file := range files {
 		cmd := exec.Command("virt-chroot", append(relabelArgs, "--root", unsafepath.UnsafeRoot(file.Raw()), unsafepath.UnsafeRelative(file.Raw()))...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		err := cmd.Run()
 		if err != nil {
-			err := fmt.Errorf("error relabeling file %s with label %s. Reason: %v", file, newLabel, err)
+			err := fmt.Errorf("error relabeling file %s with label %s. Reason: %v", file, unprivilegedContainerSELinuxLabel, err)
 			if !continueOnError {
 				return err
 			} else {
@@ -191,7 +145,7 @@ func RelabelFiles(newLabel string, continueOnError bool, files ...*safepath.Path
 }
 
 func GetVirtLauncherContext(vmi *v1.VirtualMachineInstance) (string, error) {
-	detector := isolation.NewSocketBasedIsolationDetector(util.VirtShareDir)
+	detector := isolation.NewSocketBasedIsolationDetector()
 	isolationRes, err := detector.Detect(vmi)
 	if err != nil {
 		return "", err

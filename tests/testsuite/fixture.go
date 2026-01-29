@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2022 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -22,50 +22,65 @@ package testsuite
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strconv"
 	"time"
-
-	"kubevirt.io/kubevirt/tests/framework/matcher"
-
-	"kubevirt.io/kubevirt/tests/framework/kubevirt"
-
-	"k8s.io/apimachinery/pkg/api/errors"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
+
 	k8sv1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/rand"
 
 	v1 "kubevirt.io/api/core/v1"
+	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
 
+	"kubevirt.io/kubevirt/pkg/libvmi"
 	"kubevirt.io/kubevirt/pkg/virt-controller/services"
 	"kubevirt.io/kubevirt/tests/flags"
+	"kubevirt.io/kubevirt/tests/framework/kubevirt"
+	"kubevirt.io/kubevirt/tests/framework/matcher"
+	"kubevirt.io/kubevirt/tests/libkubevirt"
 	"kubevirt.io/kubevirt/tests/libnode"
 	"kubevirt.io/kubevirt/tests/libstorage"
-	"kubevirt.io/kubevirt/tests/util"
+	"kubevirt.io/kubevirt/tests/libvmifact"
 )
 
 const (
 	defaultEventuallyTimeout         = 5 * time.Second
 	defaultEventuallyPollingInterval = 1 * time.Second
-	defaultKubevirtReadyTimeout      = 180 * time.Second
+	defaultKubevirtReadyTimeout      = 5 * time.Minute
+	defaultKWOKNodeCount             = 8000
+	defaultKWOKNodeDeleteBatchSize   = 500
+	defaultKWOKNodeDeleteTimeout     = 10 * time.Minute
+	defaultMachineType               = "q35"
+	defaultVirtAPIReplicaCount       = 2
 )
 
 const HostPathBase = "/tmp/hostImages"
 
 var (
-	HostPathAlpine string
-	HostPathCustom string
+	HostPathAlpine       string
+	HostPathAlpineNoPriv string
+	HostPathCustom       string
 )
 
 var Arch string
 
 func SynchronizedAfterTestSuiteCleanup() {
 	RestoreKubeVirtResource()
+
+	if flags.DeployFakeKWOKNodesFlag {
+		deleteFakeKWOKNodes()
+	}
 
 	libnode.CleanNodes()
 }
@@ -92,11 +107,23 @@ func SynchronizedBeforeTestSetup() []byte {
 		DeployTestingInfrastructure()
 	}
 
+	if flags.DeployFakeKWOKNodesFlag {
+		disableVirtAPIAutoScaling()
+		createFakeKWOKNodes()
+	}
+
 	EnsureKVMPresent()
 	AdjustKubeVirtResource()
 	EnsureKubevirtReady()
 
 	return nil
+}
+
+func addTestAnnotation(vmi *v1.VirtualMachineInstance) {
+	if vmi.Annotations == nil {
+		vmi.Annotations = map[string]string{}
+	}
+	vmi.Annotations["kubevirt.io/created-by-test"] = GinkgoT().Name()
 }
 
 func BeforeTestSuiteSetup(_ []byte) {
@@ -115,6 +142,7 @@ func BeforeTestSuiteSetup(_ []byte) {
 	// TODO link this somehow with the image provider which we run upfront
 
 	HostPathAlpine = filepath.Join(HostPathBase, fmt.Sprintf("%s%v", "alpine", worker))
+	HostPathAlpineNoPriv = filepath.Join(HostPathBase, fmt.Sprintf("%s%v", "alpine-nopriv", worker))
 	HostPathCustom = filepath.Join(HostPathBase, fmt.Sprintf("%s%v", "custom", worker))
 
 	// Wait for schedulable nodes
@@ -134,40 +162,60 @@ func BeforeTestSuiteSetup(_ []byte) {
 
 	SetDefaultEventuallyTimeout(defaultEventuallyTimeout)
 	SetDefaultEventuallyPollingInterval(defaultEventuallyPollingInterval)
+
+	libvmifact.RegisterArchitecture(Arch)
+	libvmi.RegisterDefaultOption(addTestAnnotation)
+	libvmi.RegisterDefaultOption(libvmi.WithAutoattachGraphicsDevice(false))
+	libvmi.RegisterDefaultOption(libvmi.WithTerminationGracePeriod(0))
 }
 
 func EnsureKubevirtReady() {
-	EnsureKubevirtReadyWithTimeout(defaultKubevirtReadyTimeout)
+	EnsureDefaultKubevirtReadyWithTimeout(defaultKubevirtReadyTimeout)
 }
 
-func EnsureKubevirtReadyWithTimeout(timeout time.Duration) {
+func EnsureDefaultKubevirtReadyWithTimeout(timeout time.Duration) {
+	kv := libkubevirt.GetCurrentKv(kubevirt.Client())
+	EnsureKubevirtReadyWithTimeout(kv, timeout)
+}
+
+func EnsureKubevirtReadyWithTimeout(kv *v1.KubeVirt, timeout time.Duration) {
 	virtClient := kubevirt.Client()
-	kv := util.GetCurrentKv(virtClient)
 
 	Eventually(matcher.ThisDeploymentWith(flags.KubeVirtInstallNamespace, "virt-operator"), 180*time.Second, 1*time.Second).
 		Should(matcher.HaveReadyReplicasNumerically(">", 0),
 			"virt-operator deployment is not ready")
 
-	Eventually(func() *v1.KubeVirt {
-		kv, err := virtClient.KubeVirt(kv.Namespace).Get(kv.Name, &metav1.GetOptions{})
-		Expect(err).ToNot(HaveOccurred())
-		return kv
+	Eventually(func(g Gomega) *v1.KubeVirt {
+		foundKV, err := virtClient.KubeVirt(kv.Namespace).Get(context.Background(), kv.Name, metav1.GetOptions{})
+		g.Expect(err).ToNot(HaveOccurred())
+		return foundKV
 	}, timeout, 1*time.Second).Should(
 		SatisfyAll(
 			matcher.HaveConditionTrue(v1.KubeVirtConditionAvailable),
 			matcher.HaveConditionFalse(v1.KubeVirtConditionProgressing),
 			matcher.HaveConditionFalse(v1.KubeVirtConditionDegraded),
-			WithTransform(func(kv *v1.KubeVirt) bool {
+			matcher.HaveConditionTrue(v1.KubeVirtConditionCreated),
+			Satisfy(func(kv *v1.KubeVirt) bool {
 				return kv.ObjectMeta.Generation == *kv.Status.ObservedGeneration
-			}, BeTrue()),
+			}),
 		), "One of the Kubevirt control-plane components is not ready.")
+}
 
+func shouldAllowEmulation(virtClient kubecli.KubevirtClient) bool {
+	allowEmulation := false
+
+	kv := libkubevirt.GetCurrentKv(virtClient)
+	if kv.Spec.Configuration.DeveloperConfiguration != nil {
+		allowEmulation = kv.Spec.Configuration.DeveloperConfiguration.UseEmulation
+	}
+
+	return allowEmulation
 }
 
 func EnsureKVMPresent() {
 	virtClient := kubevirt.Client()
 
-	if !ShouldAllowEmulation(virtClient) {
+	if !shouldAllowEmulation(virtClient) {
 		listOptions := metav1.ListOptions{LabelSelector: v1.AppLabel + "=virt-handler"}
 		virtHandlerPods, err := virtClient.CoreV1().Pods(flags.KubeVirtInstallNamespace).List(context.Background(), listOptions)
 		ExpectWithOffset(1, err).ToNot(HaveOccurred())
@@ -190,14 +238,143 @@ func EnsureKVMPresent() {
 	}
 }
 
+func deleteFakeKWOKNodes() {
+	virtClient := kubevirt.Client()
+	ctx, cancel := context.WithTimeout(context.Background(), defaultKWOKNodeDeleteTimeout)
+	defer cancel()
+
+	Eventually(func() bool {
+		nodes, err := virtClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: "type=kwok", Limit: 1})
+		Expect(err).ToNot(HaveOccurred())
+
+		if len(nodes.Items) == 0 {
+			return true
+		}
+
+		err = virtClient.CoreV1().Nodes().DeleteCollection(
+			ctx,
+			metav1.DeleteOptions{},
+			metav1.ListOptions{LabelSelector: "type=kwok", Limit: defaultKWOKNodeDeleteBatchSize})
+		Expect(err).To(Succeed())
+
+		time.Sleep(5 * time.Second)
+
+		return false
+	}, defaultKWOKNodeDeleteTimeout, defaultEventuallyPollingInterval).Should(BeTrue())
+}
+
+// setup fake nodes for KWOK performance test
+func createFakeKWOKNodes() {
+	By("create fake Nodes")
+	nodeCount := getKWOKNodeCount()
+	for i := 1; i <= nodeCount; i++ {
+		nodeName := fmt.Sprintf("kwok-node-%d", i)
+		node := newFakeKWOKNode(nodeName)
+
+		_, err := kubevirt.Client().CoreV1().Nodes().Create(context.TODO(), node, metav1.CreateOptions{})
+		Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to create node %s", nodeName))
+	}
+
+	By("Get the list of nodes")
+	nodeList, err := kubevirt.Client().CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{LabelSelector: "type=kwok"})
+	Expect(err).NotTo(HaveOccurred(), "Failed to list fake nodes")
+	Expect(nodeList.Items).To(HaveLen(nodeCount))
+}
+
+func newFakeKWOKNode(nodeName string) *k8sv1.Node {
+	return &k8sv1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: nodeName,
+			Labels: map[string]string{
+				"beta.kubernetes.io/arch":                         "amd64",
+				"beta.kubernetes.io/os":                           "linux",
+				"kubernetes.io/arch":                              "amd64",
+				"kubernetes.io/hostname":                          nodeName,
+				"kubernetes.io/os":                                "linux",
+				"kubernetes.io/role":                              "agent",
+				"node-role.kubernetes.io/agent":                   "",
+				v1.NodeSchedulable:                                "true",
+				v1.SupportedMachineTypeLabel + defaultMachineType: "true",
+				"type": "kwok",
+			},
+			Annotations: map[string]string{
+				"node.alpha.kubernetes.io/ttl": "0",
+				"kwok.x-k8s.io/node":           "fake",
+			},
+		},
+		Spec: k8sv1.NodeSpec{
+			Taints: []k8sv1.Taint{
+				{
+					Key:    "kwok.x-k8s.io/node",
+					Value:  "fake",
+					Effect: k8sv1.TaintEffectNoSchedule,
+				},
+				{
+					Key:    "kwok.x-k8s.io/node",
+					Value:  "fake",
+					Effect: k8sv1.TaintEffectNoExecute,
+				},
+				{
+					Key:    "CriticalAddonsOnly",
+					Effect: k8sv1.TaintEffectNoSchedule,
+				},
+			},
+		},
+		Status: k8sv1.NodeStatus{
+			Allocatable: k8sv1.ResourceList{
+				k8sv1.ResourceCPU:               resource.MustParse("32"),
+				k8sv1.ResourceMemory:            resource.MustParse("256Gi"),
+				k8sv1.ResourceEphemeralStorage:  resource.MustParse("100Gi"),
+				k8sv1.ResourcePods:              resource.MustParse("110"),
+				"devices.kubevirt.io/kvm":       resource.MustParse("1k"),
+				"devices.kubevirt.io/tun":       resource.MustParse("1k"),
+				"devices.kubevirt.io/vhost-net": resource.MustParse("1k"),
+			},
+			Capacity: k8sv1.ResourceList{
+				k8sv1.ResourceCPU:               resource.MustParse("32"),
+				k8sv1.ResourceMemory:            resource.MustParse("256Gi"),
+				k8sv1.ResourceEphemeralStorage:  resource.MustParse("100Gi"),
+				k8sv1.ResourcePods:              resource.MustParse("110"),
+				"devices.kubevirt.io/kvm":       resource.MustParse("1k"),
+				"devices.kubevirt.io/tun":       resource.MustParse("1k"),
+				"devices.kubevirt.io/vhost-net": resource.MustParse("1k"),
+			},
+		},
+	}
+}
+
+// disableVirtAPIAutoScaling sets fixed replicas for virt-api to prevent auto-scaling
+// Without this, virt-api would scale to hundreds of replicas when thousands of KWOK nodes are created.
+func disableVirtAPIAutoScaling() {
+	By("Disabling virt-api auto-scaling for KWOK density testing")
+	virtClient := kubevirt.Client()
+
+	patchData := []byte(`{"spec":{"infra":{"replicas":` + strconv.Itoa(int(defaultVirtAPIReplicaCount)) + `}}}`)
+	_, err := virtClient.KubeVirt(flags.KubeVirtInstallNamespace).Patch(context.TODO(), "kubevirt", types.MergePatchType, patchData, metav1.PatchOptions{})
+	Expect(err).NotTo(HaveOccurred(), "Failed to patch KubeVirt CR")
+}
+
+func getKWOKNodeCount() int {
+	vmCountString := os.Getenv("KWOK_NODE_COUNT")
+	if vmCountString == "" {
+		return defaultKWOKNodeCount
+	}
+
+	vmCount, err := strconv.Atoi(vmCountString)
+	if err != nil {
+		return defaultKWOKNodeCount
+	}
+
+	return vmCount
+}
+
 func deployOrWipeTestingInfrastrucure(actionOnObject func(unstructured.Unstructured) error) {
 	// Deploy / delete test infrastructure / dependencies
 	manifests := GetListOfManifests(flags.PathToTestingInfrastrucureManifests)
 	for _, manifest := range manifests {
 		objects := ReadManifestYamlFile(manifest)
 		for _, obj := range objects {
-			err := actionOnObject(obj)
-			util.PanicOnError(err)
+			Expect(actionOnObject(obj)).To(Succeed())
 		}
 	}
 
@@ -219,7 +396,7 @@ func waitForAllDaemonSetsReady(timeout time.Duration) {
 		virtClient := kubevirt.Client()
 
 		dsList, err := virtClient.AppsV1().DaemonSets(k8sv1.NamespaceAll).List(context.Background(), metav1.ListOptions{})
-		util.PanicOnError(err)
+		Expect(err).ToNot(HaveOccurred())
 		for _, ds := range dsList.Items {
 			if ds.Status.DesiredNumberScheduled != ds.Status.NumberReady {
 				dsNotReady = append(dsNotReady, ds.Name)
@@ -237,7 +414,7 @@ func waitForAllPodsReady(timeout time.Duration, listOptions metav1.ListOptions) 
 		virtClient := kubevirt.Client()
 
 		podsList, err := virtClient.CoreV1().Pods(k8sv1.NamespaceAll).List(context.Background(), listOptions)
-		util.PanicOnError(err)
+		Expect(err).ToNot(HaveOccurred())
 		for _, pod := range podsList.Items {
 			for _, status := range pod.Status.ContainerStatuses {
 				if status.State.Terminated != nil {

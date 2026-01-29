@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2017 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -22,17 +22,18 @@ package cli
 //go:generate mockgen -source $GOFILE -imports "libvirt=libvirt.org/go/libvirt" -package=$GOPACKAGE -destination=generated_mock_$GOFILE
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
 	"sync"
 	"time"
 
-	utilwait "k8s.io/apimachinery/pkg/util/wait"
 	"libvirt.org/go/libvirt"
 
 	"kubevirt.io/client-go/log"
 
+	virtwait "kubevirt.io/kubevirt/pkg/apimachinery/wait"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/errors"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/stats"
@@ -47,6 +48,7 @@ type Connection interface {
 	LookupDomainByName(name string) (VirDomain, error)
 	DomainDefineXML(xml string) (VirDomain, error)
 	Close() (int, error)
+	DomainEventJobCompletedRegister(callback libvirt.DomainEventJobCompletedCallback) error
 	DomainEventLifecycleRegister(callback libvirt.DomainEventLifecycleCallback) error
 	DomainEventDeviceAddedRegister(callback libvirt.DomainEventDeviceAddedCallback) error
 	DomainEventDeviceRemovedRegister(callback libvirt.DomainEventDeviceRemovedCallback) error
@@ -64,6 +66,7 @@ type Connection interface {
 	// 1. avoid to expose to the client code the libvirt-specific return type, see docs in stats/ subpackage
 	// 2. transparently handling the addition of the memory stats, currently (libvirt 4.9) not handled by the bulk stats API
 	GetDomainStats(statsTypes libvirt.DomainStatsTypes, l *stats.DomainJobInfo, flags libvirt.ConnectGetAllDomainStatsFlags) ([]*stats.DomainStats, error)
+	GetDomainDirtyRate(calculationDuration time.Duration, flags libvirt.DomainDirtyRateCalcFlags) ([]*stats.DomainStatsDirtyRate, error)
 	GetQemuVersion() (string, error)
 	GetSEVInfo() (*api.SEVNodeParameters, error)
 }
@@ -88,6 +91,7 @@ type LibvirtConnection struct {
 	reconnectLock *sync.Mutex
 
 	domainEventCallbacks                        []libvirt.DomainEventLifecycleCallback
+	domainEventJobCompletedCallbacks            []libvirt.DomainEventJobCompletedCallback
 	domainDeviceAddedEventCallbacks             []libvirt.DomainEventDeviceAddedCallback
 	domainDeviceRemovedEventCallbacks           []libvirt.DomainEventDeviceRemovedCallback
 	domainEventMigrationIterationCallbacks      []libvirt.DomainEventMigrationIterationCallback
@@ -120,10 +124,6 @@ func (s *VirStream) UnderlyingStream() *libvirt.Stream {
 	return s.Stream
 }
 
-func (l *LibvirtConnection) SetReconnectChan(reconnect chan bool) {
-	l.reconnect = reconnect
-}
-
 func (l *LibvirtConnection) NewStream(flags libvirt.StreamFlags) (Stream, error) {
 	if err := l.reconnectIfNecessary(); err != nil {
 		return nil, err
@@ -137,6 +137,10 @@ func (l *LibvirtConnection) NewStream(flags libvirt.StreamFlags) (Stream, error)
 	return &VirStream{Stream: s}, nil
 }
 
+func (l *LibvirtConnection) SetReconnectChan(reconnect chan bool) {
+	l.reconnect = reconnect
+}
+
 func (l *LibvirtConnection) Close() (int, error) {
 	close(l.stop)
 	if l.Connect != nil {
@@ -144,6 +148,17 @@ func (l *LibvirtConnection) Close() (int, error) {
 	} else {
 		return 0, nil
 	}
+}
+
+func (l *LibvirtConnection) DomainEventJobCompletedRegister(callback libvirt.DomainEventJobCompletedCallback) (err error) {
+	if err = l.reconnectIfNecessary(); err != nil {
+		return
+	}
+
+	l.domainEventJobCompletedCallbacks = append(l.domainEventJobCompletedCallbacks, callback)
+	_, err = l.Connect.DomainEventJobCompletedRegister(nil, callback)
+	l.checkConnectionLost(err)
+	return
 }
 
 func (l *LibvirtConnection) DomainEventLifecycleRegister(callback libvirt.DomainEventLifecycleCallback) (err error) {
@@ -336,8 +351,10 @@ func (l *LibvirtConnection) GetDomainStats(statsTypes libvirt.DomainStatsTypes, 
 			return list, err
 		}
 
+		dirtyRateInfo := domStat.DirtyRate
+
 		stat := &stats.DomainStats{}
-		err = statsconv.Convert_libvirt_DomainStats_to_stats_DomainStats(statsconv.DomainIdentifier(domStat.Domain), &domStats[i], memStats, domInfo, devAliasMap, migrateJobInfo, stat)
+		err = statsconv.Convert_libvirt_DomainStats_to_stats_DomainStats(statsconv.DomainIdentifier(domStat.Domain), &domStats[i], memStats, domInfo, devAliasMap, migrateJobInfo, dirtyRateInfo, stat)
 		if err != nil {
 			return list, err
 		}
@@ -354,6 +371,85 @@ func (l *LibvirtConnection) GetDomainStats(statsTypes libvirt.DomainStatsTypes, 
 	}
 
 	return list, nil
+}
+
+func (l *LibvirtConnection) GetDomainDirtyRate(calculationDuration time.Duration, flags libvirt.DomainDirtyRateCalcFlags) ([]*stats.DomainStatsDirtyRate, error) {
+	domStats, err := l.GetAllDomainStats(libvirt.DOMAIN_STATS_DIRTYRATE, libvirt.CONNECT_GET_ALL_DOMAINS_STATS_RUNNING|libvirt.CONNECT_GET_ALL_DOMAINS_STATS_PAUSED)
+	if err != nil {
+		return nil, err
+	}
+
+	// Free memory allocated for domains
+	defer func() {
+		for i := range domStats {
+			err := domStats[i].Domain.Free()
+			if err != nil {
+				log.Log.Reason(err).Warning("Error freeing a domain.")
+			}
+		}
+	}()
+
+	for i := range domStats {
+		err := domStats[i].Domain.StartDirtyRateCalc(int(calculationDuration.Seconds()), flags)
+		if err != nil {
+			log.Log.Reason(err).Warning("Can't start dirty rate calc")
+		}
+	}
+
+	// Wait for the dirty rate calculation to finish
+	time.Sleep(calculationDuration)
+
+	var dirtyRateStats []*stats.DomainStatsDirtyRate
+	getDomainStats := func() ([]*stats.DomainStatsDirtyRate, error) {
+		var dirtyRateStats []*stats.DomainStatsDirtyRate
+		for _, domStat := range domStats {
+			dirtyRateInfo := domStat.DirtyRate
+			if dirtyRateInfo == nil {
+				log.Log.Warning("Dirty rate info is nil")
+				continue
+			}
+			// warn if dirty rate calc is not set or not finished
+			if !dirtyRateInfo.CalcStatusSet {
+				return nil, fmt.Errorf("dirty rate stats calculation status is not set")
+			} else if dirtyRateInfo.CalcStatus != int(libvirt.DOMAIN_DIRTYRATE_MEASURED) {
+				var status string
+				switch dirtyRateInfo.CalcStatus {
+				case int(libvirt.DOMAIN_DIRTYRATE_UNSTARTED):
+					status = "DOMAIN_DIRTYRATE_UNSTARTED"
+				case int(libvirt.DOMAIN_DIRTYRATE_MEASURING):
+					status = "DOMAIN_DIRTYRATE_MEASURING"
+				}
+
+				log.Log.Infof("trying to get dirty rate stats, but dirty rate calc status is not finished: %s", status)
+				return nil, fmt.Errorf("dirty calc status is %s", status)
+			} else {
+				dirtyRateStat := statsconv.Convert_libvirt_DomainStatsDirtyRate_To_stats_DomainStatsDirtyRate(dirtyRateInfo)
+				dirtyRateStats = append(dirtyRateStats, dirtyRateStat)
+			}
+		}
+		return dirtyRateStats, nil
+	}
+	retryTicker := time.NewTicker(200 * time.Millisecond)
+	retryTimeout := time.After(1 * time.Second)
+
+retryLoop:
+	for {
+		select {
+		case <-retryTicker.C:
+			dirtyRateStats, err = getDomainStats()
+			if err == nil {
+				break retryLoop
+			}
+		case <-retryTimeout:
+			break retryLoop
+		}
+	}
+
+	if err != nil || dirtyRateStats == nil {
+		return nil, fmt.Errorf("failed to get dirty rate stats: %w", err)
+	}
+
+	return dirtyRateStats, nil
 }
 
 func (l *LibvirtConnection) GetSEVInfo() (*api.SEVNodeParameters, error) {
@@ -442,48 +538,67 @@ func (l *LibvirtConnection) reconnectIfNecessary() (err error) {
 	defer l.reconnectLock.Unlock()
 	// TODO add a reconnect backoff, and immediately return an error in these cases
 	// We need this to avoid swamping libvirt with reconnect tries
-	if !l.alive {
-		l.Connect, err = newConnection(l.uri, l.user, l.pass)
-		if err != nil {
-			return
-		}
-		l.alive = true
+	if l.alive {
+		return nil
+	}
 
-		log.Log.Info("Established new Libvirt Connection")
+	if l.Connect, err = newConnection(l.uri, l.user, l.pass); err != nil {
+		return err
+	}
+	l.alive = true
 
-		for _, callback := range l.domainEventCallbacks {
-			log.Log.Info("Re-registered domain callback")
-			_, err = l.Connect.DomainEventLifecycleRegister(nil, callback)
-		}
-		for _, callback := range l.domainEventMigrationIterationCallbacks {
-			log.Log.Info("Re-registered iteration callback")
-			_, err = l.Connect.DomainEventMigrationIterationRegister(nil, callback)
-		}
-		for _, callback := range l.agentEventCallbacks {
-			log.Log.Info("Re-registered agent callback")
-			_, err = l.Connect.DomainEventAgentLifecycleRegister(nil, callback)
-		}
-		for _, callback := range l.domainDeviceAddedEventCallbacks {
-			log.Log.Info("Re-registered domain device added callback")
-			_, err = l.Connect.DomainEventDeviceAddedRegister(nil, callback)
-		}
-		for _, callback := range l.domainDeviceRemovedEventCallbacks {
-			log.Log.Info("Re-registered domain device removed callback")
-			_, err = l.Connect.DomainEventDeviceRemovedRegister(nil, callback)
-		}
-		for _, callback := range l.domainDeviceMemoryDeviceSizeChangeCallbacks {
-			log.Log.Info("Re-registered domain memory device size change callback")
-			_, err = l.Connect.DomainEventMemoryDeviceSizeChangeRegister(nil, callback)
-		}
+	log.Log.Info("Established new Libvirt Connection")
 
-		log.Log.Error("Re-registered domain and agent callbacks for new connection")
-
-		if l.reconnect != nil {
-			// Notify the callback about the reconnect through channel.
-			// This way we give the callback a chance to emit an error to the watcher
-			// ListWatcher will re-register automatically afterwards
-			l.reconnect <- true
+	for _, callback := range l.domainEventCallbacks {
+		log.Log.Infof("Re-registered domain callback: %p", callback)
+		if _, err = l.Connect.DomainEventLifecycleRegister(nil, callback); err != nil {
+			return err
 		}
+	}
+	for _, callback := range l.domainEventJobCompletedCallbacks {
+		log.Log.Infof("Re-registered job completed callback: %p", callback)
+		if _, err = l.Connect.DomainEventJobCompletedRegister(nil, callback); err != nil {
+			return err
+		}
+	}
+	for _, callback := range l.domainEventMigrationIterationCallbacks {
+		log.Log.Infof("Re-registered iteration callback: %p", callback)
+		if _, err = l.Connect.DomainEventMigrationIterationRegister(nil, callback); err != nil {
+			return err
+		}
+	}
+	for _, callback := range l.agentEventCallbacks {
+		log.Log.Infof("Re-registered agent callback: %p", callback)
+		if _, err = l.Connect.DomainEventAgentLifecycleRegister(nil, callback); err != nil {
+			return err
+		}
+	}
+	for _, callback := range l.domainDeviceAddedEventCallbacks {
+		log.Log.Infof("Re-registered domain device added callback: %p", callback)
+		if _, err = l.Connect.DomainEventDeviceAddedRegister(nil, callback); err != nil {
+			return err
+		}
+	}
+	for _, callback := range l.domainDeviceRemovedEventCallbacks {
+		log.Log.Infof("Re-registered domain device removed callback: %p", callback)
+		if _, err = l.Connect.DomainEventDeviceRemovedRegister(nil, callback); err != nil {
+			return err
+		}
+	}
+	for _, callback := range l.domainDeviceMemoryDeviceSizeChangeCallbacks {
+		log.Log.Infof("Re-registered domain memory device size change callback: %p", callback)
+		if _, err = l.Connect.DomainEventMemoryDeviceSizeChangeRegister(nil, callback); err != nil {
+			return err
+		}
+	}
+
+	log.Log.Error("Re-registered domain and agent callbacks for new connection")
+
+	if l.reconnect != nil {
+		// Notify the callback about the reconnect through channel.
+		// This way we give the callback a chance to emit an error to the watcher
+		// ListWatcher will re-register automatically afterwards
+		l.reconnect <- true
 	}
 	return nil
 }
@@ -517,34 +632,31 @@ func (l *LibvirtConnection) checkConnectionLost(err error) {
 
 type VirDomain interface {
 	GetState() (libvirt.DomainState, int, error)
-	Create() error
 	CreateWithFlags(flags libvirt.DomainCreateFlags) error
 	Suspend() error
 	Resume() error
 	BlockResize(disk string, size uint64, flags libvirt.DomainBlockResizeFlags) error
 	GetBlockInfo(disk string, flags uint32) (*libvirt.DomainBlockInfo, error)
-	AttachDevice(xml string) error
 	AttachDeviceFlags(xml string, flags libvirt.DomainDeviceModifyFlags) error
 	UpdateDeviceFlags(xml string, flags libvirt.DomainDeviceModifyFlags) error
-	DetachDevice(xml string) error
 	DetachDeviceFlags(xml string, flags libvirt.DomainDeviceModifyFlags) error
 	DestroyFlags(flags libvirt.DomainDestroyFlags) error
 	ShutdownFlags(flags libvirt.DomainShutdownFlags) error
 	Reboot(flags libvirt.DomainRebootFlagValues) error
+	Reset(flags uint32) error
 	UndefineFlags(flags libvirt.DomainUndefineFlagsValues) error
 	GetName() (string, error)
 	GetUUIDString() (string, error)
 	GetXMLDesc(flags libvirt.DomainXMLFlags) (string, error)
-	GetMetadata(tipus libvirt.DomainMetadataType, uri string, flags libvirt.DomainModificationImpact) (string, error)
-	OpenConsole(devname string, stream *libvirt.Stream, flags libvirt.DomainConsoleFlags) error
 	MigrateToURI3(string, *libvirt.DomainMigrateParameters, libvirt.DomainMigrateFlags) error
 	MigrateStartPostCopy(flags uint32) error
 	MemoryStats(nrStats uint32, flags uint32) ([]libvirt.DomainMemoryStat, error)
 	GetJobStats(flags libvirt.DomainGetJobStatsFlags) (*libvirt.DomainJobInfo, error)
 	GetJobInfo() (*libvirt.DomainJobInfo, error)
+	GetGuestInfo(types libvirt.DomainGuestInfoTypes, flags uint32) (*libvirt.DomainGuestInfo, error)
 	GetDiskErrors(flags uint32) ([]libvirt.DomainDiskError, error)
 	SetTime(secs int64, nsecs uint, flags libvirt.DomainSetTimeFlags) error
-	AuthorizedSSHKeysGet(user string, flags libvirt.DomainAuthorizedSSHKeysFlags) ([]string, error)
+	SetUserPassword(user string, password string, flags libvirt.DomainSetUserPasswordFlags) error
 	AuthorizedSSHKeysSet(user string, keys []string, flags libvirt.DomainAuthorizedSSHKeysFlags) error
 	AbortJob() error
 	Free() error
@@ -554,6 +666,10 @@ type VirDomain interface {
 	SetVcpusFlags(vcpu uint, flags libvirt.DomainVcpuFlags) error
 	GetLaunchSecurityInfo(flags uint32) (*libvirt.DomainLaunchSecurityParameters, error)
 	SetLaunchSecurityState(params *libvirt.DomainLaunchSecurityStateParameters, flags uint32) error
+	FSFreeze(mounts []string, flags uint32) error
+	FSThaw(mounts []string, flags uint32) error
+	Screenshot(stream *libvirt.Stream, screen, flags uint32) (string, error)
+	BackupBegin(backupXML string, checkpointXML string, flags libvirt.DomainBackupBeginFlags) error
 }
 
 func NewConnection(uri string, user string, pass string, checkInterval time.Duration) (Connection, error) {
@@ -567,10 +683,9 @@ func NewConnectionWithTimeout(uri string, user string, pass string, checkInterva
 	var err error
 	var virConn *libvirt.Connect
 
-	err = utilwait.PollImmediate(connectionInterval, connectionTimeout, func() (done bool, err error) {
+	err = virtwait.PollImmediately(connectionInterval, connectionTimeout, func(_ context.Context) (done bool, err error) {
 		virConn, err = newConnection(uri, user, pass)
 		if err != nil {
-			logger.V(1).Infof("Connecting to libvirt daemon failed: %v", err)
 			return false, nil
 		}
 		return true, nil

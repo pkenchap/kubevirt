@@ -1,6 +1,7 @@
 package logverbosity
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,23 +9,19 @@ import (
 	"strconv"
 
 	"github.com/spf13/cobra"
-
-	"k8s.io/client-go/tools/clientcmd"
-
 	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
 	"kubevirt.io/kubevirt/pkg/apimachinery/patch"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
+	"kubevirt.io/kubevirt/pkg/virtctl/clientconfig"
 	"kubevirt.io/kubevirt/pkg/virtctl/templates"
 )
 
-type Command struct {
-	clientConfig clientcmd.ClientConfig
-	command      string
-}
+type Command struct{}
 
 // for command parsing
 const (
@@ -68,14 +65,12 @@ const (
 
 // for patch operation
 const (
-	// Just "add" is fine, no need of "replace" and "remove".
-	// https://www.rfc-editor.org/rfc/rfc6902
-	patchAdd = patch.PatchAddOp
-	dcPath   = "/spec/configuration/developerConfiguration"
-	lvPath   = "/spec/configuration/developerConfiguration/logVerbosity"
+	dcPath = "/spec/configuration/developerConfiguration"
+	lvPath = "/spec/configuration/developerConfiguration/logVerbosity"
 )
 
-func NewCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
+func NewCommand() *cobra.Command {
+	c := Command{}
 	cmd := &cobra.Command{
 		Use:   "log-verbosity",
 		Short: "Show, Set or Reset log verbosity. The verbosity value must be 0-9. The default cluster config is normally 2.\n",
@@ -92,10 +87,7 @@ func NewCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
 - Flag syntax must be "flag=arg" ("flag arg" not supported).`,
 		Example: usage(),
 		Args:    cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			c := Command{command: "log-verbosity", clientConfig: clientConfig}
-			return c.RunE(cmd)
-		},
+		RunE:    c.RunE,
 	}
 
 	cmd.Flags().UintVar(virtComponents["virt-api"], "virt-api", NoFlag, "show/set virt-api log verbosity (0-9)")
@@ -168,7 +160,7 @@ func usage() string {
 
 // component name to JSON name
 func getJSONNameByComponentName(componentName string) string {
-	var componentNameToJSONName = map[string]string{
+	componentNameToJSONName := map[string]string{
 		"virt-api":        "virtAPI",
 		"virt-controller": "virtController",
 		"virt-handler":    "virtHandler",
@@ -179,8 +171,8 @@ func getJSONNameByComponentName(componentName string) string {
 	return componentNameToJSONName[componentName]
 }
 
-func detectInstallNamespaceAndName(virtClient kubecli.KubevirtClient) (string, string, error) {
-	kvs, err := virtClient.KubeVirt(k8smetav1.NamespaceAll).List(&k8smetav1.ListOptions{})
+func detectInstallNamespaceAndName(virtClient kubecli.KubevirtClient) (namespace, name string, err error) {
+	kvs, err := virtClient.KubeVirt(k8smetav1.NamespaceAll).List(context.Background(), k8smetav1.ListOptions{})
 	if err != nil {
 		return "", "", fmt.Errorf("could not list KubeVirt CRs across all namespaces: %v", err)
 	}
@@ -190,14 +182,14 @@ func detectInstallNamespaceAndName(virtClient kubecli.KubevirtClient) (string, s
 	if len(kvs.Items) > 1 {
 		return "", "", errors.New("invalid kubevirt installation, more than one KubeVirt resource found")
 	}
-	namespace := kvs.Items[0].Namespace
-	name := kvs.Items[0].Name
+	namespace = kvs.Items[0].Namespace
+	name = kvs.Items[0].Name
 	return namespace, name, nil
 }
 
-func hasVerbosityInKV(kv *v1.KubeVirt) (map[string]uint, bool, error) {
-	verbosityMap := map[string]uint{} // key: component name, value: verbosity
-	hasDeveloperConfiguration := true
+func hasVerbosityInKV(kv *v1.KubeVirt) (verbosityMap map[string]uint, hasDeveloperConfiguration bool, err error) {
+	verbosityMap = map[string]uint{} // key: component name, value: verbosity
+	hasDeveloperConfiguration = true
 
 	if kv.Spec.Configuration.DeveloperConfiguration == nil {
 		// If DeveloperConfiguration is absent in the KubeVirt CR, need to add it before adding LogVerbosity.
@@ -221,7 +213,7 @@ func hasVerbosityInKV(kv *v1.KubeVirt) (map[string]uint, bool, error) {
 func createOutputLines(verbosityVal map[string]uint) []string {
 	var lines []string
 
-	allIsSet := (*virtComponents[allComponents] != NoFlag)
+	allIsSet := *virtComponents[allComponents] != NoFlag
 
 	for componentName, verbosity := range virtComponents {
 		if componentName == allComponents {
@@ -243,7 +235,7 @@ func createOutputLines(verbosityVal map[string]uint) []string {
 func createShowMessage(currentLv map[string]uint) []string {
 	// fill the unattended verbosity with default verbosity
 	// key: JSONName, value: verbosity
-	var verbosityVal = map[string]uint{
+	verbosityVal := map[string]uint{
 		"virtAPI":        virtconfig.DefaultVirtAPILogVerbosity,
 		"virtController": virtconfig.DefaultVirtControllerLogVerbosity,
 		"virtHandler":    virtconfig.DefaultVirtHandlerLogVerbosity,
@@ -261,15 +253,7 @@ func createShowMessage(currentLv map[string]uint) []string {
 	return lines
 }
 
-func addPatch(patchData *[]patch.PatchOperation, op string, path string, value interface{}) {
-	*patchData = append(*patchData, patch.PatchOperation{
-		Op:    op,
-		Path:  path,
-		Value: value,
-	})
-}
-
-func setVerbosity(currentLv map[string]uint, patchData *[]patch.PatchOperation, hasDeveloperConfiguration bool) {
+func setVerbosity(currentLv map[string]uint) {
 	// update currentLv based on the user-specified verbosity for all components
 	if *virtComponents[allComponents] != NoFlag {
 		for componentName := range virtComponents {
@@ -289,35 +273,38 @@ func setVerbosity(currentLv map[string]uint, patchData *[]patch.PatchOperation, 
 		JSONName := getJSONNameByComponentName(componentName)
 		currentLv[JSONName] = *verbosity
 	}
-
-	// in case of just reset (no set operation after the reset), don't need to add another patch
-	if len(currentLv) != 0 {
-		if !hasDeveloperConfiguration {
-			// if DeveloperConfiguration is absent, add DeveloperConfiguration first
-			addPatch(patchData, patchAdd, dcPath, &v1.DeveloperConfiguration{})
-		}
-		addPatch(patchData, patchAdd, lvPath, currentLv)
-	}
 }
 
 func createPatch(currentLv map[string]uint, hasDeveloperConfiguration bool) ([]byte, error) {
-	patchData := []patch.PatchOperation{}
+	patchSet := patch.New()
 
 	// reset only if verbosity exists, otherwise do nothing
 	if isReset && len(currentLv) != 0 {
 		if !hasDeveloperConfiguration {
 			// if DeveloperConfiguration is absent, add DeveloperConfiguration first
-			addPatch(&patchData, patchAdd, dcPath, &v1.DeveloperConfiguration{})
+			patchSet.AddOption(patch.WithAdd(dcPath, v1.DeveloperConfiguration{}))
 			hasDeveloperConfiguration = true
 		}
 		// add an empty object
 		currentLv = map[string]uint{}
-		addPatch(&patchData, patchAdd, lvPath, currentLv)
+		patchSet.AddOption(patch.WithAdd(lvPath, currentLv))
 	}
 
-	setVerbosity(currentLv, &patchData, hasDeveloperConfiguration)
+	setVerbosity(currentLv)
 
-	return json.Marshal(patchData)
+	// in case of just reset (no set operation after the reset), don't need to add another patch
+	if len(currentLv) != 0 {
+		if !hasDeveloperConfiguration {
+			// if DeveloperConfiguration is absent, add DeveloperConfiguration first
+			patchSet.AddOption(patch.WithAdd(dcPath, &v1.DeveloperConfiguration{}))
+		}
+		patchSet.AddOption(patch.WithAdd(lvPath, currentLv))
+	}
+	if patchSet.IsEmpty() {
+		return nil, nil
+	}
+
+	return patchSet.GeneratePayload()
 }
 
 func findOperation(cmd *cobra.Command) (operation, error) {
@@ -360,8 +347,8 @@ func findOperation(cmd *cobra.Command) (operation, error) {
 	}
 }
 
-func (c *Command) RunE(cmd *cobra.Command) error {
-	virtClient, err := kubecli.GetKubevirtClientFromClientConfig(c.clientConfig)
+func (c *Command) RunE(cmd *cobra.Command, _ []string) error {
+	virtClient, _, _, err := clientconfig.ClientAndNamespaceFromContext(cmd.Context())
 	if err != nil {
 		return err
 	}
@@ -369,7 +356,7 @@ func (c *Command) RunE(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
-	kv, err := virtClient.KubeVirt(namespace).Get(name, &k8smetav1.GetOptions{})
+	kv, err := virtClient.KubeVirt(namespace).Get(context.Background(), name, k8smetav1.GetOptions{})
 	if err != nil {
 		return err
 	}
@@ -409,7 +396,10 @@ func (c *Command) RunE(cmd *cobra.Command) error {
 		if err != nil {
 			return err
 		}
-		_, err = virtClient.KubeVirt(namespace).Patch(name, types.JSONPatchType, patchData, &k8smetav1.PatchOptions{})
+		if patchData == nil {
+			return nil
+		}
+		_, err = virtClient.KubeVirt(namespace).Patch(context.Background(), name, types.JSONPatchType, patchData, k8smetav1.PatchOptions{})
 		if err != nil {
 			return err
 		}

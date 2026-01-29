@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2017, 2018 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -30,6 +30,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/json"
 
+	backupv1 "kubevirt.io/api/backup/v1alpha1"
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
 
@@ -39,6 +40,7 @@ import (
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/agent"
 	launcherErrors "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/errors"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/storage"
 )
 
 const (
@@ -293,6 +295,23 @@ func (l *Launcher) UnfreezeVirtualMachine(_ context.Context, request *cmdv1.VMIR
 	return response, nil
 }
 
+func (l *Launcher) ResetVirtualMachine(_ context.Context, request *cmdv1.VMIRequest) (*cmdv1.Response, error) {
+	vmi, response := getVMIFromRequest(request.Vmi)
+	if !response.Success {
+		return response, nil
+	}
+
+	if err := l.domainManager.ResetVMI(vmi); err != nil {
+		log.Log.Object(vmi).Reason(err).Errorf("Failed to reset vmi")
+		response.Success = false
+		response.Message = getErrorMessage(err)
+		return response, nil
+	}
+
+	log.Log.Object(vmi).Info("Reset vmi")
+	return response, nil
+}
+
 func (l *Launcher) SoftRebootVirtualMachine(_ context.Context, request *cmdv1.VMIRequest) (*cmdv1.Response, error) {
 	vmi, response := getVMIFromRequest(request.Vmi)
 	if !response.Success {
@@ -370,7 +389,7 @@ func (l *Launcher) FinalizeVirtualMachineMigration(_ context.Context, request *c
 		return response, nil
 	}
 
-	if err := l.domainManager.FinalizeVirtualMachineMigration(vmi); err != nil {
+	if err := l.domainManager.FinalizeVirtualMachineMigration(vmi, request.Options); err != nil {
 		log.Log.Object(vmi).Reason(err).Errorf("failed to finalize migration")
 		response.Success = false
 		response.Message = getErrorMessage(err)
@@ -388,7 +407,7 @@ func (l *Launcher) HotplugHostDevices(_ context.Context, request *cmdv1.VMIReque
 	}
 
 	if err := l.domainManager.HotplugHostDevices(vmi); err != nil {
-		log.Log.Object(vmi).Errorf(err.Error())
+		log.Log.Object(vmi).Errorf("%s", err.Error())
 		response.Success = false
 		response.Message = getErrorMessage(err)
 		return response, nil
@@ -456,24 +475,46 @@ func (l *Launcher) GetDomainStats(_ context.Context, _ *cmdv1.EmptyRequest) (*cm
 		},
 	}
 
-	list, err := l.domainManager.GetDomainStats()
+	stats, err := l.domainManager.GetDomainStats()
 	if err != nil {
 		response.Response.Success = false
 		response.Response.Message = getErrorMessage(err)
 		return response, nil
 	}
 
-	if len(list) > 0 {
-		if domainStats, err := json.Marshal(list[0]); err != nil {
-			log.Log.Reason(err).Errorf("Failed to marshal domain stats")
-			response.Response.Success = false
-			response.Response.Message = getErrorMessage(err)
-			return response, nil
-		} else {
-			response.DomainStats = string(domainStats)
-		}
+	if domainStats, err := json.Marshal(stats); err != nil {
+		log.Log.Reason(err).Errorf("Failed to marshal domain stats")
+		response.Response.Success = false
+		response.Response.Message = getErrorMessage(err)
+	} else {
+		response.DomainStats = string(domainStats)
 	}
 
+	return response, nil
+}
+
+func (l *Launcher) GetDomainDirtyRateStats(_ context.Context, _ *cmdv1.EmptyRequest) (*cmdv1.DirtyRateStatsResponse, error) {
+	response := &cmdv1.DirtyRateStatsResponse{
+		Response: &cmdv1.Response{
+			Success: true,
+		},
+	}
+
+	const dirtyRateCalculationTime = time.Second
+	stats, err := l.domainManager.GetDomainDirtyRateStats(dirtyRateCalculationTime)
+	if err != nil {
+		response.Response.Success = false
+		response.Response.Message = getErrorMessage(err)
+		return response, nil
+	}
+
+	if !stats.MegabytesPerSecondSet {
+		response.Response.Success = false
+		response.Response.Message = "Dirty rate MegabytesPerSecondSet is false"
+		return response, nil
+	}
+
+	response.DirtyRateMbs = stats.MegabytesPerSecond
 	return response, nil
 }
 
@@ -727,6 +768,12 @@ func (l *Launcher) SyncVirtualMachineMemory(_ context.Context, request *cmdv1.VM
 		return response, nil
 	}
 
+	if _, exists := vmi.Annotations[v1.FuncTestMemoryHotplugFailAnnotation]; exists {
+		response.Success = false
+		response.Message = v1.FuncTestMemoryHotplugFailAnnotation
+		return response, nil
+	}
+
 	if err := l.domainManager.UpdateGuestMemory(vmi); err != nil {
 		log.Log.Object(vmi).Reason(err).Errorf("Failed update VMI guest memory")
 		response.Success = false
@@ -738,7 +785,79 @@ func (l *Launcher) SyncVirtualMachineMemory(_ context.Context, request *cmdv1.VM
 	return response, nil
 }
 
+func (l *Launcher) GetScreenshot(_ context.Context, request *cmdv1.VMIRequest) (*cmdv1.ScreenshotResponse, error) {
+	vmi, response := getVMIFromRequest(request.Vmi)
+	screenshotResponse := &cmdv1.ScreenshotResponse{
+		Response: response,
+	}
+
+	if !screenshotResponse.Response.Success {
+		return screenshotResponse, nil
+	}
+
+	domainScreenshot, err := l.domainManager.GetScreenshot(vmi)
+	if err != nil {
+		log.Log.Object(vmi).Reason(err).Errorf("Failed to screenshot")
+		screenshotResponse.Response.Success = false
+		screenshotResponse.Response.Message = getErrorMessage(err)
+		return screenshotResponse, nil
+	}
+	screenshotResponse.Mime = domainScreenshot.Mime
+	screenshotResponse.Data = domainScreenshot.Data
+	return screenshotResponse, nil
+}
+
 func ReceivedEarlyExitSignal() bool {
 	_, earlyExit := os.LookupEnv(receivedEarlyExitSignalEnvVar)
 	return earlyExit
+}
+
+func getBackupOptionsFromRequest(request *cmdv1.BackupRequest) (*backupv1.BackupOptions, error) {
+	if request.Options == nil {
+		return nil, fmt.Errorf("backup options object not present in command server request")
+	}
+
+	var options *backupv1.BackupOptions
+	if err := json.Unmarshal(request.Options, &options); err != nil {
+		return nil, fmt.Errorf("no valid backup options object present in command server request: %v", err)
+	}
+
+	if options.Mode != backupv1.PushMode {
+		return nil, fmt.Errorf("currently only backup in push mode is supported")
+	}
+	if options.PushPath == nil {
+		return nil, fmt.Errorf("backup with push mode - pushPath wasn't provided")
+	}
+
+	return options, nil
+}
+
+func (l *Launcher) BackupVirtualMachine(_ context.Context, request *cmdv1.BackupRequest) (*cmdv1.Response, error) {
+	vmi, response := getVMIFromRequest(request.Vmi)
+	if !response.Success {
+		return response, nil
+	}
+
+	if !storage.IsChangedBlockTrackingEnabled(vmi) {
+		response.Success = false
+		response.Message = storage.ChangedBlockTrackingNotEnabledMsg
+		return response, nil
+	}
+
+	options, err := getBackupOptionsFromRequest(request)
+	if err != nil {
+		response.Success = false
+		response.Message = err.Error()
+		return response, nil
+	}
+
+	if err := l.domainManager.BackupVirtualMachine(vmi, options); err != nil {
+		log.Log.Object(vmi).Reason(err).Errorf("Failed to run backup job")
+		response.Success = false
+		response.Message = err.Error()
+		return response, nil
+	}
+
+	log.Log.Object(vmi).Info("VMI backup job initiated")
+	return response, nil
 }

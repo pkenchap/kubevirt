@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2017 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -27,9 +27,9 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
 
 	"github.com/emicklei/go-restful/v3"
 	appsv1 "k8s.io/api/apps/v1"
@@ -37,28 +37,39 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sfield "k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
-	clonev1alpha1 "kubevirt.io/api/clone/v1alpha1"
+	backupv1 "kubevirt.io/api/backup/v1alpha1"
+	clone "kubevirt.io/api/clone/v1beta1"
 	v1 "kubevirt.io/api/core/v1"
-	exportv1 "kubevirt.io/api/export/v1alpha1"
+	exportv1 "kubevirt.io/api/export/v1beta1"
 	instancetypev1beta1 "kubevirt.io/api/instancetype/v1beta1"
 	migrationsv1 "kubevirt.io/api/migrations/v1alpha1"
-	snapshotv1 "kubevirt.io/api/snapshot/v1alpha1"
+	snapshotv1 "kubevirt.io/api/snapshot/v1beta1"
 	"kubevirt.io/client-go/kubecli"
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
 
 	"kubevirt.io/kubevirt/pkg/controller"
+	instancetypecontroller "kubevirt.io/kubevirt/pkg/instancetype/controller/vm"
 	metrics "kubevirt.io/kubevirt/pkg/monitoring/metrics/virt-controller"
 	"kubevirt.io/kubevirt/pkg/rest"
+	backup "kubevirt.io/kubevirt/pkg/storage/cbt"
 	"kubevirt.io/kubevirt/pkg/storage/export/export"
 	"kubevirt.io/kubevirt/pkg/storage/snapshot"
 	"kubevirt.io/kubevirt/pkg/testutils"
+	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	"kubevirt.io/kubevirt/pkg/virt-controller/services"
-	"kubevirt.io/kubevirt/pkg/virt-controller/watch/clone"
+	clonecontroller "kubevirt.io/kubevirt/pkg/virt-controller/watch/clone"
 	"kubevirt.io/kubevirt/pkg/virt-controller/watch/drain/disruptionbudget"
 	"kubevirt.io/kubevirt/pkg/virt-controller/watch/drain/evacuation"
+	"kubevirt.io/kubevirt/pkg/virt-controller/watch/migration"
+	"kubevirt.io/kubevirt/pkg/virt-controller/watch/node"
+	"kubevirt.io/kubevirt/pkg/virt-controller/watch/replicaset"
 	"kubevirt.io/kubevirt/pkg/virt-controller/watch/topology"
+	"kubevirt.io/kubevirt/pkg/virt-controller/watch/vm"
+	"kubevirt.io/kubevirt/pkg/virt-controller/watch/vmi"
 )
 
 func newValidGetRequest() *http.Request {
@@ -88,6 +99,7 @@ var _ = Describe("Application", func() {
 		recorder := record.NewFakeRecorder(100)
 		recorder.IncludeObject = true
 		config, _, _ := testutils.NewFakeClusterConfigUsingKVConfig(&v1.KubeVirtConfiguration{})
+		app.clusterConfig = config
 
 		pdbInformer, _ := testutils.NewFakeInformerFor(&policyv1.PodDisruptionBudget{})
 		migrationPolicyInformer, _ := testutils.NewFakeInformerFor(&migrationsv1.MigrationPolicy{})
@@ -98,6 +110,7 @@ var _ = Describe("Application", func() {
 		crInformer, _ := testutils.NewFakeInformerFor(&appsv1.ControllerRevision{})
 		dataVolumeInformer, _ := testutils.NewFakeInformerFor(&cdiv1.DataVolume{})
 		dataSourceInformer, _ := testutils.NewFakeInformerFor(&cdiv1.DataSource{})
+		storageProfileInformer, _ := testutils.NewFakeInformerFor(&cdiv1.StorageProfile{})
 		cdiInformer, _ := testutils.NewFakeInformerFor(&cdiv1.DataVolume{})
 		cdiConfigInformer, _ := testutils.NewFakeInformerFor(&cdiv1.DataVolume{})
 		rsInformer, _ := testutils.NewFakeInformerFor(&v1.VirtualMachineInstanceReplicaSet{})
@@ -108,9 +121,10 @@ var _ = Describe("Application", func() {
 		configMapInformer, _ := testutils.NewFakeInformerFor(&k8sv1.ConfigMap{})
 		routeConfigMapInformer, _ := testutils.NewFakeInformerFor(&k8sv1.ConfigMap{})
 		dvInformer, _ := testutils.NewFakeInformerFor(&cdiv1.DataVolume{})
-		instancetypeMethods := testutils.NewMockInstancetypeMethods()
 		exportServiceInformer, _ := testutils.NewFakeInformerFor(&k8sv1.Service{})
-		cloneInformer, _ := testutils.NewFakeInformerFor(&clonev1alpha1.VirtualMachineClone{})
+		cloneInformer, _ := testutils.NewFakeInformerFor(&clone.VirtualMachineClone{})
+		backupInformer, _ := testutils.NewFakeInformerFor(&backupv1.VirtualMachineBackup{})
+		backupTrackerInformer, _ := testutils.NewFakeInformerFor(&backupv1.VirtualMachineBackupTracker{})
 		secretInformer, _ := testutils.NewFakeInformerFor(&k8sv1.Secret{})
 		instancetypeInformer, _ := testutils.NewFakeInformerFor(&instancetypev1beta1.VirtualMachineInstancetype{})
 		clusterInstancetypeInformer, _ := testutils.NewFakeInformerFor(&instancetypev1beta1.VirtualMachineClusterInstancetype{})
@@ -124,46 +138,65 @@ var _ = Describe("Application", func() {
 		app.nodeTopologyUpdater = topologyUpdater
 		app.informerFactory = controller.NewKubeInformerFactory(nil, nil, nil, "test")
 		app.evacuationController, _ = evacuation.NewEvacuationController(vmiInformer, migrationInformer, nodeInformer, podInformer, recorder, virtClient, config)
-		app.disruptionBudgetController, _ = disruptionbudget.NewDisruptionBudgetController(vmiInformer, pdbInformer, podInformer, migrationInformer, recorder, virtClient, config)
-		app.nodeController, _ = NewNodeController(virtClient, nodeInformer, vmiInformer, recorder)
-		app.vmiController, _ = NewVMIController(services.NewTemplateService("a", 240, "b", "c", "d", "e", "f", "g", pvcInformer.GetStore(), virtClient, config, qemuGid, "h", resourceQuotaInformer.GetStore(), namespaceInformer.GetStore()),
+		app.disruptionBudgetController, _ = disruptionbudget.NewDisruptionBudgetController(vmiInformer, pdbInformer, podInformer, migrationInformer, recorder, virtClient)
+		app.nodeController, _ = node.NewController(virtClient, nodeInformer, vmiInformer, recorder)
+		app.vmiController, _ = vmi.NewController(services.NewTemplateService("a", 240, "b", "c", "d", "e", "f", pvcInformer.GetStore(), virtClient, config, qemuGid, "g", resourceQuotaInformer.GetStore(), namespaceInformer.GetStore()),
 			vmiInformer,
 			vmInformer,
 			podInformer,
 			pvcInformer,
+			migrationInformer,
+			storageClassInformer,
 			recorder,
 			virtClient,
 			dataVolumeInformer,
+			storageProfileInformer,
 			cdiInformer,
 			cdiConfigInformer,
 			config,
 			topology.NewTopologyHinter(&cache.FakeCustomStore{}, &cache.FakeCustomStore{}, nil),
+			nil,
+			func(_ *v1.VirtualMachineInstance, _ *k8sv1.Pod) error { return nil },
+			func(_ *k8sfield.Path, _ *v1.VirtualMachineInstanceSpec, _ *virtconfig.ClusterConfig) []metav1.StatusCause {
+				return nil
+			},
+			stubMigrationEvaluator{},
+			[]string{},
+			[]string{},
 		)
-		app.rsController, _ = NewVMIReplicaSet(vmiInformer, rsInformer, recorder, virtClient, uint(10))
-		app.vmController, _ = NewVMController(vmiInformer,
+		app.rsController, _ = replicaset.NewController(vmiInformer, rsInformer, recorder, virtClient, uint(10))
+		app.vmController, _ = vm.NewController(vmiInformer,
 			vmInformer,
 			dataVolumeInformer,
 			dataSourceInformer,
-			namespaceInformer.GetStore(),
+			kvInformer,
+			namespaceInformer,
 			pvcInformer,
 			crInformer,
-			podInformer,
-			instancetypeMethods,
 			recorder,
 			virtClient,
-			config)
-		app.migrationController, _ = NewMigrationController(services.NewTemplateService("a", 240, "b", "c", "d", "e", "f", "g", pvcInformer.GetStore(), virtClient, config, qemuGid, "h", resourceQuotaInformer.GetStore(), namespaceInformer.GetStore()),
+			config,
+			nil,
+			nil,
+			instancetypecontroller.NewControllerStub(),
+			[]string{},
+			[]string{},
+		)
+		app.migrationController, _ = migration.NewController(services.NewTemplateService("a", 240, "b", "c", "d", "e", "f", pvcInformer.GetStore(), virtClient, config, qemuGid, "g", resourceQuotaInformer.GetStore(), namespaceInformer.GetStore()),
 			vmiInformer,
 			podInformer,
 			migrationInformer,
 			nodeInformer,
 			pvcInformer,
-			pdbInformer,
+			storageClassInformer,
+			storageProfileInformer,
 			migrationPolicyInformer,
 			resourceQuotaInformer,
+			kvInformer,
 			recorder,
 			virtClient,
 			config,
+			stubNetworkAnnotationsGenerator{},
 		)
 		app.snapshotController = &snapshot.VMSnapshotController{
 			Client:                    virtClient,
@@ -173,6 +206,7 @@ var _ = Describe("Application", func() {
 			VMIInformer:               vmiInformer,
 			PodInformer:               podInformer,
 			StorageClassInformer:      storageClassInformer,
+			StorageProfileInformer:    storageProfileInformer,
 			PVCInformer:               pvcInformer,
 			CRDInformer:               crdInformer,
 			DVInformer:                dvInformer,
@@ -195,7 +229,7 @@ var _ = Describe("Application", func() {
 		_ = app.restoreController.Init()
 		app.exportController = &export.VMExportController{
 			Client:                      virtClient,
-			TemplateService:             services.NewTemplateService("a", 240, "b", "c", "d", "e", "f", "g", pvcInformer.GetStore(), virtClient, config, qemuGid, "h", resourceQuotaInformer.GetStore(), namespaceInformer.GetStore()),
+			ManifestRenderer:            services.NewTemplateService("a", 240, "b", "c", "d", "e", "f", pvcInformer.GetStore(), virtClient, config, qemuGid, "g", resourceQuotaInformer.GetStore(), namespaceInformer.GetStore()),
 			VMExportInformer:            vmExportInformer,
 			PVCInformer:                 pvcInformer,
 			PodInformer:                 podInformer,
@@ -222,13 +256,22 @@ var _ = Describe("Application", func() {
 		app.nodeInformer = nodeInformer
 		app.resourceQuotaInformer = resourceQuotaInformer
 		app.namespaceInformer = namespaceInformer
-		app.vmCloneController, _ = clone.NewVmCloneController(
+		app.vmCloneController, _ = clonecontroller.NewVmCloneController(
 			virtClient,
 			cloneInformer,
 			vmSnapshotInformer,
 			vmRestoreInformer,
 			vmInformer,
 			vmSnapshotContentInformer,
+			pvcInformer,
+			recorder,
+		)
+		app.vmBackupController, _ = backup.NewVMBackupController(
+			virtClient,
+			backupInformer,
+			backupTrackerInformer,
+			vmInformer,
+			vmiInformer,
 			pvcInformer,
 			recorder,
 		)
@@ -337,3 +380,15 @@ var _ = Describe("Application", func() {
 		})
 	})
 })
+
+type stubMigrationEvaluator struct{}
+
+func (e stubMigrationEvaluator) Evaluate(_ *v1.VirtualMachineInstance) k8sv1.ConditionStatus {
+	return k8sv1.ConditionUnknown
+}
+
+type stubNetworkAnnotationsGenerator struct{}
+
+func (s stubNetworkAnnotationsGenerator) GenerateFromActivePod(_ *v1.VirtualMachineInstance, _ *k8sv1.Pod) map[string]string {
+	return nil
+}

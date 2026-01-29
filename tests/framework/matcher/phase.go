@@ -27,13 +27,17 @@ func HaveSucceeded() types.GomegaMatcher {
 	}
 }
 
-func BeInPhase(phase interface{}) types.GomegaMatcher {
+func PendingPopulation() types.GomegaMatcher {
 	return phaseMatcher{
-		expectedPhase: phase,
+		expectedPhase: "PendingPopulation",
 	}
 }
 
-func HavePhase(phase interface{}) types.GomegaMatcher {
+func WaitForFirstConsumer() types.GomegaMatcher {
+	return Or(BeInPhase("WaitForFirstConsumer"), PendingPopulation())
+}
+
+func BeInPhase(phase interface{}) types.GomegaMatcher {
 	return phaseMatcher{
 		expectedPhase: phase,
 	}

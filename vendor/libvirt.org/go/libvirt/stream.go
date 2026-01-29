@@ -107,8 +107,17 @@ func (c *Stream) Ref() error {
 
 // See also https://libvirt.org/html/libvirt-libvirt-stream.html#virStreamRecv
 func (v *Stream) Recv(p []byte) (int, error) {
+	np := len(p)
 	var err C.virError
-	n := C.virStreamRecvWrapper(v.ptr, (*C.char)(unsafe.Pointer(&p[0])), C.size_t(len(p)), &err)
+	var pPtr *C.char = nil
+	if np > 0 {
+		pPtr = (*C.char)(unsafe.Pointer(&p[0]))
+	}
+	n := C.virStreamRecvWrapper(v.ptr, pPtr, C.size_t(np), &err)
+	// -2 == blocking, -3 == in hole
+	if n == -2 || n == -3 {
+		return int(n), nil
+	}
 	if n < 0 {
 		return 0, makeError(&err)
 	}
@@ -121,8 +130,17 @@ func (v *Stream) Recv(p []byte) (int, error) {
 
 // See also https://libvirt.org/html/libvirt-libvirt-stream.html#virStreamRecvFlags
 func (v *Stream) RecvFlags(p []byte, flags StreamRecvFlagsValues) (int, error) {
+	np := len(p)
 	var err C.virError
-	n := C.virStreamRecvFlagsWrapper(v.ptr, (*C.char)(unsafe.Pointer(&p[0])), C.size_t(len(p)), C.uint(flags), &err)
+	var pPtr *C.char = nil
+	if np > 0 {
+		pPtr = (*C.char)(unsafe.Pointer(&p[0]))
+	}
+	n := C.virStreamRecvFlagsWrapper(v.ptr, pPtr, C.size_t(np), C.uint(flags), &err)
+	// -2 == blocking, -3 == in hole
+	if n == -2 || n == -3 {
+		return int(n), nil
+	}
 	if n < 0 {
 		return 0, makeError(&err)
 	}
@@ -147,8 +165,17 @@ func (v *Stream) RecvHole(flags uint32) (int64, error) {
 
 // See also https://libvirt.org/html/libvirt-libvirt-stream.html#virStreamSend
 func (v *Stream) Send(p []byte) (int, error) {
+	np := len(p)
 	var err C.virError
-	n := C.virStreamSendWrapper(v.ptr, (*C.char)(unsafe.Pointer(&p[0])), C.size_t(len(p)), &err)
+	var pPtr *C.char = nil
+	if np > 0 {
+		pPtr = (*C.char)(unsafe.Pointer(&p[0]))
+	}
+	n := C.virStreamSendWrapper(v.ptr, pPtr, C.size_t(np), &err)
+	// -2 == blocking
+	if n == -2 {
+		return int(n), nil
+	}
 	if n < 0 {
 		return 0, makeError(&err)
 	}

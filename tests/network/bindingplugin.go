@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2023 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -26,66 +26,72 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	v1 "kubevirt.io/api/core/v1"
 
-	"kubevirt.io/kubevirt/tests"
+	"kubevirt.io/kubevirt/pkg/libvmi"
 	"kubevirt.io/kubevirt/tests/console"
 	"kubevirt.io/kubevirt/tests/decorators"
 	"kubevirt.io/kubevirt/tests/framework/kubevirt"
-	"kubevirt.io/kubevirt/tests/libkvconfig"
+	"kubevirt.io/kubevirt/tests/libkubevirt/config"
 	"kubevirt.io/kubevirt/tests/libnet"
-	"kubevirt.io/kubevirt/tests/libvmi"
+	"kubevirt.io/kubevirt/tests/libnode"
+	"kubevirt.io/kubevirt/tests/libregistry"
+	"kubevirt.io/kubevirt/tests/libvmifact"
 	"kubevirt.io/kubevirt/tests/libwait"
 	"kubevirt.io/kubevirt/tests/testsuite"
-
-	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 )
 
-var _ = SIGDescribe("[Serial]network binding plugin", Serial, decorators.NetCustomBindingPlugins, func() {
+const (
+	vmiReadyTimeoutPasst      = 180
+	vmiReadyTimeoutManagedTap = 30
+)
 
-	BeforeEach(func() {
-		tests.EnableFeatureGate(virtconfig.NetworkBindingPlugingsGate)
-	})
-
+var _ = Describe(SIG("network binding plugin", Serial, decorators.NetCustomBindingPlugins, func() {
 	Context("with CNI and Sidecar", func() {
+		const passtNetAttDefName = "netbindingpasst"
+
 		BeforeEach(func() {
 			const passtBindingName = "passt"
-			const passtSidecarImage = "registry:5000/kubevirt/network-passt-binding:devel"
+			passtSidecarImage := libregistry.GetUtilityImageFromRegistry("network-passt-binding")
 
-			err := libkvconfig.WithNetBindingPlugin(passtBindingName, v1.InterfaceBindingPlugin{
-				SidecarImage:                passtSidecarImage,
-				NetworkAttachmentDefinition: libnet.PasstNetAttDef,
-			})
+			err := config.RegisterKubevirtConfigChange(
+				config.WithNetBindingPluginIfNotPresent(passtBindingName, v1.InterfaceBindingPlugin{
+					SidecarImage:                passtSidecarImage,
+					NetworkAttachmentDefinition: passtNetAttDefName,
+				}),
+			)
 			Expect(err).NotTo(HaveOccurred())
 		})
 
 		BeforeEach(func() {
-			Expect(libnet.CreatePasstNetworkAttachmentDefinition(testsuite.GetTestNamespace(nil))).To(Succeed())
+			netAttachDef := libnet.NewPasstNetAttachDef(passtNetAttDefName)
+			_, err := libnet.CreateNetAttachDef(context.Background(), testsuite.GetTestNamespace(nil), netAttachDef)
+			Expect(err).NotTo(HaveOccurred())
 		})
 
-		It("can be used by a VM as its primary network", func() {
+		It("can be used by a VMI as its primary network", func() {
 			const (
 				macAddress = "02:00:00:00:00:02"
 			)
 			passtIface := libvmi.InterfaceWithPasstBindingPlugin()
 			passtIface.MacAddress = macAddress
-			vmi := libvmi.NewAlpineWithTestTooling(
+			vmi := libvmifact.NewAlpineWithTestTooling(
 				libvmi.WithInterface(passtIface),
 				libvmi.WithNetwork(v1.DefaultPodNetwork()),
 			)
-			vm := libvmi.NewVirtualMachine(vmi, libvmi.WithRunning())
 
 			var err error
 			namespace := testsuite.GetTestNamespace(nil)
-			vm, err = kubevirt.Client().VirtualMachine(namespace).Create(context.Background(), vm)
+			vmi, err = kubevirt.Client().VirtualMachineInstance(namespace).Create(context.Background(), vmi, metav1.CreateOptions{})
 			Expect(err).ToNot(HaveOccurred())
 
-			vmi.Namespace = vm.Namespace
 			vmi = libwait.WaitUntilVMIReady(
 				vmi,
 				console.LoginToAlpine,
 				libwait.WithFailOnWarnings(false),
-				libwait.WithTimeout(180),
+				libwait.WithTimeout(vmiReadyTimeoutPasst),
 			)
 
 			Expect(vmi.Status.Interfaces).To(HaveLen(1))
@@ -95,23 +101,25 @@ var _ = SIGDescribe("[Serial]network binding plugin", Serial, decorators.NetCust
 		})
 	})
 
-	Context("with domain attachment type", func() {
+	Context("with domain attachment tap type", func() {
 		const (
-			macvtapNetworkConfNAD = `{"apiVersion":"k8s.cni.cncf.io/v1","kind":"NetworkAttachmentDefinition","metadata":{"name":"%s","namespace":"%s", "annotations": {"k8s.v1.cni.cncf.io/resourceName": "macvtap.network.kubevirt.io/%s"}},"spec":{"config":"{ \"cniVersion\": \"0.3.1\", \"name\": \"%s\", \"type\": \"macvtap\"}"}}`
-			macvtapBindingName    = "macvtap"
-			macvtapLowerDevice    = "eth0"
-			macvtapNetworkName    = "net1"
+			macvtapBindingName = "macvtap"
+			macvtapLowerDevice = "eth0"
+			macvtapNetworkName = "net1"
 		)
 
 		BeforeEach(func() {
-			macvtapNad := fmt.Sprintf(macvtapNetworkConfNAD, macvtapNetworkName, testsuite.GetTestNamespace(nil), macvtapLowerDevice, macvtapNetworkName)
-			namespace := testsuite.GetTestNamespace(nil)
-			Expect(libnet.CreateNetworkAttachmentDefinition(macvtapNetworkName, namespace, macvtapNad)).
-				To(Succeed(), "A macvtap network named %s should be provisioned", macvtapNetworkName)
+			netAttachDef := libnet.NewMacvtapNetAttachDef(macvtapNetworkName, macvtapLowerDevice)
+			_, err := libnet.CreateNetAttachDef(context.Background(), testsuite.GetTestNamespace(nil), netAttachDef)
+			Expect(err).NotTo(HaveOccurred())
 		})
 
 		BeforeEach(func() {
-			err := libkvconfig.WithNetBindingPlugin(macvtapBindingName, v1.InterfaceBindingPlugin{DomainAttachmentType: v1.Tap})
+			err := config.RegisterKubevirtConfigChange(
+				config.WithNetBindingPluginIfNotPresent(macvtapBindingName, v1.InterfaceBindingPlugin{
+					DomainAttachmentType: v1.Tap,
+				}),
+			)
 			Expect(err).NotTo(HaveOccurred())
 		})
 
@@ -119,7 +127,7 @@ var _ = SIGDescribe("[Serial]network binding plugin", Serial, decorators.NetCust
 			var vmi *v1.VirtualMachineInstance
 			var chosenMAC string
 
-			chosenMACHW, err := GenerateRandomMac()
+			chosenMACHW, err := libnet.GenerateRandomMac()
 			Expect(err).ToNot(HaveOccurred())
 			chosenMAC = chosenMACHW.String()
 
@@ -127,12 +135,14 @@ var _ = SIGDescribe("[Serial]network binding plugin", Serial, decorators.NetCust
 			macvtapIface := libvmi.InterfaceWithBindingPlugin(
 				ifaceName, v1.PluginBinding{Name: macvtapBindingName},
 			)
-			vmi = libvmi.NewAlpineWithTestTooling(
+			vmi = libvmifact.NewAlpineWithTestTooling(
 				libvmi.WithInterface(
 					*libvmi.InterfaceWithMac(&macvtapIface, chosenMAC)),
 				libvmi.WithNetwork(libvmi.MultusNetwork(ifaceName, macvtapNetworkName)))
 
-			vmi, err = kubevirt.Client().VirtualMachineInstance(testsuite.GetTestNamespace(nil)).Create(context.Background(), vmi)
+			namespace := testsuite.GetTestNamespace(nil)
+			vmi, err = kubevirt.Client().VirtualMachineInstance(namespace).Create(
+				context.Background(), vmi, metav1.CreateOptions{})
 			Expect(err).NotTo(HaveOccurred())
 			vmi = libwait.WaitUntilVMIReady(
 				vmi,
@@ -141,6 +151,109 @@ var _ = SIGDescribe("[Serial]network binding plugin", Serial, decorators.NetCust
 			Expect(vmi.Status.Interfaces).To(HaveLen(1), "should have a single interface")
 			Expect(vmi.Status.Interfaces[0].MAC).To(Equal(chosenMAC), "the expected MAC address should be set in the VMI")
 		})
-
 	})
-})
+
+	Context("with domain attachment managedTap type", func() {
+		const (
+			bindingName = "managed-tap"
+			networkName = "default"
+		)
+
+		BeforeEach(func() {
+			err := config.RegisterKubevirtConfigChange(
+				config.WithNetBindingPluginIfNotPresent(bindingName, v1.InterfaceBindingPlugin{
+					DomainAttachmentType: v1.ManagedTap,
+				}),
+			)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("can run a virtual machine with one primary managed-tap interface", func() {
+			var vmi *v1.VirtualMachineInstance
+
+			primaryIface := libvmi.InterfaceWithBindingPlugin(
+				networkName, v1.PluginBinding{Name: bindingName},
+			)
+			vmi = libvmifact.NewAlpineWithTestTooling(
+				libvmi.WithInterface(primaryIface),
+				libvmi.WithNetwork(v1.DefaultPodNetwork()),
+			)
+
+			namespace := testsuite.GetTestNamespace(nil)
+			vmi, err := kubevirt.Client().VirtualMachineInstance(namespace).Create(
+				context.Background(), vmi, metav1.CreateOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			vmi = libwait.WaitUntilVMIReady(vmi, console.LoginToAlpine, libwait.WithTimeout(vmiReadyTimeoutManagedTap))
+
+			Expect(vmi.Status.Interfaces).To(HaveLen(1))
+			Expect(vmi.Status.Interfaces[0].Name).To(Equal(primaryIface.Name))
+		})
+
+		It("can establish communication between two VMs", func() {
+			const (
+				guestIfaceName = "eth0"
+				serverIPAddr   = "10.1.1.102"
+				serverCIDR     = serverIPAddr + "/24"
+				clientCIDR     = "10.1.1.101/24"
+			)
+			nodeList := libnode.GetAllSchedulableNodes(kubevirt.Client())
+			Expect(nodeList.Items).NotTo(BeEmpty(), "schedulable kubernetes nodes must be present")
+			nodeName := nodeList.Items[0].Name
+
+			const linuxBridgeNADName = "bridge0"
+			namespace := testsuite.GetTestNamespace(nil)
+			netAttachDef := libnet.NewBridgeNetAttachDef(
+				linuxBridgeNADName,
+				"br10",
+				libnet.WithIPAM(map[string]string{
+					"type":   "host-local",
+					"subnet": "10.1.1.0/24",
+				}),
+			)
+			_, err := libnet.CreateNetAttachDef(context.Background(), namespace, netAttachDef)
+			Expect(err).ToNot(HaveOccurred())
+
+			primaryIface := libvmi.InterfaceWithBindingPlugin(
+				"mynet1", v1.PluginBinding{Name: bindingName},
+			)
+			primaryNetwork := v1.Network{
+				Name: "mynet1",
+				NetworkSource: v1.NetworkSource{
+					Multus: &v1.MultusNetwork{
+						NetworkName: fmt.Sprintf("%s/%s", namespace, linuxBridgeNADName),
+						Default:     true,
+					},
+				},
+			}
+			primaryIface.MacAddress = "de:ad:00:00:be:af"
+			opts := []libvmi.Option{
+				libvmi.WithInterface(primaryIface),
+				libvmi.WithNetwork(&primaryNetwork),
+				libvmi.WithNodeAffinityFor(nodeName),
+			}
+			serverVMI := libvmifact.NewAlpineWithTestTooling(opts...)
+
+			primaryIface.MacAddress = "de:ad:00:00:be:aa"
+			opts = []libvmi.Option{
+				libvmi.WithInterface(primaryIface),
+				libvmi.WithNetwork(&primaryNetwork),
+				libvmi.WithNodeAffinityFor(nodeName),
+			}
+			clientVMI := libvmifact.NewAlpineWithTestTooling(opts...)
+
+			ns := testsuite.GetTestNamespace(nil)
+			serverVMI, err = kubevirt.Client().VirtualMachineInstance(ns).Create(context.Background(), serverVMI, metav1.CreateOptions{})
+			Expect(err).ToNot(HaveOccurred())
+			clientVMI, err = kubevirt.Client().VirtualMachineInstance(ns).Create(context.Background(), clientVMI, metav1.CreateOptions{})
+			Expect(err).ToNot(HaveOccurred())
+
+			serverVMI = libwait.WaitUntilVMIReady(serverVMI, console.LoginToAlpine)
+			clientVMI = libwait.WaitUntilVMIReady(clientVMI, console.LoginToAlpine)
+
+			Expect(libnet.AddIPAddress(serverVMI, guestIfaceName, serverCIDR)).To(Succeed())
+			Expect(libnet.AddIPAddress(clientVMI, guestIfaceName, clientCIDR)).To(Succeed())
+
+			Expect(libnet.PingFromVMConsole(clientVMI, serverIPAddr)).To(Succeed())
+		})
+	})
+}))

@@ -13,7 +13,7 @@
 * See the License for the specific language governing permissions and
 * limitations under the License.
 *
-* Copyright 2023 Red Hat, Inc.
+* Copyright The KubeVirt Authors.
 *
  */
 
@@ -22,16 +22,17 @@ package vm_test
 import (
 	"context"
 
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
 
 	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/pointer"
+
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
-	"kubevirt.io/kubevirt/tests/clientcmd"
+	"kubevirt.io/kubevirt/pkg/pointer"
+	"kubevirt.io/kubevirt/pkg/virtctl/testing"
 )
 
 var _ = Describe("Stop command", func() {
@@ -47,20 +48,20 @@ var _ = Describe("Stop command", func() {
 	})
 
 	It("should fail with missing input parameters", func() {
-		cmd := clientcmd.NewRepeatableVirtctlCommand("stop")
+		cmd := testing.NewRepeatableVirtctlCommand("stop")
 		err := cmd()
 		Expect(err).To(HaveOccurred())
-		Expect(err).Should(MatchError("argument validation failed"))
+		Expect(err).Should(MatchError("accepts 1 arg(s), received 0"))
 	})
 
 	It("with dry-run parameter should not stop VM", func() {
 		vm := kubecli.NewMinimalVM(vmName)
-		vm.Spec.Running = pointer.Bool(true)
+		vm.Spec.Running = pointer.P(true)
 
 		kubecli.MockKubevirtClientInstance.EXPECT().VirtualMachine(k8smetav1.NamespaceDefault).Return(vmInterface).Times(1)
 		vmInterface.EXPECT().Stop(context.Background(), vm.Name, &v1.StopOptions{DryRun: []string{k8smetav1.DryRunAll}}).Return(nil).Times(1)
 
-		cmd := clientcmd.NewRepeatableVirtctlCommand("stop", vmName, "--dry-run")
+		cmd := testing.NewRepeatableVirtctlCommand("stop", vmName, "--dry-run")
 		Expect(cmd()).To(Succeed())
 	})
 
@@ -73,9 +74,9 @@ var _ = Describe("Stop command", func() {
 			GracePeriod: &gracePeriod,
 			DryRun:      nil,
 		}
-		vmInterface.EXPECT().ForceStop(context.Background(), vm.Name, &stopOptions).Return(nil).Times(1)
+		vmInterface.EXPECT().Stop(context.Background(), vm.Name, &stopOptions).Return(nil).Times(1)
 
-		cmd := clientcmd.NewRepeatableVirtctlCommand("stop", vmName, "--force", "--grace-period=0")
+		cmd := testing.NewRepeatableVirtctlCommand("stop", vmName, "--force", "--grace-period=0")
 		Expect(cmd()).To(Succeed())
 	})
 
@@ -86,7 +87,7 @@ var _ = Describe("Stop command", func() {
 		kubecli.MockKubevirtClientInstance.EXPECT().VirtualMachine(k8smetav1.NamespaceDefault).Return(vmInterface).Times(1)
 		vmInterface.EXPECT().Stop(context.Background(), vm.Name, &v1.StopOptions{DryRun: nil}).Return(nil).Times(1)
 
-		cmd := clientcmd.NewRepeatableVirtctlCommand(args...)
+		cmd := testing.NewRepeatableVirtctlCommand(args...)
 		Expect(cmd()).To(Succeed())
 	},
 		Entry("with spec:runStrategy:always",
@@ -103,12 +104,12 @@ var _ = Describe("Stop command", func() {
 			"stop", vmName),
 		Entry("with spec:running:false",
 			func(vm *v1.VirtualMachine) {
-				vm.Spec.Running = pointer.Bool(true)
+				vm.Spec.Running = pointer.P(true)
 			},
 			"stop", vmName),
 		Entry("with spec:running:false when it's false already",
 			func(vm *v1.VirtualMachine) {
-				vm.Spec.Running = pointer.Bool(false)
+				vm.Spec.Running = pointer.P(false)
 			},
 			"stop", vmName),
 	)

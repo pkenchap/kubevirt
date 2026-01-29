@@ -3,17 +3,19 @@ package openapi
 import (
 	"encoding/json"
 	"fmt"
+	"log"
+	"os"
 	"strings"
 
 	"github.com/emicklei/go-restful/v3"
 	openapi_spec "github.com/go-openapi/spec"
 	"github.com/go-openapi/strfmt"
 	openapi_validate "github.com/go-openapi/validate"
-	"github.com/golang/glog"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/kube-openapi/pkg/builder"
 	"k8s.io/kube-openapi/pkg/common"
 	"k8s.io/kube-openapi/pkg/common/restfuladapter"
+	"k8s.io/kube-openapi/pkg/spec3"
 	"k8s.io/kube-openapi/pkg/validation/errors"
 	"k8s.io/kube-openapi/pkg/validation/spec"
 	"kubevirt.io/client-go/api"
@@ -23,37 +25,6 @@ type Validator struct {
 	specSchemes   *openapi_spec.Schema
 	statusSchemes *openapi_spec.Schema
 	topLevelKeys  map[string]interface{}
-}
-
-func addInfoToSwaggerObject(swo *spec.Swagger) {
-	swo.Info = &spec.Info{
-		InfoProps: spec.InfoProps{
-			Title:       "KubeVirt API",
-			Description: "This is KubeVirt API an add-on for Kubernetes.",
-			Contact: &spec.ContactInfo{
-				Name:  "kubevirt-dev",
-				Email: "kubevirt-dev@googlegroups.com",
-				URL:   "https://github.com/kubevirt/kubevirt",
-			},
-			License: &spec.License{
-				Name: "Apache 2.0",
-				URL:  "https://www.apache.org/licenses/LICENSE-2.0",
-			},
-		},
-	}
-	swo.SecurityDefinitions = spec.SecurityDefinitions{
-		"BearerToken": &spec.SecurityScheme{
-			SecuritySchemeProps: spec.SecuritySchemeProps{
-				Type:        "apiKey",
-				Name:        "authorization",
-				In:          "header",
-				Description: "Bearer Token authentication",
-			},
-		},
-	}
-	swo.Swagger = "2.0"
-	swo.Security = make([]map[string][]string, 1)
-	swo.Security[0] = map[string][]string{"BearerToken": {}}
 }
 
 func CreateConfig() *common.Config {
@@ -111,6 +82,61 @@ func CreateConfig() *common.Config {
 	}
 }
 
+func CreateV3Config() *common.OpenAPIV3Config {
+	return &common.OpenAPIV3Config{
+		CommonResponses: map[int]*spec3.Response{
+			401: {
+				ResponseProps: spec3.ResponseProps{
+					Description: "Unauthorized",
+				},
+			},
+		},
+		Info: &spec.Info{
+			InfoProps: spec.InfoProps{
+				Title:       "KubeVirt API",
+				Description: "This is KubeVirt API an add-on for Kubernetes.",
+				Contact: &spec.ContactInfo{
+					Name:  "kubevirt-dev",
+					Email: "kubevirt-dev@googlegroups.com",
+					URL:   "https://github.com/kubevirt/kubevirt",
+				},
+				License: &spec.License{
+					Name: "Apache 2.0",
+					URL:  "https://www.apache.org/licenses/LICENSE-2.0",
+				},
+			},
+		},
+		SecuritySchemes: spec3.SecuritySchemes{
+			"BearerToken": &spec3.SecurityScheme{
+				SecuritySchemeProps: spec3.SecuritySchemeProps{
+					Type:        "apiKey",
+					Name:        "authorization",
+					In:          "header",
+					Description: "Bearer Token authentication",
+				},
+			},
+		},
+		GetDefinitions: func(ref common.ReferenceCallback) map[string]common.OpenAPIDefinition {
+			m := api.GetOpenAPIDefinitions(ref)
+			for k, v := range m {
+				if _, ok := m[k]; !ok {
+					m[k] = v
+				}
+			}
+			return m
+		},
+
+		GetDefinitionName: func(name string) (string, spec.Extensions) {
+			if strings.Contains(name, "kubevirt.io") {
+				// keeping for validation
+				return name[strings.LastIndex(name, "/")+1:], nil
+			}
+			//adpting k8s style
+			return strings.ReplaceAll(name, "/", "."), nil
+		},
+	}
+}
+
 func LoadOpenAPISpec(webServices []*restful.WebService) *spec.Swagger {
 	config := CreateConfig()
 	openapispec, err := builder.BuildOpenAPISpecFromRoutes(restfuladapter.AdaptWebServices(webServices), config)
@@ -131,19 +157,13 @@ func LoadOpenAPISpec(webServices []*restful.WebService) *spec.Swagger {
 			break
 		}
 	}
-	resourceRequirements, exists := openapispec.Definitions["v1.ResourceRequirements"]
-	if exists {
-		limits, exists := resourceRequirements.Properties["limits"]
-		if exists {
-			limits.AdditionalProperties = nil
-			resourceRequirements.Properties["limits"] = limits
-		}
-		requests, exists := resourceRequirements.Properties["requests"]
-		if exists {
-			requests.AdditionalProperties = nil
-			resourceRequirements.Properties["requests"] = requests
-		}
 
+	const resourceQuantityDefinition = "k8s.io.apimachinery.pkg.api.resource.Quantity"
+
+	quantity, exists := openapispec.Definitions[resourceQuantityDefinition]
+	if exists {
+		quantity.Type = spec.StringOrArray{"string", "integer", "number"}
+		openapispec.Definitions[resourceQuantityDefinition] = quantity
 	}
 
 	objectMeta, exists := openapispec.Definitions[objectmeta]
@@ -209,7 +229,8 @@ func CreateOpenAPIValidator(webServices []*restful.WebService) *Validator {
 	openapispec := LoadOpenAPISpec(webServices)
 	data, err := json.Marshal(openapispec)
 	if err != nil {
-		glog.Fatal(err)
+		log.Print(err)
+		os.Exit(2)
 	}
 
 	specSchema := &openapi_spec.Schema{}
@@ -228,7 +249,8 @@ func CreateOpenAPIValidator(webServices []*restful.WebService) *Validator {
 	// Expand the specSchemes
 	err = openapi_spec.ExpandSchema(specSchema, specSchema, nil)
 	if err != nil {
-		glog.Fatal(err)
+		log.Print(err)
+		os.Exit(2)
 	}
 
 	// Load spec once again for status. The status should accept unknown fields
@@ -241,7 +263,8 @@ func CreateOpenAPIValidator(webServices []*restful.WebService) *Validator {
 	// Expand the statusSchemes
 	err = openapi_spec.ExpandSchema(statusSchema, statusSchema, nil)
 	if err != nil {
-		glog.Fatal(err)
+		log.Print(err)
+		os.Exit(2)
 	}
 
 	return &Validator{

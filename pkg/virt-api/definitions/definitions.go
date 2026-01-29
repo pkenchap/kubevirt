@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2017 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -25,8 +25,8 @@ import (
 	"path"
 	"reflect"
 
-	"kubevirt.io/api/clone"
-	clonev1lpha1 "kubevirt.io/api/clone/v1alpha1"
+	clonebase "kubevirt.io/api/clone"
+	clone "kubevirt.io/api/clone/v1beta1"
 
 	"kubevirt.io/api/instancetype"
 
@@ -39,11 +39,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
+	backupv1 "kubevirt.io/api/backup/v1alpha1"
 	v1 "kubevirt.io/api/core/v1"
-	exportv1 "kubevirt.io/api/export/v1alpha1"
+	exportv1 "kubevirt.io/api/export/v1beta1"
 	instancetypev1beta1 "kubevirt.io/api/instancetype/v1beta1"
-	poolv1alpha1 "kubevirt.io/api/pool/v1alpha1"
-	snapshotv1 "kubevirt.io/api/snapshot/v1alpha1"
+	poolv1beta1 "kubevirt.io/api/pool/v1beta1"
+	snapshotv1 "kubevirt.io/api/snapshot/v1beta1"
 
 	mime "kubevirt.io/kubevirt/pkg/rest"
 )
@@ -60,6 +61,7 @@ func ComposeAPIDefinitions() []*restful.WebService {
 		kubevirtApiServiceDefinitions,
 		snapshotApiServiceDefinitions,
 		exportApiServiceDefinitions,
+		backupApiServiceDefinitions,
 		instancetypeApiServiceDefinitions,
 		migrationPoliciesApiServiceDefinitions,
 		poolApiServiceDefinitions,
@@ -233,14 +235,14 @@ func instancetypeApiServiceDefinitions() []*restful.WebService {
 }
 
 func poolApiServiceDefinitions() []*restful.WebService {
-	poolGVR := poolv1alpha1.SchemeGroupVersion.WithResource("virtualmachinepools")
+	poolGVR := poolv1beta1.SchemeGroupVersion.WithResource("virtualmachinepools")
 
-	ws, err := groupVersionProxyBase(poolv1alpha1.SchemeGroupVersion)
+	ws, err := groupVersionProxyBase(poolv1beta1.SchemeGroupVersion)
 	if err != nil {
 		panic(err)
 	}
 
-	ws, err = genericNamespacedResourceProxy(ws, poolGVR, &poolv1alpha1.VirtualMachinePool{}, "VirtualMachinePool", &poolv1alpha1.VirtualMachinePoolList{})
+	ws, err = genericNamespacedResourceProxy(ws, poolGVR, &poolv1beta1.VirtualMachinePool{}, "VirtualMachinePool", &poolv1beta1.VirtualMachinePoolList{})
 	if err != nil {
 		panic(err)
 	}
@@ -254,19 +256,39 @@ func poolApiServiceDefinitions() []*restful.WebService {
 }
 
 func vmCloneDefinitions() []*restful.WebService {
-	mpGVR := clonev1lpha1.SchemeGroupVersion.WithResource(clone.ResourceVMClonePlural)
+	mpGVR := clone.SchemeGroupVersion.WithResource(clonebase.ResourceVMClonePlural)
 
-	ws, err := groupVersionProxyBase(schema.GroupVersion{Group: clonev1lpha1.SchemeGroupVersion.Group, Version: clonev1lpha1.SchemeGroupVersion.Version})
+	ws, err := groupVersionProxyBase(schema.GroupVersion{Group: clone.SchemeGroupVersion.Group, Version: clone.SchemeGroupVersion.Version})
 	if err != nil {
 		panic(err)
 	}
 
-	ws, err = genericClusterResourceProxy(ws, mpGVR, &clonev1lpha1.VirtualMachineClone{}, clonev1lpha1.VirtualMachineCloneKind.Kind, &clonev1lpha1.VirtualMachineCloneList{})
+	ws, err = genericClusterResourceProxy(ws, mpGVR, &clone.VirtualMachineClone{}, clone.VirtualMachineCloneKind.Kind, &clone.VirtualMachineCloneList{})
 	if err != nil {
 		panic(err)
 	}
 
 	ws2, err := resourceProxyAutodiscovery(mpGVR)
+	if err != nil {
+		panic(err)
+	}
+	return []*restful.WebService{ws, ws2}
+}
+
+func backupApiServiceDefinitions() []*restful.WebService {
+	backupsGVR := backupv1.SchemeGroupVersion.WithResource("virtualmachinebackups")
+
+	ws, err := groupVersionProxyBase(backupv1.SchemeGroupVersion)
+	if err != nil {
+		panic(err)
+	}
+
+	ws, err = genericNamespacedResourceProxy(ws, backupsGVR, &backupv1.VirtualMachineBackup{}, "VirtualMachineBackup", &backupv1.VirtualMachineBackupList{})
+	if err != nil {
+		panic(err)
+	}
+
+	ws2, err := resourceProxyAutodiscovery(backupsGVR)
 	if err != nil {
 		panic(err)
 	}
@@ -565,9 +587,10 @@ func addPatchParams(ws *restful.WebService, builder *restful.RouteBuilder) *rest
 }
 
 const (
-	NamespaceParamName  = "namespace"
-	NameParamName       = "name"
-	MoveCursorParamName = "moveCursor"
+	NamespaceParamName       = "namespace"
+	NameParamName            = "name"
+	MoveCursorParamName      = "moveCursor"
+	PreserveSessionParamName = "preserveSession"
 )
 
 func NameParam(ws *restful.WebService) *restful.Parameter {
@@ -580,6 +603,13 @@ func NamespaceParam(ws *restful.WebService) *restful.Parameter {
 
 func MoveCursorParam(ws *restful.WebService) *restful.Parameter {
 	return ws.QueryParameter(MoveCursorParamName, "Move the cursor on the VNC display to wake up the screen").DataType("boolean").DefaultValue("false")
+}
+
+func PreserveSessionParam(ws *restful.WebService) *restful.Parameter {
+	return ws.
+		QueryParameter(PreserveSessionParamName, "Connect only if ongoing session is not disturbed.").
+		DataType("boolean").
+		DefaultValue("false")
 }
 
 func labelSelectorParam(ws *restful.WebService) *restful.Parameter {

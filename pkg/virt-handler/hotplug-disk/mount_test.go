@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2020 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -32,12 +32,13 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"kubevirt.io/kubevirt/pkg/checkpoint"
 	"kubevirt.io/kubevirt/pkg/safepath"
 	"kubevirt.io/kubevirt/pkg/unsafepath"
 
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
 
 	"kubevirt.io/client-go/api"
 
@@ -76,7 +77,6 @@ var (
 	orgFindMntByVolume     = findMntByVolume
 	orgFindMntByDevice     = findMntByDevice
 	orgNodeIsolationResult = nodeIsolationResult
-	orgParentPathForMount  = parentPathForMount
 )
 
 var _ = Describe("HotplugVolume", func() {
@@ -167,7 +167,7 @@ var _ = Describe("HotplugVolume", func() {
 
 			m = &volumeMounter{
 				mountRecords:       make(map[types.UID]*vmiMountTargetRecord),
-				mountStateDir:      tempDir,
+				checkpointManager:  checkpoint.NewSimpleCheckpointManager(tempDir),
 				hotplugDiskManager: hotplugdisk.NewHotplugDiskWithOptions(tempDir),
 			}
 			record = &vmiMountTargetRecord{
@@ -261,7 +261,7 @@ var _ = Describe("HotplugVolume", func() {
 			Expect(err).ToNot(HaveOccurred())
 			vmi = api.NewMinimalVMI("fake-vmi")
 			vmi.UID = "1234"
-			activePods := make(map[types.UID]string, 0)
+			activePods := make(map[types.UID]string)
 			activePods["abcd"] = "host"
 			vmi.Status.ActivePods = activePods
 
@@ -273,7 +273,7 @@ var _ = Describe("HotplugVolume", func() {
 
 			m = &volumeMounter{
 				mountRecords:       make(map[types.UID]*vmiMountTargetRecord),
-				mountStateDir:      tempDir,
+				checkpointManager:  checkpoint.NewSimpleCheckpointManager(tempDir),
 				skipSafetyCheck:    true,
 				hotplugDiskManager: hotplugdisk.NewHotplugDiskWithOptions(tempDir),
 				ownershipManager:   ownershipManager,
@@ -327,6 +327,41 @@ var _ = Describe("HotplugVolume", func() {
 			}
 			res = m.isBlockVolume(&vmi.Status, "test")
 			Expect(res).To(BeTrue())
+		})
+
+		It("should skip mounting utility volumes with block mode PVCs", func() {
+			vmi := api.NewMinimalVMI("fake-vmi")
+			vmi.UID = "1234"
+			vmi.Spec.UtilityVolumes = []v1.UtilityVolume{
+				{
+					Name: "utility-vol",
+					PersistentVolumeClaimVolumeSource: k8sv1.PersistentVolumeClaimVolumeSource{
+						ClaimName: "test-pvc",
+					},
+				},
+			}
+			blockMode := k8sv1.PersistentVolumeBlock
+			vmi.Status.VolumeStatus = []v1.VolumeStatus{
+				{
+					Name:  "utility-vol",
+					Phase: v1.VolumePending,
+					HotplugVolume: &v1.HotplugVolumeStatus{
+						AttachPodName: "test-pod",
+						AttachPodUID:  "test-uid",
+					},
+					PersistentVolumeClaimInfo: &v1.PersistentVolumeClaimInfo{
+						VolumeMode: &blockMode,
+					},
+				},
+			}
+
+			cgroupManagerMock.EXPECT().GetCgroupVersion().Return(cgroup.V2).AnyTimes()
+			err = m.mountFromPod(vmi, "", cgroupManagerMock)
+			Expect(err).ToNot(HaveOccurred())
+
+			record, err := m.getMountTargetRecord(vmi)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(record.MountTargetEntries).To(BeEmpty())
 		})
 
 		It("findVirtlauncherUID should find the right UID", func() {
@@ -526,7 +561,7 @@ var _ = Describe("HotplugVolume", func() {
 			Expect(err).ToNot(HaveOccurred())
 			vmi = api.NewMinimalVMI("fake-vmi")
 			vmi.UID = "1234"
-			activePods := make(map[types.UID]string, 0)
+			activePods := make(map[types.UID]string)
 			activePods["abcd"] = "host"
 			vmi.Status.ActivePods = activePods
 
@@ -537,7 +572,7 @@ var _ = Describe("HotplugVolume", func() {
 
 			m = &volumeMounter{
 				mountRecords:       make(map[types.UID]*vmiMountTargetRecord),
-				mountStateDir:      tempDir,
+				checkpointManager:  checkpoint.NewSimpleCheckpointManager(tempDir),
 				hotplugDiskManager: hotplugdisk.NewHotplugDiskWithOptions(tempDir),
 				ownershipManager:   ownershipManager,
 			}
@@ -545,7 +580,7 @@ var _ = Describe("HotplugVolume", func() {
 			deviceBasePath = func(podUID types.UID, kubeletPodDir string) (*safepath.Path, error) {
 				return volumeDir, nil
 			}
-			isolationDetector = func(path string) isolation.PodIsolationDetector {
+			isolationDetector = func() isolation.PodIsolationDetector {
 				return &mockIsolationDetector{
 					pid: os.Getpid(),
 				}
@@ -589,7 +624,7 @@ var _ = Describe("HotplugVolume", func() {
 		It("getSourcePodFile should return error if iso detection returns error", func() {
 			_, err := newDir(tempDir, "ghfjk", "volumes")
 			Expect(err).ToNot(HaveOccurred())
-			isolationDetector = func(path string) isolation.PodIsolationDetector {
+			isolationDetector = func() isolation.PodIsolationDetector {
 				return &mockIsolationDetector{
 					pid: 9999,
 				}
@@ -714,7 +749,7 @@ var _ = Describe("HotplugVolume", func() {
 			Expect(err).ToNot(HaveOccurred())
 			vmi = api.NewMinimalVMI("fake-vmi")
 			vmi.UID = "1234"
-			activePods := make(map[types.UID]string, 0)
+			activePods := make(map[types.UID]string)
 			activePods["abcd"] = "host"
 			vmi.Status.ActivePods = activePods
 
@@ -724,7 +759,7 @@ var _ = Describe("HotplugVolume", func() {
 
 			m = &volumeMounter{
 				mountRecords:       make(map[types.UID]*vmiMountTargetRecord),
-				mountStateDir:      tempDir,
+				checkpointManager:  checkpoint.NewSimpleCheckpointManager(tempDir),
 				skipSafetyCheck:    true,
 				hotplugDiskManager: hotplugdisk.NewHotplugDiskWithOptions(tempDir),
 				ownershipManager:   ownershipManager,
@@ -739,7 +774,7 @@ var _ = Describe("HotplugVolume", func() {
 			statDevice = func(fileName *safepath.Path) (os.FileInfo, error) {
 				return fakeStat(true, 0777, 123456), nil
 			}
-			isolationDetector = func(path string) isolation.PodIsolationDetector {
+			isolationDetector = func() isolation.PodIsolationDetector {
 				return &mockIsolationDetector{
 					pid: os.Getpid(),
 				}
@@ -757,6 +792,46 @@ var _ = Describe("HotplugVolume", func() {
 			isBlockDevice = orgIsBlockDevice
 			findMntByVolume = orgFindMntByVolume
 		})
+
+		verifyMountRecords := func(isMount bool, expectedPaths ...string) {
+			capturedPaths := []string{}
+
+			if isMount {
+				ownershipManager.EXPECT().SetFileOwnership(gomock.Any()).Times(len(expectedPaths)).DoAndReturn(func(path *safepath.Path) error {
+					capturedPaths = append(capturedPaths, unsafepath.UnsafeAbsolute(path.Raw()))
+					return nil
+				})
+
+				err = m.Mount(vmi, cgroupManagerMock)
+			} else {
+				err = m.Unmount(vmi, cgroupManagerMock)
+			}
+			Expect(err).ToNot(HaveOccurred())
+
+			By(fmt.Sprintf("Verifying there are %d records in tempDir/1234", len(expectedPaths)))
+			record := &vmiMountTargetRecord{
+				UsesSafePaths: true,
+			}
+
+			for _, path := range expectedPaths {
+				record.MountTargetEntries = append(record.MountTargetEntries, vmiMountTargetEntry{
+					TargetFile: path,
+				})
+			}
+
+			expectedBytes, err := json.Marshal(record)
+			Expect(err).ToNot(HaveOccurred())
+			bytes, err := os.ReadFile(filepath.Join(tempDir, string(vmi.UID)))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(bytes).To(Equal(expectedBytes))
+			for _, path := range expectedPaths {
+				_, err = os.Stat(path)
+				Expect(err).ToNot(HaveOccurred())
+			}
+			if isMount {
+				Expect(capturedPaths).To(ContainElements(expectedPaths))
+			}
+		}
 
 		It("mount and umount should work for filesystem volumes", func() {
 			setExpectedCgroupRuns(2)
@@ -825,44 +900,28 @@ var _ = Describe("HotplugVolume", func() {
 				return []byte("Success"), nil
 			}
 
-			expectedPaths := []string{targetFilePath, blockVolume}
-			capturedPaths := []string{}
+			verifyMountRecords(true, targetFilePath, blockVolume)
 
-			ownershipManager.EXPECT().SetFileOwnership(gomock.Any()).Times(2).DoAndReturn(func(path *safepath.Path) error {
-				capturedPaths = append(capturedPaths, unsafepath.UnsafeAbsolute(path.Raw()))
-				return nil
-			})
-
-			err = m.Mount(vmi, cgroupManagerMock)
-			Expect(err).ToNot(HaveOccurred())
-			By("Verifying there are 2 records in tempDir/1234")
-			record := &vmiMountTargetRecord{
-				MountTargetEntries: []vmiMountTargetEntry{
-					{
-						TargetFile: targetFilePath,
-					},
-					{
-						TargetFile: blockVolume,
+			vmi.Spec.Volumes = []v1.Volume{
+				{
+					Name: "permanent",
+				},
+				{
+					Name: "filesystemvolume",
+					VolumeSource: v1.VolumeSource{
+						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
+							PersistentVolumeClaimVolumeSource: k8sv1.PersistentVolumeClaimVolumeSource{
+								ClaimName: "filesystemvolume",
+							},
+							Hotpluggable: true,
+						},
 					},
 				},
-				UsesSafePaths: true,
 			}
-			expectedBytes, err := json.Marshal(record)
-			Expect(err).ToNot(HaveOccurred())
-			bytes, err := os.ReadFile(filepath.Join(tempDir, string(vmi.UID)))
-			Expect(err).ToNot(HaveOccurred())
-			Expect(bytes).To(Equal(expectedBytes))
-			_, err = os.Stat(targetFilePath)
-			Expect(err).ToNot(HaveOccurred())
-			_, err = os.Stat(blockVolume)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(capturedPaths).To(ContainElements(expectedPaths))
 
-			volumeStatuses = make([]v1.VolumeStatus, 0)
-			volumeStatuses = append(volumeStatuses, v1.VolumeStatus{
-				Name: "permanent",
-			})
-			vmi.Status.VolumeStatus = volumeStatuses
+			verifyMountRecords(false, targetFilePath)
+
+			vmi.Spec.Volumes = vmi.Spec.Volumes[0:1]
 			err = m.Unmount(vmi, cgroupManagerMock)
 			Expect(err).ToNot(HaveOccurred())
 			_, err = os.ReadFile(filepath.Join(tempDir, string(vmi.UID)))
@@ -995,18 +1054,16 @@ var _ = Describe("HotplugVolume", func() {
 })
 
 type mockIsolationDetector struct {
-	pid        int
-	ppid       int
-	slice      string
-	controller []string
-	err        error
+	pid  int
+	ppid int
+	err  error
 }
 
 func (i *mockIsolationDetector) Detect(_ *v1.VirtualMachineInstance) (isolation.IsolationResult, error) {
 	return isolation.NewIsolationResult(i.pid, i.ppid), i.err
 }
 
-func (i *mockIsolationDetector) DetectForSocket(_ *v1.VirtualMachineInstance, _ string) (isolation.IsolationResult, error) {
+func (i *mockIsolationDetector) DetectForSocket(_ string) (isolation.IsolationResult, error) {
 	if i.pid != 9999 {
 		return isolation.NewIsolationResult(i.pid, i.ppid), nil
 	}

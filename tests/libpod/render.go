@@ -13,15 +13,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2023 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
 package libpod
 
 import (
-	"fmt"
-
 	v1 "k8s.io/api/core/v1"
 	v12 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -29,29 +27,39 @@ import (
 
 	"kubevirt.io/kubevirt/pkg/pointer"
 
-	"kubevirt.io/kubevirt/tests/flags"
+	"kubevirt.io/kubevirt/tests/libregistry"
 	"kubevirt.io/kubevirt/tests/testsuite"
 )
 
-func RenderPrivilegedPod(name string, cmd []string, args []string) *v1.Pod {
-	pod := RenderPod(name, cmd, args)
-	pod.Namespace = testsuite.NamespacePrivileged
-	pod.Spec.HostPID = true
-	pod.Spec.SecurityContext = &v1.PodSecurityContext{
-		RunAsUser: new(int64),
-	}
-	pod.Spec.Containers = []v1.Container{
-		renderPrivilegedContainerSpec(
-			fmt.Sprintf("%s/vm-killer:%s", flags.KubeVirtUtilityRepoPrefix, flags.KubeVirtUtilityVersionTag),
-			name,
-			cmd,
-			args),
+func RenderPrivilegedPod(name string, cmd, args []string) *v1.Pod {
+	pod := v1.Pod{
+		ObjectMeta: v12.ObjectMeta{
+			Namespace:    testsuite.NamespacePrivileged,
+			GenerateName: name,
+			Labels: map[string]string{
+				v13.AppLabel: "test",
+			},
+		},
+		Spec: v1.PodSpec{
+			RestartPolicy: v1.RestartPolicyNever,
+			HostPID:       true,
+			SecurityContext: &v1.PodSecurityContext{
+				RunAsUser: pointer.P(int64(0)),
+			},
+			Containers: []v1.Container{
+				renderPrivilegedContainerSpec(
+					libregistry.GetUtilityImageFromRegistry("vm-killer"),
+					"container",
+					cmd,
+					args),
+			},
+		},
 	}
 
-	return pod
+	return &pod
 }
 
-func RenderPod(name string, cmd []string, args []string) *v1.Pod {
+func RenderPod(name string, cmd, args []string) *v1.Pod {
 	pod := v1.Pod{
 		ObjectMeta: v12.ObjectMeta{
 			GenerateName: name,
@@ -63,8 +71,8 @@ func RenderPod(name string, cmd []string, args []string) *v1.Pod {
 			RestartPolicy: v1.RestartPolicyNever,
 			Containers: []v1.Container{
 				renderContainerSpec(
-					fmt.Sprintf("%s/vm-killer:%s", flags.KubeVirtUtilityRepoPrefix, flags.KubeVirtUtilityVersionTag),
-					name,
+					libregistry.GetUtilityImageFromRegistry("vm-killer"),
+					"container",
 					cmd,
 					args),
 			},
@@ -74,7 +82,7 @@ func RenderPod(name string, cmd []string, args []string) *v1.Pod {
 	return &pod
 }
 
-func renderContainerSpec(imgPath string, name string, cmd []string, args []string) v1.Container {
+func renderContainerSpec(imgPath, name string, cmd, args []string) v1.Container {
 	return v1.Container{
 		Name:    name,
 		Image:   imgPath,
@@ -94,7 +102,7 @@ func renderContainerSpec(imgPath string, name string, cmd []string, args []strin
 	}
 }
 
-func renderPrivilegedContainerSpec(imgPath string, name string, cmd []string, args []string) v1.Container {
+func renderPrivilegedContainerSpec(imgPath, name string, cmd, args []string) v1.Container {
 	return v1.Container{
 		Name:    name,
 		Image:   imgPath,
@@ -107,7 +115,9 @@ func renderPrivilegedContainerSpec(imgPath string, name string, cmd []string, ar
 	}
 }
 
-func RenderHostPathPod(podName string, dir string, hostPathType v1.HostPathType, mountPropagation v1.MountPropagationMode, cmd []string, args []string) *v1.Pod {
+func RenderHostPathPod(
+	podName, dir string, hostPathType v1.HostPathType, mountPropagation v1.MountPropagationMode, cmd, args []string,
+) *v1.Pod {
 	pod := RenderPrivilegedPod(podName, cmd, args)
 	pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, v1.VolumeMount{
 		Name:             "hostpath-mount",
@@ -129,14 +139,13 @@ func RenderHostPathPod(podName string, dir string, hostPathType v1.HostPathType,
 
 func RenderTargetcliPod(name, disksPVC string) *v1.Pod {
 	const (
-		disks        = "disks"
-		kernelConfig = "kernel-config"
-		dbus         = "dbus"
-		modules      = "modules"
+		disks   = "disks"
+		dbus    = "dbus"
+		modules = "modules"
 	)
 	hostPathDirectory := v1.HostPathDirectory
 	targetcliContainer := renderPrivilegedContainerSpec(
-		fmt.Sprintf("%s/vm-killer:%s", flags.KubeVirtUtilityRepoPrefix, flags.KubeVirtUtilityVersionTag),
+		libregistry.GetUtilityImageFromRegistry("vm-killer"),
 		"targetcli", []string{"tail", "-f", "/dev/null"}, []string{})
 	targetcliContainer.VolumeMounts = []v1.VolumeMount{
 		{

@@ -8,35 +8,38 @@ import (
 	"strings"
 	"time"
 
-	"kubevirt.io/kubevirt/tests/decorators"
-
-	"kubevirt.io/kubevirt/tests/framework/cleanup"
-	"kubevirt.io/kubevirt/tests/framework/kubevirt"
-	"kubevirt.io/kubevirt/tests/testsuite"
-
 	expect "github.com/google/goexpect"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
-
-	"kubevirt.io/kubevirt/tests/util"
-
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
-	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
-	"kubevirt.io/kubevirt/tests"
+	virtwait "kubevirt.io/kubevirt/pkg/apimachinery/wait"
+	"kubevirt.io/kubevirt/pkg/libvmi"
+	"kubevirt.io/kubevirt/pkg/virt-config/featuregate"
+
 	"kubevirt.io/kubevirt/tests/console"
+	"kubevirt.io/kubevirt/tests/decorators"
+	"kubevirt.io/kubevirt/tests/framework/cleanup"
+	"kubevirt.io/kubevirt/tests/framework/kubevirt"
 	. "kubevirt.io/kubevirt/tests/framework/matcher"
+	"kubevirt.io/kubevirt/tests/libdomain"
+	"kubevirt.io/kubevirt/tests/libkubevirt"
+	kvconfig "kubevirt.io/kubevirt/tests/libkubevirt/config"
+	"kubevirt.io/kubevirt/tests/libnet"
 	"kubevirt.io/kubevirt/tests/libnode"
 	"kubevirt.io/kubevirt/tests/libpod"
+	"kubevirt.io/kubevirt/tests/libvmifact"
 	"kubevirt.io/kubevirt/tests/libwait"
+	"kubevirt.io/kubevirt/tests/testsuite"
 )
 
-var _ = Describe("[Serial][sig-compute]MediatedDevices", Serial, decorators.VGPU, decorators.SigCompute, func() {
+var _ = Describe("[sig-compute]MediatedDevices", Serial, decorators.VGPU, decorators.SigCompute, func() {
 	var err error
 	var virtClient kubecli.KubevirtClient
 
@@ -79,7 +82,7 @@ var _ = Describe("[Serial][sig-compute]MediatedDevices", Serial, decorators.VGPU
 			ExpectWithOffset(1, err).ToNot(HaveOccurred())
 
 			var latestPod k8sv1.Pod
-			err := wait.PollImmediate(5*time.Second, 3*time.Minute, waitForPod(&latestPod, ThisPod(testPod)))
+			err := virtwait.PollImmediately(5*time.Second, 1*time.Minute, waitForPod(&latestPod, ThisPod(testPod)).WithContext())
 			return &latestPod, err
 		}
 
@@ -98,7 +101,7 @@ var _ = Describe("[Serial][sig-compute]MediatedDevices", Serial, decorators.VGPU
 		ExpectWithOffset(1, err).ToNot(HaveOccurred())
 
 		var latestPod k8sv1.Pod
-		err := wait.PollImmediate(time.Second, 2*time.Minute, waitForPod(&latestPod, ThisPod(testPod)))
+		err := virtwait.PollImmediately(time.Second, 1*time.Minute, waitForPod(&latestPod, ThisPod(testPod)).WithContext())
 		return &latestPod, err
 	}
 
@@ -131,14 +134,13 @@ var _ = Describe("[Serial][sig-compute]MediatedDevices", Serial, decorators.VGPU
 
 		addMdevsConfiguration := func() {
 			By("Creating a configuration for mediated devices")
-			kv := util.GetCurrentKv(virtClient)
+			kv := libkubevirt.GetCurrentKv(virtClient)
 			config = kv.Spec.Configuration
 			originalFeatureGates = append(originalFeatureGates, config.DeveloperConfiguration.FeatureGates...)
-			config.DeveloperConfiguration.FeatureGates = append(config.DeveloperConfiguration.FeatureGates, virtconfig.GPUGate)
 			config.MediatedDevicesConfiguration = &v1.MediatedDevicesConfiguration{
 				MediatedDeviceTypes: []string{desiredMdevTypeName},
 			}
-			tests.UpdateKubeVirtConfigValueAndWait(config)
+			kvconfig.UpdateKubeVirtConfigValueAndWait(config)
 		}
 
 		cleanupConfiguredMdevs := func() {
@@ -147,7 +149,7 @@ var _ = Describe("[Serial][sig-compute]MediatedDevices", Serial, decorators.VGPU
 			By("Removing the configuration of mediated devices")
 			config.PermittedHostDevices = &v1.PermittedHostDevices{}
 			config.MediatedDevicesConfiguration = &v1.MediatedDevicesConfiguration{}
-			tests.UpdateKubeVirtConfigValueAndWait(config)
+			kvconfig.UpdateKubeVirtConfigValueAndWait(config)
 			By("Verifying that an expected amount of devices has been created")
 			noGPUDevicesAreAvailable()
 		}
@@ -173,11 +175,11 @@ var _ = Describe("[Serial][sig-compute]MediatedDevices", Serial, decorators.VGPU
 					},
 				},
 			}
-			tests.UpdateKubeVirtConfigValueAndWait(config)
+			kvconfig.UpdateKubeVirtConfigValueAndWait(config)
 
 			By("Removing the mediated devices configuration and expecting no devices being removed")
 			config.MediatedDevicesConfiguration = &v1.MediatedDevicesConfiguration{}
-			tests.UpdateKubeVirtConfigValueAndWait(config)
+			kvconfig.UpdateKubeVirtConfigValueAndWait(config)
 			Eventually(checkAllMDEVCreated(desiredMdevTypeName, expectedInstancesNum), 3*time.Minute, 15*time.Second).Should(BeInPhase(k8sv1.PodSucceeded))
 		})
 
@@ -185,13 +187,13 @@ var _ = Describe("[Serial][sig-compute]MediatedDevices", Serial, decorators.VGPU
 
 			By("Adding feature gate to disable mdevs handling")
 
-			config.DeveloperConfiguration.FeatureGates = append(config.DeveloperConfiguration.FeatureGates, virtconfig.DisableMediatedDevicesHandling)
-			tests.UpdateKubeVirtConfigValueAndWait(config)
+			config.DeveloperConfiguration.FeatureGates = append(config.DeveloperConfiguration.FeatureGates, featuregate.DisableMediatedDevicesHandling)
+			kvconfig.UpdateKubeVirtConfigValueAndWait(config)
 
 			By("Removing the mediated devices configuration and expecting no devices being removed")
 			config.PermittedHostDevices = &v1.PermittedHostDevices{}
 			config.MediatedDevicesConfiguration = &v1.MediatedDevicesConfiguration{}
-			tests.UpdateKubeVirtConfigValueAndWait(config)
+			kvconfig.UpdateKubeVirtConfigValueAndWait(config)
 			Eventually(checkAllMDEVCreated(desiredMdevTypeName, expectedInstancesNum), 3*time.Minute, 15*time.Second).Should(BeInPhase(k8sv1.PodSucceeded))
 		})
 	})
@@ -209,11 +211,10 @@ var _ = Describe("[Serial][sig-compute]MediatedDevices", Serial, decorators.VGPU
 		var mdevTestLabel = "mdevTestLabel1"
 
 		BeforeEach(func() {
-			kv := util.GetCurrentKv(virtClient)
+			kv := libkubevirt.GetCurrentKv(virtClient)
 
 			By("Creating a configuration for mediated devices")
 			config = kv.Spec.Configuration
-			config.DeveloperConfiguration.FeatureGates = append(config.DeveloperConfiguration.FeatureGates, virtconfig.GPUGate)
 			config.MediatedDevicesConfiguration = &v1.MediatedDevicesConfiguration{
 				MediatedDeviceTypes: []string{desiredMdevTypeName},
 			}
@@ -229,7 +230,7 @@ var _ = Describe("[Serial][sig-compute]MediatedDevices", Serial, decorators.VGPU
 					},
 				},
 			}
-			tests.UpdateKubeVirtConfigValueAndWait(config)
+			kvconfig.UpdateKubeVirtConfigValueAndWait(config)
 
 			By("Verifying that an expected amount of devices has been created")
 			Eventually(checkAllMDEVCreated(desiredMdevTypeName, expectedInstancesNum), 3*time.Minute, 15*time.Second).Should(BeInPhase(k8sv1.PodSucceeded))
@@ -237,10 +238,10 @@ var _ = Describe("[Serial][sig-compute]MediatedDevices", Serial, decorators.VGPU
 
 		cleanupConfiguredMdevs := func() {
 			By("Deleting the VMI")
-			ExpectWithOffset(1, virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Delete(context.Background(), vmi.Name, &metav1.DeleteOptions{})).To(Succeed(), "Should delete VMI")
+			ExpectWithOffset(1, virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Delete(context.Background(), vmi.Name, metav1.DeleteOptions{})).To(Succeed(), "Should delete VMI")
 			By("Creating a configuration for mediated devices")
 			config.MediatedDevicesConfiguration = &v1.MediatedDevicesConfiguration{}
-			tests.UpdateKubeVirtConfigValueAndWait(config)
+			kvconfig.UpdateKubeVirtConfigValueAndWait(config)
 			By("Verifying that an expected amount of devices has been created")
 			noGPUDevicesAreAvailable()
 		}
@@ -252,7 +253,7 @@ var _ = Describe("[Serial][sig-compute]MediatedDevices", Serial, decorators.VGPU
 		It("Should successfully passthrough a mediated device", func() {
 
 			By("Creating a Fedora VMI")
-			vmi = tests.NewRandomFedoraVMI()
+			vmi = libvmifact.NewFedora(libnet.WithMasqueradeNetworking(), libvmi.WithAutoattachGraphicsDevice(true))
 			vmi.Spec.Domain.Resources.Requests[k8sv1.ResourceMemory] = resource.MustParse("1G")
 			vGPUs := []v1.GPU{
 				{
@@ -261,7 +262,7 @@ var _ = Describe("[Serial][sig-compute]MediatedDevices", Serial, decorators.VGPU
 				},
 			}
 			vmi.Spec.Domain.Devices.GPUs = vGPUs
-			createdVmi, err := virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Create(context.Background(), vmi)
+			createdVmi, err := virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Create(context.Background(), vmi, metav1.CreateOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			vmi = createdVmi
 			libwait.WaitForSuccessfulVMIStart(vmi)
@@ -273,41 +274,12 @@ var _ = Describe("[Serial][sig-compute]MediatedDevices", Serial, decorators.VGPU
 				&expect.BExp{R: console.RetValue("1")},
 			}, 250)).To(Succeed(), "Device not found")
 
-			domXml, err := tests.GetRunningVirtualMachineInstanceDomainXML(virtClient, vmi)
+			domXml, err := libdomain.GetRunningVirtualMachineInstanceDomainXML(virtClient, vmi)
 			Expect(err).ToNot(HaveOccurred())
 			// make sure that one mdev has display and ramfb on
 			By("Maiking sure that a boot display is enabled")
 			Expect(domXml).To(MatchRegexp(`<hostdev .*display=.?on.?`), "Display should be on")
 			Expect(domXml).To(MatchRegexp(`<hostdev .*ramfb=.?on.?`), "RamFB should be on")
-		})
-		It("Should successfully passthrough a mediated device with a disabled display", func() {
-			_false := false
-			By("Creating a Fedora VMI")
-			vmi = tests.NewRandomFedoraVMI()
-			vmi.Spec.Domain.Resources.Requests[k8sv1.ResourceMemory] = resource.MustParse("1G")
-			vGPUs := []v1.GPU{
-				{
-					Name:       "gpu2",
-					DeviceName: deviceName,
-					VirtualGPUOptions: &v1.VGPUOptions{
-						Display: &v1.VGPUDisplayOptions{
-							Enabled: &_false,
-						},
-					},
-				},
-			}
-			vmi.Spec.Domain.Devices.GPUs = vGPUs
-			createdVmi, err := virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Create(context.Background(), vmi)
-			Expect(err).ToNot(HaveOccurred())
-			vmi = createdVmi
-			libwait.WaitForSuccessfulVMIStart(vmi)
-
-			domXml, err := tests.GetRunningVirtualMachineInstanceDomainXML(virtClient, vmi)
-			Expect(err).ToNot(HaveOccurred())
-			// make sure that another mdev explicitly turned off its display
-			By("Maiking sure that a boot display is disabled")
-			Expect(domXml).ToNot(MatchRegexp(`<hostdev .*display=.?on.?`), "Display should not be enabled")
-			Expect(domXml).ToNot(MatchRegexp(`<hostdev .*ramfb=.?on.?`), "RamFB should not be enabled")
 		})
 		It("Should override default mdev configuration on a specific node", func() {
 			newDesiredMdevTypeName := "nvidia-223"
@@ -323,7 +295,7 @@ var _ = Describe("[Serial][sig-compute]MediatedDevices", Serial, decorators.VGPU
 					},
 				},
 			}
-			tests.UpdateKubeVirtConfigValueAndWait(config)
+			kvconfig.UpdateKubeVirtConfigValueAndWait(config)
 			By("Verify that the default mdev configuration didn't change")
 			Eventually(checkAllMDEVCreated(desiredMdevTypeName, expectedInstancesNum), 3*time.Minute, 15*time.Second).Should(BeInPhase(k8sv1.PodSucceeded))
 
@@ -333,7 +305,7 @@ var _ = Describe("[Serial][sig-compute]MediatedDevices", Serial, decorators.VGPU
 			libnode.AddLabelToNode(singleNode.Name, cleanup.TestLabelForNamespace(testsuite.GetTestNamespace(vmi)), mdevTestLabel)
 
 			By("Creating a Fedora VMI")
-			vmi = tests.NewRandomFedoraVMI()
+			vmi = libvmifact.NewFedora(libnet.WithMasqueradeNetworking(), libvmi.WithAutoattachGraphicsDevice(true))
 			vmi.Spec.Domain.Resources.Requests[k8sv1.ResourceMemory] = resource.MustParse("1G")
 			vGPUs := []v1.GPU{
 				{
@@ -342,7 +314,7 @@ var _ = Describe("[Serial][sig-compute]MediatedDevices", Serial, decorators.VGPU
 				},
 			}
 			vmi.Spec.Domain.Devices.GPUs = vGPUs
-			createdVmi, err := virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Create(context.Background(), vmi)
+			createdVmi, err := virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Create(context.Background(), vmi, metav1.CreateOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			vmi = createdVmi
 			libwait.WaitForSuccessfulVMIStart(vmi)
@@ -368,17 +340,16 @@ var _ = Describe("[Serial][sig-compute]MediatedDevices", Serial, decorators.VGPU
 		var driverPath string
 		var rootPCIId string
 
-		runBashCmd := func(cmd string) (string, string, error) {
+		runBashCmd := func(cmd string) (string, error) {
 			args := []string{"bash", "-x", "-c", cmd}
-			stdout, stderr, err := tests.ExecuteCommandOnNodeThroughVirtHandler(virtClient, node, args)
+			stdout, err := libnode.ExecuteCommandInVirtHandlerPod(node, args)
 			stdout = strings.TrimSpace(stdout)
-			stderr = strings.TrimSpace(stderr)
-			return stdout, stderr, err
+			return stdout, err
 		}
 
 		runBashCmdRw := func(cmd string) error {
 			// On kind, virt-handler seems to have /sys mounted as read-only.
-			// This uses a privileged pod with /sys explitly mounted in read/write mode.
+			// This uses a privileged pod with /sys explicitly mounted in read/write mode.
 			testPod := libpod.RenderPrivilegedPod("test-rw-sysfs", []string{"bash", "-x", "-c"}, []string{cmd})
 			testPod.Spec.Volumes = append(testPod.Spec.Volumes, k8sv1.Volume{
 				Name: "sys",
@@ -395,12 +366,11 @@ var _ = Describe("[Serial][sig-compute]MediatedDevices", Serial, decorators.VGPU
 			ExpectWithOffset(1, err).ToNot(HaveOccurred())
 
 			var latestPod k8sv1.Pod
-			err := wait.PollImmediate(time.Second, 2*time.Minute, waitForPod(&latestPod, ThisPod(testPod)))
+			err := virtwait.PollImmediately(time.Second, 2*time.Minute, waitForPod(&latestPod, ThisPod(testPod)).WithContext())
 			return err
 		}
 
 		BeforeEach(func() {
-			Skip("Unbinding older NVIDIA GPUs, such as the Tesla T4 found on vgpu lanes, doesn't work reliably")
 			nodes := libnode.GetAllSchedulableNodes(virtClient).Items
 			Expect(nodes).To(HaveLen(1))
 			node = nodes[0].Name
@@ -417,26 +387,26 @@ var _ = Describe("[Serial][sig-compute]MediatedDevices", Serial, decorators.VGPU
 
 		It("should create mdevs on devices that appear after CR configuration", func() {
 			By("looking for an mdev-compatible PCI device")
-			out, e, err := runBashCmd(findMdevCapableDevices)
-			Expect(err).ToNot(HaveOccurred(), e)
+			out, err := runBashCmd(findMdevCapableDevices)
+			Expect(err).ToNot(HaveOccurred())
 			Expect(out).To(ContainSubstring(mdevBusPath))
 			pciId := "'" + filepath.Base(out) + "'"
 
 			By("finding the driver")
-			driverPath, e, err = runBashCmd("readlink -e " + mdevBusPath + pciId + "/driver")
-			Expect(err).ToNot(HaveOccurred(), e)
+			driverPath, err = runBashCmd("readlink -e " + mdevBusPath + pciId + "/driver")
+			Expect(err).ToNot(HaveOccurred())
 			Expect(driverPath).To(ContainSubstring("drivers"))
 
 			By("finding a supported type")
-			out, e, err = runBashCmd(fmt.Sprintf(findSupportedTypeFmt, pciId))
-			Expect(err).ToNot(HaveOccurred(), e)
+			out, err = runBashCmd(fmt.Sprintf(findSupportedTypeFmt, pciId))
+			Expect(err).ToNot(HaveOccurred())
 			Expect(out).ToNot(BeEmpty())
 			mdevType := filepath.Base(out)
 
 			By("finding the name of the device")
 			fileName := fmt.Sprintf(deviceNameFmt, pciId, mdevType)
-			deviceName, e, err := runBashCmd("cat " + fileName)
-			Expect(err).ToNot(HaveOccurred(), e)
+			deviceName, err := runBashCmd("cat " + fileName)
+			Expect(err).ToNot(HaveOccurred())
 			Expect(deviceName).ToNot(BeEmpty())
 
 			By("unbinding the device from its driver")
@@ -445,15 +415,14 @@ var _ = Describe("[Serial][sig-compute]MediatedDevices", Serial, decorators.VGPU
 			err = runBashCmdRw(fmt.Sprintf(unbindCmdFmt, rootPCIId, driverPath))
 			Expect(err).ToNot(HaveOccurred())
 			Eventually(func() error {
-				_, _, err = runBashCmd("ls " + mdevBusPath + pciId)
+				_, err = runBashCmd("ls " + mdevBusPath + pciId)
 				return err
 			}).Should(HaveOccurred(), "failed to disable the VFs on "+rootPCIId)
 
 			By("adding the device to the KubeVirt CR")
 			resourceName := filepath.Base(driverPath) + ".com/" + strings.ReplaceAll(deviceName, " ", "_")
-			kv := util.GetCurrentKv(virtClient)
+			kv := libkubevirt.GetCurrentKv(virtClient)
 			config := kv.Spec.Configuration
-			config.DeveloperConfiguration.FeatureGates = append(config.DeveloperConfiguration.FeatureGates, virtconfig.GPUGate)
 			config.MediatedDevicesConfiguration = &v1.MediatedDevicesConfiguration{
 				MediatedDevicesTypes: []string{mdevType},
 			}
@@ -465,20 +434,20 @@ var _ = Describe("[Serial][sig-compute]MediatedDevices", Serial, decorators.VGPU
 					},
 				},
 			}
-			tests.UpdateKubeVirtConfigValueAndWait(config)
+			kvconfig.UpdateKubeVirtConfigValueAndWait(config)
 
 			By("re-binding the device to its driver")
 			err = runBashCmdRw(fmt.Sprintf(bindCmdFmt, rootPCIId, driverPath))
 			Expect(err).ToNot(HaveOccurred())
 			Eventually(func() error {
-				_, _, err = runBashCmd("ls " + mdevBusPath + pciId)
+				_, err = runBashCmd("ls " + mdevBusPath + pciId)
 				return err
 			}).ShouldNot(HaveOccurred(), "failed to re-enable the VFs on "+rootPCIId)
 
 			By("expecting the creation of a mediated device")
 			mdevUUIDPath := fmt.Sprintf(mdevUUIDPathFmt, pciId, uuidRegex)
 			Eventually(func() error {
-				uuidPath, _, err := runBashCmd("ls -d " + mdevUUIDPath + " | head -1")
+				uuidPath, err := runBashCmd("ls -d " + mdevUUIDPath + " | head -1")
 				if err != nil {
 					return err
 				}
@@ -487,7 +456,7 @@ var _ = Describe("[Serial][sig-compute]MediatedDevices", Serial, decorators.VGPU
 				}
 				uuid := strings.TrimSpace(filepath.Base(uuidPath))
 				mdevTypePath := fmt.Sprintf(mdevTypePathFmt, pciId, uuid)
-				effectiveTypePath, _, err := runBashCmd("readlink -e " + mdevTypePath)
+				effectiveTypePath, err := runBashCmd("readlink -e " + mdevTypePath)
 				if err != nil {
 					return err
 				}

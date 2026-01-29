@@ -13,8 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2023 Red Hat, Inc.
- *
+ * Copyright The KubeVirt Authors.
  */
 
 package netpod_test
@@ -24,14 +23,13 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"slices"
 	"sync"
 
 	vishnetlink "github.com/vishvananda/netlink"
 
 	dutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
 	kfs "kubevirt.io/kubevirt/pkg/os/fs"
-	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
-
 	"kubevirt.io/kubevirt/pkg/pointer"
 
 	v1 "kubevirt.io/api/core/v1"
@@ -44,6 +42,7 @@ import (
 	"kubevirt.io/kubevirt/pkg/network/driver/procsys"
 	neterrors "kubevirt.io/kubevirt/pkg/network/errors"
 	"kubevirt.io/kubevirt/pkg/network/setup/netpod"
+	"kubevirt.io/kubevirt/pkg/network/vmispec"
 )
 
 const (
@@ -186,8 +185,6 @@ var _ = Describe("netpod", func() {
 	},
 		Entry("bridge", v1.InterfaceBindingMethod{Bridge: &v1.InterfaceBridge{}}),
 		Entry("masquerade", v1.InterfaceBindingMethod{Masquerade: &v1.InterfaceMasquerade{}}),
-		Entry("passt", v1.InterfaceBindingMethod{Passt: &v1.InterfacePasst{}}),
-		Entry("slirp", v1.InterfaceBindingMethod{Slirp: &v1.InterfaceSlirp{}}),
 	)
 
 	It("setup masquerade binding", func() {
@@ -239,7 +236,6 @@ var _ = Describe("netpod", func() {
 						State:      nmstate.IfaceStateUp,
 						MacAddress: "02:00:00:00:00:00",
 						MTU:        1500,
-						Ethtool:    nmstate.Ethtool{Feature: nmstate.Feature{TxChecksum: pointer.P(false)}},
 						IPv4: nmstate.IP{
 							Enabled: pointer.P(true),
 							Address: []nmstate.IPAddress{{IP: "10.0.2.1", PrefixLen: 24}},
@@ -328,6 +324,12 @@ var _ = Describe("netpod", func() {
 					NextHopAddress:   defaultGatewayIP4Address,
 					TableID:          0,
 				},
+				// Static route to a wider subnet containing the local subnet
+				{
+					Destination:      "10.222.0.0/16",
+					NextHopInterface: "eth0",
+					TableID:          0,
+				},
 			}},
 		}}
 
@@ -350,7 +352,6 @@ var _ = Describe("netpod", func() {
 						Name:     "k6t-eth0",
 						TypeName: nmstate.TypeBridge,
 						State:    nmstate.IfaceStateUp,
-						Ethtool:  nmstate.Ethtool{Feature: nmstate.Feature{TxChecksum: pointer.P(false)}},
 						IPv4: nmstate.IP{
 							Enabled: pointer.P(true),
 							Address: []nmstate.IPAddress{{IP: "169.254.75.10", PrefixLen: 32}},
@@ -362,6 +363,7 @@ var _ = Describe("netpod", func() {
 						Index:       0,
 						CopyMacFrom: "k6t-eth0",
 						Controller:  "k6t-eth0",
+						State:       nmstate.IfaceStateUp,
 						IPv4:        ipDisabled,
 						IPv6:        ipDisabled,
 						LinuxStack:  nmstate.LinuxIfaceStack{PortLearning: pointer.P(false)},
@@ -414,12 +416,163 @@ var _ = Describe("netpod", func() {
 			podIfaceOrignalMAC,
 			defaultGatewayIP4Address,
 			"192.168.1.0/24",
+			"10.222.0.0/16",
 		)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cache.ReadDHCPInterfaceCache(&baseCacheCreator, "0", "eth0")).To(Equal(expDHCPConfig))
-		Expect(cache.ReadDomainInterfaceCache(&baseCacheCreator, "0", defaultPodNetworkName)).To(Equal(&api.Interface{
-			MAC: &api.MAC{MAC: podIfaceOrignalMAC},
+	})
+
+	It("setup bridge binding with IP custom primary interface name", func() {
+		const (
+			defaultGatewayIP4Address = "10.222.222.254"
+			podIfaceOrignalMAC       = "12:34:56:78:90:ab"
+			customPrimaryIfaceName   = "cust-iface"
+		)
+		nmstatestub := nmstateStub{status: nmstate.Status{
+			Interfaces: []nmstate.Interface{{
+				Name:       customPrimaryIfaceName,
+				Index:      0,
+				TypeName:   nmstate.TypeVETH,
+				State:      nmstate.IfaceStateUp,
+				MacAddress: podIfaceOrignalMAC,
+				MTU:        1500,
+				IPv4: nmstate.IP{
+					Enabled: pointer.P(true),
+					Address: []nmstate.IPAddress{{
+						IP:        primaryIPv4Address,
+						PrefixLen: 30,
+					}},
+				},
+				IPv6: nmstate.IP{
+					Enabled: pointer.P(true),
+					Address: []nmstate.IPAddress{{
+						IP:        primaryIPv6Address,
+						PrefixLen: 64,
+					}},
+				},
+			}},
+			Routes: nmstate.Routes{Running: []nmstate.Route{
+				// Default Route
+				{
+					Destination:      "0.0.0.0/0",
+					NextHopInterface: customPrimaryIfaceName,
+					NextHopAddress:   defaultGatewayIP4Address,
+					TableID:          0,
+				},
+				// Local Route (should be ignored)
+				{
+					Destination:      "10.222.222.0/30",
+					NextHopInterface: customPrimaryIfaceName,
+					NextHopAddress:   primaryIPv4Address,
+					TableID:          0,
+				},
+				// Static Route
+				{
+					Destination:      "192.168.1.0/24",
+					NextHopInterface: customPrimaryIfaceName,
+					NextHopAddress:   defaultGatewayIP4Address,
+					TableID:          0,
+				},
+				// Static route to a wider subnet containing the local subnet
+				{
+					Destination:      "10.222.0.0/16",
+					NextHopInterface: customPrimaryIfaceName,
+					TableID:          0,
+				},
+			}},
+		}}
+
+		vmiIface := v1.Interface{
+			Name:                   defaultPodNetworkName,
+			InterfaceBindingMethod: v1.InterfaceBindingMethod{Bridge: &v1.InterfaceBridge{}},
+		}
+		vmiIfaceStatuses := []v1.VirtualMachineInstanceNetworkInterface{
+			{Name: defaultPodNetworkName, PodInterfaceName: customPrimaryIfaceName},
+		}
+		netPod := netpod.NewNetPod(
+			[]v1.Network{*v1.DefaultPodNetwork()},
+			[]v1.Interface{vmiIface},
+			vmiUID, 0, 0, 0, state,
+			netpod.WithNMStateAdapter(&nmstatestub),
+			netpod.WithCacheCreator(&baseCacheCreator),
+			netpod.WithVMIIfaceStatuses(vmiIfaceStatuses),
+		)
+		Expect(netPod.Setup()).To(Succeed())
+		Expect(nmstatestub.spec).To(Equal(
+			nmstate.Spec{
+				Interfaces: []nmstate.Interface{
+					{
+						Name:     "k6t-cust-iface",
+						TypeName: nmstate.TypeBridge,
+						State:    nmstate.IfaceStateUp,
+						IPv4: nmstate.IP{
+							Enabled: pointer.P(true),
+							Address: []nmstate.IPAddress{{IP: "169.254.75.10", PrefixLen: 32}},
+						},
+						Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: defaultPodNetworkName},
+					},
+					{
+						Name:        "cust-iface-nic",
+						Index:       0,
+						CopyMacFrom: "k6t-cust-iface",
+						Controller:  "k6t-cust-iface",
+						State:       nmstate.IfaceStateUp,
+						IPv4:        ipDisabled,
+						IPv6:        ipDisabled,
+						LinuxStack:  nmstate.LinuxIfaceStack{PortLearning: pointer.P(false)},
+						Metadata:    &nmstate.IfaceMetadata{Pid: 0, NetworkName: defaultPodNetworkName},
+					},
+					{
+						Name:       "tap0",
+						TypeName:   nmstate.TypeTap,
+						State:      nmstate.IfaceStateUp,
+						MTU:        1500,
+						Controller: "k6t-cust-iface",
+						Tap:        &nmstate.TapDevice{Queues: 0, UID: 0, GID: 0},
+						Metadata:   &nmstate.IfaceMetadata{Pid: 0, NetworkName: defaultPodNetworkName},
+					},
+					{
+						Name:       customPrimaryIfaceName,
+						TypeName:   nmstate.TypeDummy,
+						MacAddress: podIfaceOrignalMAC,
+						MTU:        1500,
+						IPv4: nmstate.IP{
+							Enabled: pointer.P(true),
+							Address: []nmstate.IPAddress{{
+								IP:        primaryIPv4Address,
+								PrefixLen: 30,
+							}},
+						},
+						IPv6: nmstate.IP{
+							Enabled: pointer.P(true),
+							Address: []nmstate.IPAddress{{
+								IP:        primaryIPv6Address,
+								PrefixLen: 64,
+							}},
+						},
+						Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: defaultPodNetworkName},
+					},
+				},
+				LinuxStack: nmstate.LinuxStack{IPv4: nmstate.LinuxStackIP4{
+					ArpIgnore: pointer.P(procsys.ARPReplyMode1),
+				}},
+			}),
+		)
+		Expect(cache.ReadPodInterfaceCache(&baseCacheCreator, vmiUID, defaultPodNetworkName)).To(Equal(&cache.PodIfaceCacheData{
+			Iface:  &vmiIface,
+			PodIP:  primaryIPv4Address,
+			PodIPs: []string{primaryIPv4Address, primaryIPv6Address},
 		}))
+
+		expDHCPConfig, err := expectedDHCPConfig(
+			"10.222.222.1/30",
+			podIfaceOrignalMAC,
+			defaultGatewayIP4Address,
+			"192.168.1.0/24",
+			"10.222.0.0/16",
+		)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cache.ReadDHCPInterfaceCache(&baseCacheCreator, "0", customPrimaryIfaceName)).To(Equal(expDHCPConfig))
 	})
 
 	It("setup bridge binding without IP", func() {
@@ -462,7 +615,6 @@ var _ = Describe("netpod", func() {
 						Name:     "k6t-eth0",
 						TypeName: nmstate.TypeBridge,
 						State:    nmstate.IfaceStateUp,
-						Ethtool:  nmstate.Ethtool{Feature: nmstate.Feature{TxChecksum: pointer.P(false)}},
 						Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: defaultPodNetworkName},
 					},
 					{
@@ -470,6 +622,7 @@ var _ = Describe("netpod", func() {
 						Index:       0,
 						CopyMacFrom: "k6t-eth0",
 						Controller:  "k6t-eth0",
+						State:       nmstate.IfaceStateUp,
 						IPv4:        ipDisabled,
 						IPv6:        ipDisabled,
 						LinuxStack:  nmstate.LinuxIfaceStack{PortLearning: pointer.P(false)},
@@ -508,10 +661,6 @@ var _ = Describe("netpod", func() {
 
 		Expect(cache.ReadDHCPInterfaceCache(&baseCacheCreator, "0", "eth0")).To(
 			Equal(&cache.DHCPConfig{IPAMDisabled: true}))
-
-		Expect(cache.ReadDomainInterfaceCache(&baseCacheCreator, "0", defaultPodNetworkName)).To(Equal(&api.Interface{
-			MAC: &api.MAC{MAC: podIfaceOrignalMAC},
-		}))
 	})
 
 	When("using secondary network", func() {
@@ -616,7 +765,6 @@ var _ = Describe("netpod", func() {
 					State:      nmstate.IfaceStateUp,
 					MacAddress: "02:00:00:00:00:00",
 					MTU:        1500,
-					Ethtool:    nmstate.Ethtool{Feature: nmstate.Feature{TxChecksum: pointer.P(false)}},
 					IPv4: nmstate.IP{
 						Enabled: pointer.P(true),
 						Address: []nmstate.IPAddress{{IP: "10.0.2.1", PrefixLen: 24}},
@@ -670,7 +818,6 @@ var _ = Describe("netpod", func() {
 							Name:     "k6t-914f438d88d",
 							TypeName: nmstate.TypeBridge,
 							State:    nmstate.IfaceStateUp,
-							Ethtool:  nmstate.Ethtool{Feature: nmstate.Feature{TxChecksum: pointer.P(false)}},
 							Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: secondaryNetworkName},
 						},
 						{
@@ -678,6 +825,7 @@ var _ = Describe("netpod", func() {
 							Index:       secondaryPodInterfaceIndex,
 							CopyMacFrom: "k6t-914f438d88d",
 							Controller:  "k6t-914f438d88d",
+							State:       nmstate.IfaceStateUp,
 							IPv4:        ipDisabled,
 							IPv6:        ipDisabled,
 							LinuxStack:  nmstate.LinuxIfaceStack{PortLearning: pointer.P(false)},
@@ -745,7 +893,6 @@ var _ = Describe("netpod", func() {
 							State:      nmstate.IfaceStateUp,
 							MacAddress: "02:00:00:00:00:00",
 							MTU:        1500,
-							Ethtool:    nmstate.Ethtool{Feature: nmstate.Feature{TxChecksum: pointer.P(false)}},
 							IPv4: nmstate.IP{
 								Enabled: pointer.P(true),
 								Address: []nmstate.IPAddress{{IP: "10.0.2.1", PrefixLen: 24}},
@@ -771,7 +918,6 @@ var _ = Describe("netpod", func() {
 							Name:     "k6t-914f438d88d",
 							TypeName: nmstate.TypeBridge,
 							State:    nmstate.IfaceStateAbsent,
-							Ethtool:  nmstate.Ethtool{Feature: nmstate.Feature{TxChecksum: pointer.P(false)}},
 							Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: secondaryNetworkName},
 						},
 						{
@@ -826,7 +972,6 @@ var _ = Describe("netpod", func() {
 							State:      nmstate.IfaceStateUp,
 							MacAddress: "02:00:00:00:00:00",
 							MTU:        1500,
-							Ethtool:    nmstate.Ethtool{Feature: nmstate.Feature{TxChecksum: pointer.P(false)}},
 							IPv4: nmstate.IP{
 								Enabled: pointer.P(true),
 								Address: []nmstate.IPAddress{{IP: "10.0.2.1", PrefixLen: 24}},
@@ -852,7 +997,6 @@ var _ = Describe("netpod", func() {
 							Name:     "k6t-net1",
 							TypeName: nmstate.TypeBridge,
 							State:    nmstate.IfaceStateUp,
-							Ethtool:  nmstate.Ethtool{Feature: nmstate.Feature{TxChecksum: pointer.P(false)}},
 							Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: secondaryNetworkName},
 						},
 						{
@@ -860,6 +1004,7 @@ var _ = Describe("netpod", func() {
 							Index:       secondaryPodInterfaceIndex,
 							CopyMacFrom: "k6t-net1",
 							Controller:  "k6t-net1",
+							State:       nmstate.IfaceStateUp,
 							IPv4:        ipDisabled,
 							IPv6:        ipDisabled,
 							LinuxStack:  nmstate.LinuxIfaceStack{PortLearning: pointer.P(false)},
@@ -896,7 +1041,26 @@ var _ = Describe("netpod", func() {
 		})
 	})
 
-	It("setup Passt binding", func() {
+	It("should preserve network queue count if interface is already in the domain", func() {
+		const (
+			previousQueueCount = 1
+			currentQueueCount  = 2
+		)
+
+		vmiIface := v1.Interface{
+			Name:                   defaultPodNetworkName,
+			InterfaceBindingMethod: v1.InterfaceBindingMethod{Bridge: &v1.InterfaceBridge{}},
+		}
+
+		vmiIfaceStatuses := []v1.VirtualMachineInstanceNetworkInterface{
+			{
+				Name:             defaultPodNetworkName,
+				PodInterfaceName: "eth0",
+				QueueCount:       previousQueueCount,
+				InfoSource:       vmispec.InfoSourceDomain,
+			},
+		}
+
 		nmstatestub := nmstateStub{status: nmstate.Status{
 			Interfaces: []nmstate.Interface{{
 				Name:       "eth0",
@@ -912,42 +1076,34 @@ var _ = Describe("netpod", func() {
 						PrefixLen: 30,
 					}},
 				},
-				IPv6: nmstate.IP{
-					Enabled: pointer.P(true),
-					Address: []nmstate.IPAddress{{
-						IP:        primaryIPv6Address,
-						PrefixLen: 64,
-					}},
+			}},
+			Routes: nmstate.Routes{Running: []nmstate.Route{
+				// Default Route
+				{
+					Destination:      "0.0.0.0/0",
+					NextHopInterface: "eth0",
+					NextHopAddress:   "10.0.0.1",
+					TableID:          0,
 				},
 			}},
 		}}
 
-		vmiIface := v1.Interface{
-			Name:                   defaultPodNetworkName,
-			InterfaceBindingMethod: v1.InterfaceBindingMethod{Passt: &v1.InterfacePasst{}},
-		}
 		netPod := netpod.NewNetPod(
 			[]v1.Network{*v1.DefaultPodNetwork()},
 			[]v1.Interface{vmiIface},
-			vmiUID, 0, 0, 0, state,
+			vmiUID, 0, 0, currentQueueCount, state,
 			netpod.WithNMStateAdapter(&nmstatestub),
 			netpod.WithCacheCreator(&baseCacheCreator),
+			netpod.WithVMIIfaceStatuses(vmiIfaceStatuses),
 		)
 		Expect(netPod.Setup()).To(Succeed())
-		Expect(nmstatestub.spec).To(Equal(
-			nmstate.Spec{
-				Interfaces: []nmstate.Interface{},
-				LinuxStack: nmstate.LinuxStack{IPv4: nmstate.LinuxStackIP4{
-					PingGroupRange:        []int{107, 107},
-					UnprivilegedPortStart: pointer.P(0),
-				}},
-			},
-		))
-		Expect(cache.ReadPodInterfaceCache(&baseCacheCreator, vmiUID, defaultPodNetworkName)).To(Equal(&cache.PodIfaceCacheData{
-			Iface:  &vmiIface,
-			PodIP:  primaryIPv4Address,
-			PodIPs: []string{primaryIPv4Address, primaryIPv6Address},
-		}))
+
+		index := slices.IndexFunc(nmstatestub.spec.Interfaces, func(iface nmstate.Interface) bool {
+			return iface.Name == "tap0"
+		})
+		Expect(index).To(BeNumerically(">=", 0))
+
+		Expect(nmstatestub.spec.Interfaces[index].Tap.Queues).To(Equal(previousQueueCount))
 	})
 
 	DescribeTable("setup unhandled bindings", func(binding v1.InterfaceBindingMethod, expNmstateSpec nmstate.Spec) {
@@ -980,11 +1136,6 @@ var _ = Describe("netpod", func() {
 	},
 		// Not processed by the discovery & config steps.
 		Entry("SR-IOV", v1.InterfaceBindingMethod{SRIOV: &v1.InterfaceSRIOV{}}, nmstate.Spec{}),
-		Entry("Macvtap", v1.InterfaceBindingMethod{Macvtap: &v1.InterfaceMacvtap{}}, nmstate.Spec{}),
-		// Processed by the discovery but not by the config step.
-		// When processed by the config step, the nmstate structure will be initialized (e.g. to an empty interface list).
-		// Interfaces will not get populated because the specific binding (slirp) is not treated there.
-		Entry("Slirp", v1.InterfaceBindingMethod{Slirp: &v1.InterfaceSlirp{}}, nmstate.Spec{Interfaces: []nmstate.Interface{}}),
 	)
 
 	Context("setup with plugged networks marked for removal", func() {
@@ -1057,9 +1208,6 @@ var _ = Describe("netpod", func() {
 			Expect(pending).To(BeEmpty())
 			Expect(started).To(BeEmpty())
 			Expect(finished).To(Equal(specNetworks))
-
-			Expect(cache.ReadDomainInterfaceCache(&baseCacheCreator, "0", testNet1)).NotTo(BeNil())
-			Expect(cache.ReadDomainInterfaceCache(&baseCacheCreator, "0", testNet2)).NotTo(BeNil())
 		})
 
 		It("unplug 1 out of 2 secondary bridge binding networks", func() {
@@ -1083,7 +1231,6 @@ var _ = Describe("netpod", func() {
 							State:      nmstate.IfaceStateUp,
 							MacAddress: "02:00:00:00:00:00",
 							MTU:        1500,
-							Ethtool:    nmstate.Ethtool{Feature: nmstate.Feature{TxChecksum: pointer.P(false)}},
 							IPv4:       nmstate.IP{Enabled: pointer.P(false)},
 							IPv6:       nmstate.IP{Enabled: pointer.P(false)},
 							LinuxStack: nmstate.LinuxIfaceStack{},
@@ -1103,7 +1250,6 @@ var _ = Describe("netpod", func() {
 							Name:     "k6t-7087ef4cd1f",
 							TypeName: nmstate.TypeBridge,
 							State:    nmstate.IfaceStateAbsent,
-							Ethtool:  nmstate.Ethtool{Feature: nmstate.Feature{TxChecksum: pointer.P(false)}},
 							Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: testNet1},
 						},
 						{
@@ -1128,13 +1274,13 @@ var _ = Describe("netpod", func() {
 							Name:     "k6t-bc6cc93fa1e",
 							TypeName: nmstate.TypeBridge,
 							State:    nmstate.IfaceStateUp,
-							Ethtool:  nmstate.Ethtool{Feature: nmstate.Feature{TxChecksum: pointer.P(false)}},
 							Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: testNet2},
 						},
 						{
 							Name:        "bc6cc93fa1e-nic",
 							CopyMacFrom: "k6t-bc6cc93fa1e",
 							Controller:  "k6t-bc6cc93fa1e",
+							State:       nmstate.IfaceStateUp,
 							IPv4:        ipDisabled,
 							IPv6:        ipDisabled,
 							LinuxStack:  nmstate.LinuxIfaceStack{PortLearning: pointer.P(false)},
@@ -1167,12 +1313,6 @@ var _ = Describe("netpod", func() {
 				{Name: defaultPodNetworkName, NetworkSource: v1.NetworkSource{Pod: &v1.PodNetwork{}}},
 				{Name: testNet2, NetworkSource: v1.NetworkSource{Multus: &v1.MultusNetwork{}}},
 			}))
-
-			// testNet1 is not expected to exist anymore.
-			_, err = cache.ReadDomainInterfaceCache(&baseCacheCreator, "0", testNet1)
-			Expect(err).To(HaveOccurred())
-
-			Expect(cache.ReadDomainInterfaceCache(&baseCacheCreator, "0", testNet2)).NotTo(BeNil())
 		})
 
 		It("unplug 2 out of 2 secondary bridge binding networks", func() {
@@ -1197,7 +1337,6 @@ var _ = Describe("netpod", func() {
 							State:      nmstate.IfaceStateUp,
 							MacAddress: "02:00:00:00:00:00",
 							MTU:        1500,
-							Ethtool:    nmstate.Ethtool{Feature: nmstate.Feature{TxChecksum: pointer.P(false)}},
 							IPv4:       nmstate.IP{Enabled: pointer.P(false)},
 							IPv6:       nmstate.IP{Enabled: pointer.P(false)},
 							LinuxStack: nmstate.LinuxIfaceStack{},
@@ -1217,7 +1356,6 @@ var _ = Describe("netpod", func() {
 							Name:     "k6t-7087ef4cd1f",
 							TypeName: nmstate.TypeBridge,
 							State:    nmstate.IfaceStateAbsent,
-							Ethtool:  nmstate.Ethtool{Feature: nmstate.Feature{TxChecksum: pointer.P(false)}},
 							Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: testNet1},
 						},
 						{
@@ -1242,7 +1380,6 @@ var _ = Describe("netpod", func() {
 							Name:     "k6t-bc6cc93fa1e",
 							TypeName: nmstate.TypeBridge,
 							State:    nmstate.IfaceStateAbsent,
-							Ethtool:  nmstate.Ethtool{Feature: nmstate.Feature{TxChecksum: pointer.P(false)}},
 							Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: testNet2},
 						},
 						{
@@ -1272,13 +1409,6 @@ var _ = Describe("netpod", func() {
 			Expect(finished).To(Equal([]v1.Network{
 				{Name: defaultPodNetworkName, NetworkSource: v1.NetworkSource{Pod: &v1.PodNetwork{}}},
 			}))
-
-			// testNet1 and testNet2 are not expected to exist anymore.
-			_, err = cache.ReadDomainInterfaceCache(&baseCacheCreator, "0", testNet1)
-			Expect(err).To(HaveOccurred())
-
-			_, err = cache.ReadDomainInterfaceCache(&baseCacheCreator, "0", testNet2)
-			Expect(err).To(HaveOccurred())
 		})
 
 		It("unplug secondary bridge binding network that is still in pending state", func() {
@@ -1311,7 +1441,6 @@ var _ = Describe("netpod", func() {
 							State:      nmstate.IfaceStateUp,
 							MacAddress: "02:00:00:00:00:00",
 							MTU:        1500,
-							Ethtool:    nmstate.Ethtool{Feature: nmstate.Feature{TxChecksum: pointer.P(false)}},
 							IPv4:       nmstate.IP{Enabled: pointer.P(false)},
 							IPv6:       nmstate.IP{Enabled: pointer.P(false)},
 							LinuxStack: nmstate.LinuxIfaceStack{},
@@ -1331,13 +1460,13 @@ var _ = Describe("netpod", func() {
 							Name:     "k6t-7087ef4cd1f",
 							TypeName: nmstate.TypeBridge,
 							State:    nmstate.IfaceStateUp,
-							Ethtool:  nmstate.Ethtool{Feature: nmstate.Feature{TxChecksum: pointer.P(false)}},
 							Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: testNet1},
 						},
 						{
 							Name:        "7087ef4cd1f-nic",
 							CopyMacFrom: "k6t-7087ef4cd1f",
 							Controller:  "k6t-7087ef4cd1f",
+							State:       nmstate.IfaceStateUp,
 							IPv4:        ipDisabled,
 							IPv6:        ipDisabled,
 							LinuxStack:  nmstate.LinuxIfaceStack{PortLearning: pointer.P(false)},
@@ -1364,7 +1493,6 @@ var _ = Describe("netpod", func() {
 							Name:     "k6t-bc6cc93fa1e",
 							TypeName: nmstate.TypeBridge,
 							State:    nmstate.IfaceStateAbsent,
-							Ethtool:  nmstate.Ethtool{Feature: nmstate.Feature{TxChecksum: pointer.P(false)}},
 							Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: testNet2},
 						},
 						{
@@ -1395,12 +1523,6 @@ var _ = Describe("netpod", func() {
 				{Name: defaultPodNetworkName, NetworkSource: v1.NetworkSource{Pod: &v1.PodNetwork{}}},
 				{Name: testNet1, NetworkSource: v1.NetworkSource{Multus: &v1.MultusNetwork{}}},
 			}))
-
-			Expect(cache.ReadDomainInterfaceCache(&baseCacheCreator, "0", testNet1)).NotTo(BeNil())
-
-			// testNet2 is not expected to exist anymore.
-			_, err = cache.ReadDomainInterfaceCache(&baseCacheCreator, "0", testNet2)
-			Expect(err).To(HaveOccurred())
 		})
 	})
 
@@ -1509,7 +1631,6 @@ var _ = Describe("netpod", func() {
 						State:      nmstate.IfaceStateUp,
 						MacAddress: "02:00:00:00:00:00",
 						MTU:        1500,
-						Ethtool:    nmstate.Ethtool{Feature: nmstate.Feature{TxChecksum: pointer.P(false)}},
 						IPv4:       nmstate.IP{Enabled: pointer.P(false)},
 						IPv6:       nmstate.IP{Enabled: pointer.P(false)},
 						LinuxStack: nmstate.LinuxIfaceStack{},
@@ -1529,13 +1650,13 @@ var _ = Describe("netpod", func() {
 						Name:     "k6t-7087ef4cd1f",
 						TypeName: nmstate.TypeBridge,
 						State:    nmstate.IfaceStateUp,
-						Ethtool:  nmstate.Ethtool{Feature: nmstate.Feature{TxChecksum: pointer.P(false)}},
 						Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: testNet1},
 					},
 					{
 						Name:        "7087ef4cd1f-nic",
 						CopyMacFrom: "k6t-7087ef4cd1f",
 						Controller:  "k6t-7087ef4cd1f",
+						State:       nmstate.IfaceStateUp,
 						IPv4:        ipDisabled,
 						IPv6:        ipDisabled,
 						LinuxStack:  nmstate.LinuxIfaceStack{PortLearning: pointer.P(false)},
@@ -1562,7 +1683,6 @@ var _ = Describe("netpod", func() {
 						Name:     "k6t-bc6cc93fa1e",
 						TypeName: nmstate.TypeBridge,
 						State:    nmstate.IfaceStateAbsent,
-						Ethtool:  nmstate.Ethtool{Feature: nmstate.Feature{TxChecksum: pointer.P(false)}},
 						Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: testNet2},
 					},
 					{
@@ -1593,12 +1713,124 @@ var _ = Describe("netpod", func() {
 			{Name: defaultPodNetworkName, NetworkSource: v1.NetworkSource{Pod: &v1.PodNetwork{}}},
 			{Name: testNet1, NetworkSource: v1.NetworkSource{Multus: &v1.MultusNetwork{}}},
 		}))
+	})
 
-		Expect(cache.ReadDomainInterfaceCache(&baseCacheCreator, "0", testNet1)).NotTo(BeNil())
+	When("binding plugin with managedTap domainAttachmentType", func() {
+		const managedTap = "managed-tap"
 
-		// testNet2 is not expected to exist anymore.
-		_, err = cache.ReadDomainInterfaceCache(&baseCacheCreator, "0", testNet2)
-		Expect(err).To(HaveOccurred())
+		It("fails setup config when pod interface is missing", func() {
+			netPod := netpod.NewNetPod(
+				[]v1.Network{*v1.DefaultPodNetwork()},
+				[]v1.Interface{{Name: defaultPodNetworkName, Binding: &v1.PluginBinding{Name: managedTap}}},
+				vmiUID, 0, 0, 0, state,
+				netpod.WithNMStateAdapter(&nmstateStub{status: nmstate.Status{
+					Interfaces: []nmstate.Interface{{Name: "other0"}},
+				}}),
+				netpod.WithCacheCreator(&baseCacheCreator),
+				netpod.WithBindingPlugins(map[string]v1.InterfaceBindingPlugin{
+					managedTap: {DomainAttachmentType: v1.ManagedTap},
+				}),
+			)
+			err := netPod.Setup()
+			Expect(err).To(MatchError(ContainSubstring("pod link (eth0) is missing")))
+		})
+
+		It("setup succeeds", func() {
+			const podIfaceOrignalMAC = "12:34:56:78:90:ab"
+
+			nmstatestub := nmstateStub{status: nmstate.Status{
+				Interfaces: []nmstate.Interface{{
+					Name:       "eth0",
+					Index:      0,
+					TypeName:   nmstate.TypeVETH,
+					State:      nmstate.IfaceStateUp,
+					MacAddress: podIfaceOrignalMAC,
+					MTU:        1500,
+					IPv4: nmstate.IP{
+						Enabled: pointer.P(true),
+						Address: []nmstate.IPAddress{{
+							IP:        primaryIPv4Address,
+							PrefixLen: 30,
+						}},
+					},
+					IPv6: nmstate.IP{
+						Enabled: pointer.P(true),
+						Address: []nmstate.IPAddress{{
+							IP:        primaryIPv6Address,
+							PrefixLen: 64,
+						}},
+					},
+				}},
+			}}
+
+			vmiIface := v1.Interface{Name: defaultPodNetworkName, Binding: &v1.PluginBinding{Name: managedTap}}
+			netPod := netpod.NewNetPod(
+				[]v1.Network{*v1.DefaultPodNetwork()},
+				[]v1.Interface{vmiIface},
+				vmiUID, 0, 0, 0, state,
+				netpod.WithNMStateAdapter(&nmstatestub),
+				netpod.WithCacheCreator(&baseCacheCreator),
+				netpod.WithBindingPlugins(map[string]v1.InterfaceBindingPlugin{
+					managedTap: {DomainAttachmentType: v1.ManagedTap},
+				}),
+			)
+			Expect(netPod.Setup()).To(Succeed())
+			Expect(nmstatestub.spec).To(Equal(
+				nmstate.Spec{
+					Interfaces: []nmstate.Interface{
+						{
+							Name:     "k6t-eth0",
+							TypeName: nmstate.TypeBridge,
+							State:    nmstate.IfaceStateUp,
+							Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: defaultPodNetworkName},
+						},
+						{
+							Name:        "eth0-nic",
+							Index:       0,
+							State:       nmstate.IfaceStateUp,
+							CopyMacFrom: "k6t-eth0",
+							Controller:  "k6t-eth0",
+							IPv4:        ipDisabled,
+							IPv6:        ipDisabled,
+							LinuxStack:  nmstate.LinuxIfaceStack{PortLearning: pointer.P(false)},
+							Metadata:    &nmstate.IfaceMetadata{Pid: 0, NetworkName: defaultPodNetworkName},
+						},
+						{
+							Name:       "tap0",
+							TypeName:   nmstate.TypeTap,
+							State:      nmstate.IfaceStateUp,
+							MTU:        1500,
+							Controller: "k6t-eth0",
+							Tap:        &nmstate.TapDevice{Queues: 0, UID: 0, GID: 0},
+							Metadata:   &nmstate.IfaceMetadata{Pid: 0, NetworkName: defaultPodNetworkName},
+						},
+						{
+							Name:       "eth0",
+							TypeName:   nmstate.TypeDummy,
+							MacAddress: podIfaceOrignalMAC,
+							MTU:        1500,
+							IPv4: nmstate.IP{
+								Enabled: pointer.P(true),
+								Address: []nmstate.IPAddress{{IP: primaryIPv4Address, PrefixLen: 30}},
+							},
+							IPv6: nmstate.IP{
+								Enabled: pointer.P(true),
+								Address: []nmstate.IPAddress{{IP: primaryIPv6Address, PrefixLen: 64}},
+							},
+							Metadata: &nmstate.IfaceMetadata{Pid: 0, NetworkName: defaultPodNetworkName},
+						},
+					},
+					LinuxStack: nmstate.LinuxStack{IPv4: nmstate.LinuxStackIP4{
+						ArpIgnore: pointer.P(procsys.ARPReplyMode1),
+					}},
+				},
+			))
+			Expect(cache.ReadPodInterfaceCache(&baseCacheCreator, vmiUID, defaultPodNetworkName)).To(Equal(&cache.PodIfaceCacheData{
+				Iface:  &vmiIface,
+				PodIP:  primaryIPv4Address,
+				PodIPs: []string{primaryIPv4Address, primaryIPv6Address},
+			}))
+		})
 	})
 })
 
@@ -1661,7 +1893,7 @@ func (c *tempCacheCreator) New(filePath string) *cache.Cache {
 	return cache.NewCustomCache(filePath, kfs.NewWithRootPath(c.tmpDir))
 }
 
-func expectedDHCPConfig(podIfaceCIDR, podIfaceMAC, defaultGW, staticRouteDst string) (*cache.DHCPConfig, error) {
+func expectedDHCPConfig(podIfaceCIDR, podIfaceMAC, defaultGW, staticRouteDst, staticRouteToWiderSubnet string) (*cache.DHCPConfig, error) {
 	ipv4, err := vishnetlink.ParseAddr(podIfaceCIDR)
 	if err != nil {
 		return nil, err
@@ -1674,9 +1906,16 @@ func expectedDHCPConfig(podIfaceCIDR, podIfaceMAC, defaultGW, staticRouteDst str
 	if err != nil {
 		return nil, err
 	}
+
+	staticRouteToWiderSubnetDest, err := vishnetlink.ParseAddr(staticRouteToWiderSubnet)
+	if err != nil {
+		return nil, err
+	}
+
 	routes := []vishnetlink.Route{
 		{Gw: net.ParseIP(defaultGW)},
 		{Dst: destAddr.IPNet, Gw: net.ParseIP(defaultGW)},
+		{Dst: staticRouteToWiderSubnetDest.IPNet, Gw: nil},
 	}
 	return &cache.DHCPConfig{
 		IP:           *ipv4,

@@ -1,11 +1,12 @@
 package webhooks
 
 import (
+	"context"
 	"encoding/json"
 
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
 	admissionv1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -33,7 +34,7 @@ var _ = Describe("Validating KubeVirtCreate Admitter", func() {
 				Name:      "Existing",
 			},
 		}
-		kvInterface.EXPECT().List(gomock.Any()).
+		kvInterface.EXPECT().List(gomock.Any(), gomock.Any()).
 			Return(&v1.KubeVirtList{Items: []v1.KubeVirt{alreadyExistingKv}}, nil).AnyTimes()
 
 		newKv := v1.KubeVirt{
@@ -54,12 +55,12 @@ var _ = Describe("Validating KubeVirtCreate Admitter", func() {
 			},
 		}
 
-		response := admitter.Admit(review)
+		response := admitter.Admit(context.Background(), review)
 		Expect(response.Allowed).To(BeFalse(), "Additional attempts to create Kubevirt should fail")
 	})
 
 	It("should allow creating new Kubevirt resource", func() {
-		kvInterface.EXPECT().List(gomock.Any()).
+		kvInterface.EXPECT().List(gomock.Any(), gomock.Any()).
 			Return(&v1.KubeVirtList{Items: []v1.KubeVirt{}}, nil).AnyTimes()
 
 		newKv := v1.KubeVirt{
@@ -80,7 +81,7 @@ var _ = Describe("Validating KubeVirtCreate Admitter", func() {
 			},
 		}
 
-		response := admitter.Admit(review)
+		response := admitter.Admit(context.Background(), review)
 		Expect(response.Allowed).To(BeTrue(), "Create Kubevirt should be allowed")
 	})
 })

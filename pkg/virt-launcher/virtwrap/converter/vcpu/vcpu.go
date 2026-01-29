@@ -14,7 +14,6 @@ import (
 	v12 "kubevirt.io/api/core/v1"
 
 	v1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
-	"kubevirt.io/kubevirt/pkg/util"
 	"kubevirt.io/kubevirt/pkg/util/hardware"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 )
@@ -375,19 +374,34 @@ func appendDomainIOThreadPin(domain *api.Domain, thread uint32, cpuset string) {
 }
 
 func FormatDomainIOThreadPin(vmi *v12.VirtualMachineInstance, domain *api.Domain, emulatorThreadsCPUSet string, cpuset []int) error {
+	if domain.Spec.IOThreads == nil {
+		return fmt.Errorf("domain is missing IOThreads")
+	}
+
 	iothreads := int(domain.Spec.IOThreads.IOThreads)
 	vcpus := int(CalculateRequestedVCPUs(domain.Spec.CPU.Topology))
 
-	if vmi.IsCPUDedicated() && vmi.Spec.Domain.CPU.IsolateEmulatorThread {
+	switch {
+	case vmi.Spec.Domain.IOThreads != nil && *vmi.Spec.Domain.IOThreads.SupplementalPoolThreadCount > 0:
+		indexEmulatorThread := 0
+		if emulatorThreadsCPUSet != "" {
+			indexEmulatorThread++
+		}
+		for i := 1; i <= int(*vmi.Spec.Domain.IOThreads.SupplementalPoolThreadCount); i++ {
+			// The cpus for the iothreads are additionally allocated and aren't part of the cpu set dedicated to the vcpus threads
+			cpu := vcpus + i + indexEmulatorThread
+			appendDomainIOThreadPin(domain, uint32(i), fmt.Sprintf("%d", cpu))
+		}
+	case vmi.IsCPUDedicated() && vmi.Spec.Domain.CPU.IsolateEmulatorThread:
 		// pin the IOThread on the same pCPU as the emulator thread
 		appendDomainIOThreadPin(domain, uint32(1), emulatorThreadsCPUSet)
-	} else if iothreads >= vcpus {
+	case iothreads >= vcpus:
 		// pin an IOThread on a CPU
 		for thread := 1; thread <= iothreads; thread++ {
 			cpuset := fmt.Sprintf("%d", cpuset[thread%vcpus])
 			appendDomainIOThreadPin(domain, uint32(thread), cpuset)
 		}
-	} else {
+	default:
 		// the following will pin IOThreads to a set of cpus of a balanced size
 		// for example, for 3 threads and 8 cpus the output will look like:
 		// thread cpus
@@ -452,7 +466,7 @@ func AdjustDomainForTopologyAndCPUSet(domain *api.Domain, vmi *v12.VirtualMachin
 			}
 		}
 		disabledSockets := uint32(disabledVCPUs) / (requestedToplogy.Cores * requestedToplogy.Threads)
-		requestedToplogy.Sockets -= uint32(disabledSockets)
+		requestedToplogy.Sockets -= disabledSockets
 	}
 
 	if isNumaPassthrough(vmi) {
@@ -468,7 +482,7 @@ func AdjustDomainForTopologyAndCPUSet(domain *api.Domain, vmi *v12.VirtualMachin
 	domain.Spec.CPUTune = cpuTune
 
 	// Add the hint-dedicated feature when dedicatedCPUs are requested for AMD64 architecture.
-	if util.IsAMD64VMI(vmi) {
+	if isAMD64VMI(vmi) {
 		if domain.Spec.Features == nil {
 			domain.Spec.Features = &api.Features{}
 		}
@@ -609,10 +623,10 @@ func numaMapping(vmi *v12.VirtualMachineInstance, domain *api.DomainSpec, topolo
 	domain.MemoryBacking.Allocation = &api.MemoryAllocation{Mode: api.MemoryAllocationModeImmediate}
 
 	memory, err := QuantityToByte(*GetVirtualMemory(vmi))
-	memoryBytes := memory.Value
 	if err != nil {
 		return fmt.Errorf("could not convert VMI memory to quantity: %v", err)
 	}
+	memoryBytes := memory.Value
 	var mod uint64
 	cellCount := uint64(len(involvedCellIDs))
 	if memoryBytes < cellCount*hugepagesSize {
@@ -620,7 +634,7 @@ func numaMapping(vmi *v12.VirtualMachineInstance, domain *api.DomainSpec, topolo
 	} else if memoryBytes%hugepagesSize != 0 {
 		return fmt.Errorf("requested memory can't be divided through the numa page size: %v mod %v != 0", memory, hugepagesSize)
 	}
-	mod = (memoryBytes % (hugepagesSize * cellCount) / hugepagesSize)
+	mod = memoryBytes % (hugepagesSize * cellCount) / hugepagesSize
 	if mod != 0 {
 		memoryBytes = memoryBytes - mod*hugepagesSize
 	}
@@ -653,7 +667,7 @@ func numaMapping(vmi *v12.VirtualMachineInstance, domain *api.DomainSpec, topolo
 		}
 	}
 
-	if hugepagesEnabled && mod > 0 {
+	if mod > 0 {
 		for i := range domain.CPU.NUMA.Cells[:mod] {
 			domain.CPU.NUMA.Cells[i].Memory += hugepagesSize
 		}
@@ -680,4 +694,8 @@ func hugePagesInfo(vmi *v12.VirtualMachineInstance, domain *api.DomainSpec) (siz
 		}
 	}
 	return 0, "b", false, nil
+}
+
+func isAMD64VMI(vmi *v12.VirtualMachineInstance) bool {
+	return vmi.Spec.Architecture == "amd64"
 }

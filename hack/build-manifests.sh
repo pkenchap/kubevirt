@@ -54,9 +54,6 @@ done
 
 bundle_out_dir=${MANIFESTS_OUT_DIR}/release/olm/bundle
 
-# potentially parse image push log file for getting sha sums of virt images
-source hack/parse-shasums.sh
-
 # then process variables
 args=$(cd ${KUBEVIRT_DIR}/manifests && find . -type f -name "*.yaml.in.tmp")
 for arg in $args; do
@@ -76,32 +73,25 @@ for arg in $args; do
 
     ${templator} \
         --process-vars \
-        --namespace=${namespace} \
-        --cdi-namespace=${cdi_namespace} \
-        --csv-namespace=${csv_namespace} \
-        --container-prefix=${manifest_docker_prefix} \
-        --image-prefix=${image_prefix} \
-        --container-tag=${docker_tag} \
-        --image-pull-policy=${image_pull_policy} \
-        --verbosity=${verbosity} \
-        --csv-version=${csv_version} \
-        --kubevirt-logo-path=${kubevirt_logo_path} \
-        --package-name=${package_name} \
-        --input-file=${infile} \
         --bundle-out-dir=${bundle_out_dir} \
-        --quay-repository=${QUAY_REPOSITORY} \
-        --virt-operator-sha=${VIRT_OPERATOR_SHA} \
-        --virt-api-sha=${VIRT_API_SHA} \
-        --virt-controller-sha=${VIRT_CONTROLLER_SHA} \
-        --virt-handler-sha=${VIRT_HANDLER_SHA} \
-        --virt-launcher-sha=${VIRT_LAUNCHER_SHA} \
-        --virt-exportproxy-sha=${VIRT_EXPORTPROXY_SHA} \
-        --virt-exportserver-sha=${VIRT_EXPORTSERVER_SHA} \
-        --gs-sha=${GS_SHA} \
-        --pr-helper-sha=${PR_HELPER_SHA} \
-        --runbook-url-template=${runbook_url_template} \
+        --cdi-namespace=${cdi_namespace} \
+        --container-prefix=${manifest_docker_prefix} \
+        --container-tag=${docker_tag} \
+        --csv-namespace=${csv_namespace} \
+        --csv-version=${csv_version} \
         --feature-gates=${feature_gates} \
+        --gs-sha=${GS_SHA} \
+        --image-prefix=${image_prefix} \
+        --image-pull-policy=${image_pull_policy} \
         --infra-replicas=${infra_replicas} \
+        --test-image-replicas=${test_image_replicas} \
+        --input-file=${infile} \
+        --kubevirt-logo-path=${kubevirt_logo_path} \
+        --namespace=${namespace} \
+        --package-name=${package_name} \
+        --quay-repository=${QUAY_REPOSITORY} \
+        --runbook-url-template=${runbook_url_template} \
+        --verbosity=${verbosity} \
         >${outfile}
 done
 

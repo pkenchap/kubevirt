@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2021 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -26,9 +26,9 @@ import (
 
 	"k8s.io/client-go/tools/cache"
 
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -38,6 +38,7 @@ import (
 	kubevirtv1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
+	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/rbac"
 	"kubevirt.io/kubevirt/pkg/virt-operator/util"
 )
 
@@ -354,6 +355,32 @@ var _ = Describe("RBAC test", func() {
 			Entry("RoleBindings", roleBindingType),
 			Entry("ClusterRoleBinding", clusterRoleBindingType),
 		)
+
+		It("should not create ServiceMonitor Role when ServiceMonitor is disabled", func() {
+			reconciler.config = util.OperatorConfig{ServiceMonitorEnabled: false}
+
+			role := &rbacv1.Role{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: rbac.MONITOR_SERVICEACCOUNT_NAME,
+				},
+			}
+
+			err := reconciler.createOrUpdateRole(role, version, imageRegistry, id)
+			Expect(err).ShouldNot(HaveOccurred())
+		})
+
+		It("should not create ServiceMonitor RoleBinding when ServiceMonitor is disabled", func() {
+			reconciler.config = util.OperatorConfig{ServiceMonitorEnabled: false}
+
+			roleBinding := &rbacv1.RoleBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: rbac.MONITOR_SERVICEACCOUNT_NAME,
+				},
+			}
+
+			err := reconciler.createOrUpdateRoleBinding(roleBinding, version, imageRegistry, id)
+			Expect(err).ShouldNot(HaveOccurred())
+		})
 
 	})
 })

@@ -13,18 +13,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2018 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
 package types
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
 	k8sv1 "k8s.io/api/core/v1"
-	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
@@ -36,7 +36,15 @@ import (
 	"kubevirt.io/kubevirt/pkg/controller"
 )
 
-const MiB = 1024 * 1024
+const (
+	MiB = 1024 * 1024
+
+	allowClaimAdoptionAnnotation = "cdi.kubevirt.io/allowClaimAdoption"
+
+	// LabelApplyStorageProfile is a label used by the CDI mutating webhook
+	// to modify the PVC according to the storage profile.
+	LabelApplyStorageProfile = "cdi.kubevirt.io/applyStorageProfile"
+)
 
 type PvcNotFoundError struct {
 	Reason string
@@ -81,6 +89,15 @@ func IsReadOnlyAccessMode(accessModes []k8sv1.PersistentVolumeAccessMode) bool {
 		}
 	}
 	return false
+}
+
+func IsReadWriteOnceAccessMode(accessModes []k8sv1.PersistentVolumeAccessMode) bool {
+	for _, accessMode := range accessModes {
+		if accessMode == k8sv1.ReadOnlyMany || accessMode == k8sv1.ReadWriteMany {
+			return false
+		}
+	}
+	return true
 }
 
 func IsPreallocated(annotations map[string]string) bool {
@@ -142,9 +159,31 @@ func VirtVolumesToPVCMap(volumes []*virtv1.Volume, pvcStore cache.Store, namespa
 	return volumeNamesPVCMap, nil
 }
 
-func GetPersistentVolumeClaimFromCache(namespace, name string, pvcInformer cache.SharedInformer) (*k8sv1.PersistentVolumeClaim, error) {
+var ErrPVCNotFound = errors.New("PVC not found")
+
+type PVCNotFoundError struct {
+	PVCName string
+	Err     error
+}
+
+func NewPVCNotFoundError(pvcName string) error {
+	return &PVCNotFoundError{PVCName: pvcName, Err: ErrPVCNotFound}
+}
+
+func (e *PVCNotFoundError) Error() string {
+	if e.PVCName == "" {
+		return "persistent volume claim not defined"
+	}
+	return fmt.Sprintf("the pvc %s doesn't exist", e.PVCName)
+}
+
+func (e *PVCNotFoundError) Unwrap() error {
+	return e.Err
+}
+
+func GetPersistentVolumeClaimFromCache(namespace, name string, pvcStore cache.Store) (*k8sv1.PersistentVolumeClaim, error) {
 	key := controller.NamespacedKey(namespace, name)
-	obj, exists, err := pvcInformer.GetStore().GetByKey(key)
+	obj, exists, err := pvcStore.GetByKey(key)
 
 	if err != nil {
 		return nil, fmt.Errorf("error fetching PersistentVolumeClaim %s: %v", key, err)
@@ -158,17 +197,17 @@ func GetPersistentVolumeClaimFromCache(namespace, name string, pvcInformer cache
 		return nil, fmt.Errorf("error converting object to PersistentVolumeClaim: object is of type %T", obj)
 	}
 
-	return pvc, nil
+	return pvc.DeepCopy(), nil
 }
 
-func HasUnboundPVC(namespace string, volumes []virtv1.Volume, pvcInformer cache.SharedInformer) bool {
+func HasUnboundPVC(namespace string, volumes []virtv1.Volume, pvcStore cache.Store) bool {
 	for _, volume := range volumes {
 		claimName := PVCNameFromVirtVolume(&volume)
 		if claimName == "" {
 			continue
 		}
 
-		pvc, err := GetPersistentVolumeClaimFromCache(namespace, claimName, pvcInformer)
+		pvc, err := GetPersistentVolumeClaimFromCache(namespace, claimName, pvcStore)
 		if err != nil {
 			log.Log.Errorf("Error fetching PersistentVolumeClaim %s while determining virtual machine status: %v", claimName, err)
 			continue
@@ -185,14 +224,14 @@ func HasUnboundPVC(namespace string, volumes []virtv1.Volume, pvcInformer cache.
 	return false
 }
 
-func VolumeReadyToAttachToNode(namespace string, volume virtv1.Volume, dataVolumes []*cdiv1.DataVolume, dataVolumeInformer, pvcInformer cache.SharedInformer) (bool, bool, error) {
+func VolumeReadyToAttachToNode(namespace string, volume virtv1.Volume, dataVolumes []*cdiv1.DataVolume, dataVolumeStore, pvcStore cache.Store) (bool, bool, error) {
 	name := PVCNameFromVirtVolume(&volume)
 
-	dataVolumeFunc := DataVolumeByNameFunc(dataVolumeInformer, dataVolumes)
+	dataVolumeFunc := DataVolumeByNameFunc(dataVolumeStore, dataVolumes)
 	wffc := false
 	ready := false
 	// err is always nil
-	pvcInterface, pvcExists, _ := pvcInformer.GetStore().GetByKey(fmt.Sprintf("%s/%s", namespace, name))
+	pvcInterface, pvcExists, _ := pvcStore.GetByKey(fmt.Sprintf("%s/%s", namespace, name))
 	if pvcExists {
 		var err error
 		pvc := pvcInterface.(*k8sv1.PersistentVolumeClaim)
@@ -222,7 +261,7 @@ func RenderPVC(size *resource.Quantity, claimName, namespace, storageClass, acce
 			Namespace: namespace,
 		},
 		Spec: k8sv1.PersistentVolumeClaimSpec{
-			Resources: k8sv1.ResourceRequirements{
+			Resources: k8sv1.VolumeResourceRequirements{
 				Requests: k8sv1.ResourceList{
 					k8sv1.ResourceStorage: *size,
 				},
@@ -241,9 +280,43 @@ func RenderPVC(size *resource.Quantity, claimName, namespace, storageClass, acce
 	}
 
 	if blockVolume {
-		volMode := v1.PersistentVolumeBlock
+		volMode := k8sv1.PersistentVolumeBlock
 		pvc.Spec.VolumeMode = &volMode
 	}
 
 	return pvc
+}
+
+func GetDisksByName(vmiSpec *virtv1.VirtualMachineInstanceSpec) map[string]*virtv1.Disk {
+	disks := map[string]*virtv1.Disk{}
+	for _, disk := range vmiSpec.Domain.Devices.Disks {
+		disks[disk.Name] = disk.DeepCopy()
+	}
+	return disks
+}
+
+// Get expected disk capacity - a minimum between the request and the PVC capacity.
+// Returns nil when we have insufficient data to calculate this minimum.
+func GetDiskCapacity(pvcInfo *virtv1.PersistentVolumeClaimInfo) *int64 {
+	logger := log.DefaultLogger()
+	storageCapacityResource, ok := pvcInfo.Capacity[k8sv1.ResourceStorage]
+	if !ok {
+		return nil
+	}
+	storageCapacity, ok := storageCapacityResource.AsInt64()
+	if !ok {
+		logger.Infof("Failed to convert storage capacity %+v to int64", storageCapacityResource)
+		return nil
+	}
+	storageRequestResource, ok := pvcInfo.Requests[k8sv1.ResourceStorage]
+	if !ok {
+		return nil
+	}
+	storageRequest, ok := storageRequestResource.AsInt64()
+	if !ok {
+		logger.Infof("Failed to convert storage request %+v to int64", storageRequestResource)
+		return nil
+	}
+	preferredSize := min(storageRequest, storageCapacity)
+	return &preferredSize
 }

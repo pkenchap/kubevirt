@@ -9,6 +9,7 @@ service Cmd {
   rpc UnpauseVirtualMachine(VMIRequest) returns (Response) {}
   rpc FreezeVirtualMachine(FreezeRequest) returns (Response) {}
   rpc UnfreezeVirtualMachine(VMIRequest) returns (Response) {}
+  rpc ResetVirtualMachine(VMIRequest) returns (Response) {}
   rpc SoftRebootVirtualMachine(VMIRequest) returns (Response) {}
   rpc ShutdownVirtualMachine(VMIRequest) returns (Response) {}
   rpc KillVirtualMachine(VMIRequest) returns (Response) {}
@@ -34,6 +35,9 @@ service Cmd {
   rpc GetSEVInfo(EmptyRequest) returns (SEVInfoResponse) {}
   rpc GetLaunchMeasurement(VMIRequest) returns (LaunchMeasurementResponse) {}
   rpc InjectLaunchSecret(InjectLaunchSecretRequest) returns (Response) {}
+  rpc GetDomainDirtyRateStats(EmptyRequest) returns (DirtyRateStatsResponse) {}
+  rpc GetScreenshot(VMIRequest) returns (ScreenshotResponse) {}
+  rpc BackupVirtualMachine(BackupRequest) returns (Response) {}
 }
 
 message QemuVersionResponse {
@@ -100,6 +104,10 @@ message ClusterConfig{
   bool SerialConsoleLogDisabled = 4;
 }
 
+message InterfaceBindingMigration{
+  string Method = 1;
+}
+
 message VirtualMachineOptions {
   SMBios VirtualMachineSMBios = 1;
   uint32 MemBalloonStatsPeriod = 2;
@@ -110,6 +118,7 @@ message VirtualMachineOptions {
   bool ExpandDisksEnabled = 6;
   ClusterConfig clusterConfig = 7;
   map<string, string> interfaceDomainAttachment = 8;
+  map<string, InterfaceBindingMigration> interfaceMigration = 9;
 }
 
 message VMIRequest {
@@ -199,4 +208,20 @@ message LaunchMeasurementResponse {
 message InjectLaunchSecretRequest {
     VMI vmi = 1;
     bytes options = 2;
+}
+
+message DirtyRateStatsResponse {
+  Response response = 1;
+  int64 dirtyRateMbs = 2;
+}
+
+message ScreenshotResponse {
+  Response response = 1;
+  string mime = 2;
+  bytes data = 3;
+}
+
+message BackupRequest {
+  VMI vmi = 1;
+  bytes options = 2;
 }

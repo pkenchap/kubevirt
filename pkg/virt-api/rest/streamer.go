@@ -1,3 +1,22 @@
+/*
+ * This file is part of the KubeVirt project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * Copyright The KubeVirt Authors.
+ *
+ */
+
 package rest
 
 import (
@@ -11,7 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 
 	v1 "kubevirt.io/api/core/v1"
-	"kubevirt.io/client-go/kubecli"
+	kvcorev1 "kubevirt.io/client-go/kubevirt/typed/core/v1"
 	"kubevirt.io/client-go/log"
 
 	"kubevirt.io/kubevirt/pkg/virt-api/definitions"
@@ -60,11 +79,11 @@ func NewWebsocketStreamer(fetch vmiFetcher, validate validator, dial dialer) *St
 		dialer:          NewDirectDialer(fetch, validate, dial),
 		keepAliveClient: keepAliveClientStream,
 		streamToServer: func(clientConn *websocket.Conn, serverConn net.Conn, result chan<- streamFuncResult) {
-			_, err := kubecli.CopyFrom(serverConn, clientConn)
+			_, err := kvcorev1.CopyFrom(serverConn, clientConn)
 			result <- err
 		},
 		streamToClient: func(clientConn *websocket.Conn, serverConn net.Conn, result chan<- streamFuncResult) {
-			_, err := kubecli.CopyTo(clientConn, serverConn)
+			_, err := kvcorev1.CopyTo(clientConn, serverConn)
 			result <- err
 		},
 	}
@@ -114,7 +133,7 @@ func (s *Streamer) Handle(request *restful.Request, response *restful.Response) 
 const streamTimeout = 10 * time.Second
 
 func clientConnectionUpgrade(request *restful.Request, response *restful.Response) (*websocket.Conn, error) {
-	upgrader := kubecli.NewUpgrader()
+	upgrader := kvcorev1.NewUpgrader()
 	upgrader.HandshakeTimeout = streamTimeout
 	clientSocket, err := upgrader.Upgrade(response.ResponseWriter, request.Request, nil)
 	if err != nil {

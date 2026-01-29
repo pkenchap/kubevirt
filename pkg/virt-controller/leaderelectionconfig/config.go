@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2017 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -31,7 +31,7 @@ const (
 	DefaultLeaseDuration = 15 * time.Second
 	DefaultRenewDeadline = 10 * time.Second
 	DefaultRetryPeriod   = 2 * time.Second
-	DefaultEndpointName  = "virt-controller"
+	DefaultLeaseName     = "virt-controller"
 )
 
 func DefaultLeaderElectionConfiguration() Configuration {
@@ -39,7 +39,7 @@ func DefaultLeaderElectionConfiguration() Configuration {
 		LeaseDuration: metav1.Duration{Duration: DefaultLeaseDuration},
 		RenewDeadline: metav1.Duration{Duration: DefaultRenewDeadline},
 		RetryPeriod:   metav1.Duration{Duration: DefaultRetryPeriod},
-		ResourceLock:  resourcelock.EndpointsLeasesResourceLock,
+		ResourceLock:  resourcelock.LeasesResourceLock,
 	}
 }
 

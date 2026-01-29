@@ -13,13 +13,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2018 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
 package admitters
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 
@@ -29,6 +30,7 @@ import (
 
 	v1 "kubevirt.io/api/core/v1"
 
+	storageadmitters "kubevirt.io/kubevirt/pkg/storage/admitters"
 	webhookutils "kubevirt.io/kubevirt/pkg/util/webhooks"
 	"kubevirt.io/kubevirt/pkg/virt-api/webhooks"
 )
@@ -36,7 +38,7 @@ import (
 type VMIPresetAdmitter struct {
 }
 
-func (admitter *VMIPresetAdmitter) Admit(ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
+func (admitter *VMIPresetAdmitter) Admit(_ context.Context, ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 	if !webhookutils.ValidateRequestResource(ar.Request.Resource, webhooks.VirtualMachineInstancePresetGroupVersionResource.Group, webhooks.VirtualMachineInstancePresetGroupVersionResource.Resource) {
 		err := fmt.Errorf("expect resource to be '%s'", webhooks.VirtualMachineInstancePresetGroupVersionResource.Resource)
 		return webhookutils.ToAdmissionResponseError(err)
@@ -75,13 +77,7 @@ func ValidateVMIPresetSpec(field *k8sfield.Path, spec *v1.VirtualMachineInstance
 		})
 	}
 
-	causes = append(causes, validateDomainPresetSpec(field.Child("domain"), spec.Domain)...)
-	return causes
-}
-
-func validateDomainPresetSpec(field *k8sfield.Path, spec *v1.DomainSpec) []metav1.StatusCause {
-	var causes []metav1.StatusCause
-	causes = append(causes, validateDevices(field.Child("devices"), &spec.Devices)...)
-	causes = append(causes, validateFirmware(field.Child("firmware"), spec.Firmware)...)
+	causes = append(causes, storageadmitters.ValidateDisks(field.Child("domain").Child("devices").Child("disks"), spec.Domain.Devices.Disks)...)
+	causes = append(causes, validateFirmware(field.Child("domain").Child("firmware"), spec.Domain.Firmware)...)
 	return causes
 }

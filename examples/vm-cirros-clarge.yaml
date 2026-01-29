@@ -9,7 +9,7 @@ spec:
   instancetype:
     kind: VirtualMachineInstancetype
     name: clarge
-  running: false
+  runStrategy: Halted
   template:
     metadata:
       labels:
@@ -23,6 +23,8 @@ spec:
           - disk:
               bus: virtio
             name: cloudinitdisk
+        memory:
+          guest: 128Mi
         resources: {}
       terminationGracePeriodSeconds: 0
       volumes:

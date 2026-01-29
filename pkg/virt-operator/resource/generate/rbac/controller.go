@@ -13,9 +13,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2018 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
+
 package rbac
 
 import (
@@ -314,10 +315,17 @@ func newControllerClusterRole() *rbacv1.ClusterRole {
 					"snapshot.kubevirt.io",
 				},
 				Resources: []string{
-					"*",
+					"virtualmachinesnapshots",
+					"virtualmachinesnapshots/status",
+					"virtualmachinesnapshots/finalizers",
+					"virtualmachinesnapshotcontents",
+					"virtualmachinesnapshotcontents/status",
+					"virtualmachinesnapshotcontents/finalizers",
+					"virtualmachinerestores",
+					"virtualmachinerestores/status",
 				},
 				Verbs: []string{
-					"*",
+					"get", "list", "watch", "create", "update", "delete", "patch",
 				},
 			},
 			{
@@ -325,10 +333,37 @@ func newControllerClusterRole() *rbacv1.ClusterRole {
 					"export.kubevirt.io",
 				},
 				Resources: []string{
-					"*",
+					"virtualmachineexports",
+					"virtualmachineexports/status",
+					"virtualmachineexports/finalizers",
 				},
 				Verbs: []string{
-					"*",
+					"get", "list", "watch", "create", "update", "delete", "patch",
+				},
+			},
+			{
+				APIGroups: []string{
+					"backup.kubevirt.io",
+				},
+				Resources: []string{
+					"virtualmachinebackups",
+					"virtualmachinebackups/status",
+					"virtualmachinebackups/finalizers",
+				},
+				Verbs: []string{
+					"get", "list", "watch", "create", "update", "delete", "patch",
+				},
+			},
+			{
+				APIGroups: []string{
+					"backup.kubevirt.io",
+				},
+				Resources: []string{
+					"virtualmachinebackuptrackers",
+					"virtualmachinebackuptrackers/status",
+				},
+				Verbs: []string{
+					"get", "list", "watch", "create", "update", "delete", "patch",
 				},
 			},
 			{
@@ -363,15 +398,31 @@ func newControllerClusterRole() *rbacv1.ClusterRole {
 					"*",
 				},
 			},
+			// Implied by asterisk but prefer adding explicitly since it's crucial for OwnerReferencesPermissionEnforcement
+			{
+				APIGroups: []string{
+					"kubevirt.io",
+				},
+				Resources: []string{
+					"virtualmachines/finalizers",
+					"virtualmachineinstances/finalizers",
+				},
+				Verbs: []string{
+					"update",
+				},
+			},
 			{
 				APIGroups: []string{
 					"subresources.kubevirt.io",
 				},
 				Resources: []string{
+					"virtualmachines/stop",
 					"virtualmachineinstances/addvolume",
 					"virtualmachineinstances/removevolume",
+					"virtualmachineinstances/backup",
 					"virtualmachineinstances/freeze",
 					"virtualmachineinstances/unfreeze",
+					"virtualmachineinstances/reset",
 					"virtualmachineinstances/softreboot",
 					"virtualmachineinstances/sev/setupsession",
 					"virtualmachineinstances/sev/injectlaunchsecret",
@@ -525,6 +576,33 @@ func newControllerClusterRole() *rbacv1.ClusterRole {
 				Verbs: []string{
 					"list",
 					"watch",
+				},
+			},
+			{
+				APIGroups: []string{
+					"batch",
+				},
+				Resources: []string{
+					"jobs",
+				},
+				Verbs: []string{
+					"create",
+					"get",
+					"delete",
+				},
+			},
+			{
+				APIGroups: []string{
+					"resource.k8s.io",
+				},
+				Resources: []string{
+					"resourceslices",
+					"resourceclaims",
+				},
+				Verbs: []string{
+					"list",
+					"watch",
+					"get",
 				},
 			},
 		},

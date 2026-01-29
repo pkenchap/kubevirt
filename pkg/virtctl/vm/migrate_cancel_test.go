@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2023 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -22,15 +22,16 @@ package vm_test
 import (
 	"fmt"
 
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
 
 	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
-	"kubevirt.io/kubevirt/tests/clientcmd"
+	"kubevirt.io/kubevirt/pkg/virtctl/testing"
 )
 
 var _ = Describe("Migrate cancel command", func() {
@@ -54,14 +55,14 @@ var _ = Describe("Migrate cancel command", func() {
 	})
 
 	It("should fail with missing input parameters", func() {
-		cmd := clientcmd.NewRepeatableVirtctlCommand("migrate-cancel")
+		cmd := testing.NewRepeatableVirtctlCommand("migrate-cancel")
 		err := cmd()
 		Expect(err).To(HaveOccurred())
-		Expect(err).Should(MatchError("argument validation failed"))
+		Expect(err).Should(MatchError("accepts 1 arg(s), received 0"))
 	})
 
 	It("should cancel the vm migration", func() {
-		cmd := clientcmd.NewRepeatableVirtctlCommand("migrate-cancel", vm.Name)
+		cmd := testing.NewRepeatableVirtctlCommand("migrate-cancel", vm.Name)
 
 		vmiMigration.Status.Phase = v1.MigrationRunning
 		migList := v1.VirtualMachineInstanceMigrationList{
@@ -74,14 +75,14 @@ var _ = Describe("Migrate cancel command", func() {
 			VirtualMachineInstanceMigration(k8smetav1.NamespaceDefault).
 			Return(migrationInterface).Times(2)
 
-		migrationInterface.EXPECT().List(&listoptions).Return(&migList, nil).Times(1)
-		migrationInterface.EXPECT().Delete(vmiMigration.Name, &k8smetav1.DeleteOptions{}).Return(nil).Times(1)
+		migrationInterface.EXPECT().List(gomock.Any(), listoptions).Return(&migList, nil).Times(1)
+		migrationInterface.EXPECT().Delete(gomock.Any(), vmiMigration.Name, k8smetav1.DeleteOptions{}).Return(nil).Times(1)
 
 		Expect(cmd()).To(Succeed())
 	})
 
 	It("Should fail if no active migration is found", func() {
-		cmd := clientcmd.NewRepeatableVirtctlCommand("migrate-cancel", vm.Name)
+		cmd := testing.NewRepeatableVirtctlCommand("migrate-cancel", vm.Name)
 
 		vmiMigration.Status.Phase = v1.MigrationSucceeded
 		migList := v1.VirtualMachineInstanceMigrationList{
@@ -94,7 +95,7 @@ var _ = Describe("Migrate cancel command", func() {
 			VirtualMachineInstanceMigration(k8smetav1.NamespaceDefault).
 			Return(migrationInterface).Times(1)
 
-		migrationInterface.EXPECT().List(&listoptions).Return(&migList, nil).Times(1)
+		migrationInterface.EXPECT().List(gomock.Any(), listoptions).Return(&migList, nil).Times(1)
 
 		err := cmd()
 		Expect(err).To(HaveOccurred())

@@ -3,7 +3,7 @@ package services
 import (
 	"fmt"
 
-	"k8s.io/utils/pointer"
+	"kubevirt.io/kubevirt/pkg/pointer"
 
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -23,11 +23,11 @@ func generateSerialConsoleLogContainer(vmi *v1.VirtualMachineInstance, image str
 		guestConsoleLog := &k8sv1.Container{
 			Name:            "guest-console-log",
 			Image:           image,
-			ImagePullPolicy: k8sv1.PullIfNotPresent,
+			ImagePullPolicy: config.GetImagePullPolicy(),
 			Command:         []string{"/usr/bin/virt-tail"},
 			Args:            []string{"--logfile", logFile},
 			VolumeMounts: []k8sv1.VolumeMount{
-				k8sv1.VolumeMount{
+				{
 					Name:      "private",
 					MountPath: util.VirtPrivateDir,
 					ReadOnly:  true,
@@ -35,13 +35,14 @@ func generateSerialConsoleLogContainer(vmi *v1.VirtualMachineInstance, image str
 			},
 			Resources: resources,
 			SecurityContext: &k8sv1.SecurityContext{
-				RunAsUser:                pointer.Int64(util.NonRootUID),
-				RunAsNonRoot:             pointer.Bool(true),
-				AllowPrivilegeEscalation: pointer.Bool(false),
+				RunAsUser:                pointer.P(int64(util.NonRootUID)),
+				RunAsNonRoot:             pointer.P(true),
+				AllowPrivilegeEscalation: pointer.P(false),
 				Capabilities: &k8sv1.Capabilities{
 					Drop: []k8sv1.Capability{"ALL"},
 				},
 			},
+			RestartPolicy: pointer.P(k8sv1.ContainerRestartPolicyAlways),
 		}
 
 		guestConsoleLog.Env = append(guestConsoleLog.Env, k8sv1.EnvVar{Name: ENV_VAR_VIRT_LAUNCHER_LOG_VERBOSITY, Value: fmt.Sprint(virtLauncherLogVerbosity)})

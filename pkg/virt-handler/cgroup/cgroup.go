@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2019 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -34,7 +34,7 @@ import (
 
 	v1 "kubevirt.io/api/core/v1"
 
-	virtutil "kubevirt.io/kubevirt/pkg/util"
+	cgroupconsts "kubevirt.io/kubevirt/pkg/virt-handler/cgroup/constants"
 	"kubevirt.io/kubevirt/pkg/virt-handler/isolation"
 )
 
@@ -96,14 +96,14 @@ func newManagerFromPid(pid int, deviceRules []*devices.Rule) (manager Manager, e
 	const isRootless = false
 	var version CgroupVersion
 
-	procCgroupBasePath := filepath.Join(procMountPoint, strconv.Itoa(pid), cgroupStr)
+	procCgroupBasePath := filepath.Join(cgroupconsts.ProcMountPoint, strconv.Itoa(pid), cgroupconsts.CgroupStr)
 	controllerPaths, err := runc_cgroups.ParseCgroupFile(procCgroupBasePath)
 	if err != nil {
 		return nil, fmt.Errorf("cannot initialize new cgroup manager. err: %v", err)
 	}
 
 	config := &configs.Cgroup{
-		Path: HostCgroupBasePath,
+		Path: cgroupconsts.HostCgroupBasePath,
 		Resources: &configs.Resources{
 			Devices: deviceRules,
 		},
@@ -112,7 +112,7 @@ func newManagerFromPid(pid int, deviceRules []*devices.Rule) (manager Manager, e
 
 	if runc_cgroups.IsCgroup2UnifiedMode() {
 		version = V2
-		slicePath := filepath.Join(cgroupBasePath, controllerPaths[""])
+		slicePath := filepath.Join(cgroupconsts.CgroupBasePath, controllerPaths[""])
 		slicePath = managerPath(slicePath)
 		manager, err = newV2Manager(config, slicePath)
 	} else {
@@ -137,13 +137,13 @@ func newManagerFromPid(pid int, deviceRules []*devices.Rule) (manager Manager, e
 	return manager, err
 }
 
-func NewManagerFromVM(vmi *v1.VirtualMachineInstance) (Manager, error) {
-	isolationRes, err := detectVMIsolation(vmi, "")
+func NewManagerFromVM(vmi *v1.VirtualMachineInstance, host string) (Manager, error) {
+	isolationRes, err := detectVMIsolation(vmi)
 	if err != nil {
 		return nil, err
 	}
 
-	vmiDeviceRules, err := generateDeviceRulesForVMI(vmi, isolationRes)
+	vmiDeviceRules, err := generateDeviceRulesForVMI(vmi, isolationRes, host)
 	if err != nil {
 		return nil, err
 	}
@@ -154,9 +154,9 @@ func NewManagerFromVM(vmi *v1.VirtualMachineInstance) (Manager, error) {
 // GetGlobalCpuSetPath returns the CPU set of the main cgroup slice
 func GetGlobalCpuSetPath() string {
 	if runc_cgroups.IsCgroup2UnifiedMode() {
-		return filepath.Join(cgroupBasePath, "cpuset.cpus.effective")
+		return filepath.Join(cgroupconsts.CgroupBasePath, "cpuset.cpus.effective")
 	}
-	return filepath.Join(cgroupBasePath, "cpuset", "cpuset.cpus")
+	return filepath.Join(cgroupconsts.CgroupBasePath, "cpuset", "cpuset.cpus")
 }
 
 func getCpuSetPath(manager Manager, cpusetFile string) (string, error) {
@@ -176,15 +176,11 @@ func getCpuSetPath(manager Manager, cpusetFile string) (string, error) {
 
 // detectVMIsolation detects VM's IsolationResult, which can then be useful for receiving information such as PID.
 // Socket is optional and makes the execution faster
-func detectVMIsolation(vm *v1.VirtualMachineInstance, socket string) (isolationRes isolation.IsolationResult, err error) {
+func detectVMIsolation(vm *v1.VirtualMachineInstance) (isolationRes isolation.IsolationResult, err error) {
 	const detectionErrFormat = "cannot detect vm \"%s\", err: %v"
-	detector := isolation.NewSocketBasedIsolationDetector(virtutil.VirtShareDir)
+	detector := isolation.NewSocketBasedIsolationDetector()
 
-	if socket == "" {
-		isolationRes, err = detector.Detect(vm)
-	} else {
-		isolationRes, err = detector.DetectForSocket(vm, socket)
-	}
+	isolationRes, err = detector.Detect(vm)
 
 	if err != nil {
 		return nil, fmt.Errorf(detectionErrFormat, vm.Name, err)

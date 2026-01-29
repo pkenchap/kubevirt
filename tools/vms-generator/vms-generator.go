@@ -37,7 +37,9 @@ import (
 
 	v1 "kubevirt.io/api/core/v1"
 	instancetypev1beta1 "kubevirt.io/api/instancetype/v1beta1"
-	poolv1 "kubevirt.io/api/pool/v1alpha1"
+	poolv1 "kubevirt.io/api/pool/v1beta1"
+
+	resourcev1 "k8s.io/api/resource/v1"
 
 	"kubevirt.io/kubevirt/pkg/testutils"
 	validating_webhook "kubevirt.io/kubevirt/pkg/virt-api/webhooks/validating-webhook/admitters"
@@ -53,10 +55,10 @@ func main() {
 
 	config, _, _ := testutils.NewFakeClusterConfigUsingKVConfig(&v1.KubeVirtConfiguration{
 		DeveloperConfiguration: &v1.DeveloperConfiguration{
-			FeatureGates: []string{"DataVolumes", "LiveMigration", "SRIOV", "GPU", "HostDisk", "Macvtap", "HostDevices"},
+			FeatureGates: []string{"DataVolumes", "LiveMigration", "SRIOV", "GPU", "HostDisk", "Macvtap", "HostDevices", "Sidecar", "GPUsWithDRA"},
 		},
 		NetworkConfiguration: &v1.NetworkConfiguration{
-			PermitSlirpInterface:              &permit,
+			DeprecatedPermitSlirpInterface:    &permit,
 			PermitBridgeInterfaceOnPodNetwork: &permit,
 		},
 		PermittedHostDevices: &v1.PermittedHostDevices{
@@ -95,6 +97,7 @@ func main() {
 		utils.VmAlpineDataVolume:                                  utils.GetVMDataVolume(),
 		utils.VMPriorityClass:                                     utils.GetVMPriorityClass(),
 		utils.VmCirrosSata:                                        utils.GetVMCirrosSata(),
+		utils.VmCirrosWithHookSidecarConfigMap:                    utils.GetVMCirrosWithHookSidecarConfigMap(),
 		utils.VmCirrosInstancetypeComputeSmall:                    utils.GetVmCirrosInstancetypeComputeSmall(),
 		utils.VmCirrosClusterInstancetypeComputeSmall:             utils.GetVmCirrosClusterInstancetypeComputeSmall(),
 		utils.VmCirrosInstancetypeComputeLarge:                    utils.GetVmCirrosInstancetypeComputeLarge(),
@@ -114,7 +117,6 @@ func main() {
 		utils.VmiNoCloud:                  utils.GetVMINoCloud(),
 		utils.VmiPVC:                      utils.GetVMIPvc(),
 		utils.VmiWindows:                  utils.GetVMIWindows(),
-		utils.VmiSlirp:                    utils.GetVMISlirp(),
 		utils.VmiSRIOV:                    utils.GetVMISRIOV(),
 		utils.VmiWithHookSidecar:          utils.GetVMIWithHookSidecar(),
 		utils.VmiWithHookSidecarConfigMap: utils.GetVmiWithHookSidecarConfigMap(),
@@ -123,10 +125,10 @@ func main() {
 		utils.VmiMasquerade:               utils.GetVMIMasquerade(),
 		utils.VmiHostDisk:                 utils.GetVMIHostDisk(),
 		utils.VmiGPU:                      utils.GetVMIGPU(),
-		utils.VmiMacvtap:                  utils.GetVMIMacvtap(),
 		utils.VmiKernelBoot:               utils.GetVMIKernelBoot(),
 		utils.VmiARM:                      utils.GetVMIARM(),
 		utils.VmiUSB:                      utils.GetVMIUSB(),
+		utils.VmiDRAGPU:                   utils.GetVMIDRAGPU(),
 	}
 
 	var vmireplicasets = map[string]*v1.VirtualMachineInstanceReplicaSet{
@@ -145,14 +147,12 @@ func main() {
 		utils.VmiMigration: utils.GetVMIMigration(),
 	}
 
-	var templates = map[string]*utils.Template{
-		utils.VmTemplateFedora:  utils.GetTemplateFedora(),
-		utils.VmTemplateRHEL7:   utils.GetTemplateRHEL7(),
-		utils.VmTemplateWindows: utils.GetTemplateWindows(),
-	}
-
 	var migrationPolicies = map[string]*v1alpha1.MigrationPolicy{
 		utils.MigrationPolicyName: utils.GetMigrationPolicy(),
+	}
+
+	var resourceClaimTemplates = map[string]*resourcev1.ResourceClaimTemplate{
+		utils.ResourceClaimTemplatePGPU: utils.GetResourceClaimTemplatePGPU(),
 	}
 
 	handleError := func(err error) {
@@ -190,7 +190,7 @@ func main() {
 
 	// Having no generics is lots of fun
 	for name, obj := range vms {
-		causes := validating_webhook.ValidateVirtualMachineSpec(k8sfield.NewPath("spec"), &obj.Spec, config, "user-account")
+		causes := validating_webhook.ValidateVirtualMachineSpec(k8sfield.NewPath("spec"), &obj.Spec, config, false)
 		handleCauses(causes, name, "vm")
 		handleError(dumpObject(name, *obj))
 	}
@@ -229,7 +229,7 @@ func main() {
 				Operation: admissionv1.Create,
 			},
 		}
-		causes := validating_webhook.ValidateVMPoolSpec(ar, k8sfield.NewPath("spec"), obj, config)
+		causes := validating_webhook.ValidateVMPoolSpec(ar, k8sfield.NewPath("spec"), obj, config, false)
 		handleCauses(causes, name, "vm pool")
 		handleError(dumpObject(name, *obj))
 	}
@@ -246,16 +246,15 @@ func main() {
 		handleError(dumpObject(name, *obj))
 	}
 
-	// TODO:(ihar) how to validate templates?
-	for name, obj := range templates {
-		handleError(dumpObject(name, *obj))
-	}
-
 	for name, obj := range priorityClasses {
 		handleError(dumpObject(name, *obj))
 	}
 
 	for name, obj := range migrationPolicies {
+		handleError(dumpObject(name, *obj))
+	}
+
+	for name, obj := range resourceClaimTemplates {
 		handleError(dumpObject(name, *obj))
 	}
 }

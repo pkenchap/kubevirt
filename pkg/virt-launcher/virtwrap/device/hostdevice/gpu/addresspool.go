@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2021 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -44,7 +44,7 @@ func extractResources(gpuDevices []v1.GPU) []string {
 	}
 
 	var resources []string
-	for resource, _ := range resourceSet {
+	for resource := range resourceSet {
 		resources = append(resources, resource)
 	}
 	return resources

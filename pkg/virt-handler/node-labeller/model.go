@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2021 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  */
 
 package nodelabeller
@@ -24,22 +24,24 @@ type supportedFeatures struct {
 	items []string
 }
 
+type supportedModels struct {
+	usableModels []string
+	knownModels  []string
+}
+
 type hostCPUModel struct {
 	Name             string
 	fallback         string
 	requiredFeatures cpuFeatures
 }
 
-// hostCapabilities holds informations which provides libvirt,
-// so we don't have to call libvirt at every request
-type cpuInfo struct {
-	usableModels map[string]cpuFeatures
-}
-
 // HostDomCapabilities represents structure for parsing output of virsh capabilities
 type HostDomCapabilities struct {
-	CPU CPU              `xml:"cpu"`
-	SEV SEVConfiguration `xml:"features>sev"`
+	CPU             CPU                          `xml:"cpu"`
+	SEV             SEVConfiguration             `xml:"features>sev"`
+	SecureExecution SecureExecutionConfiguration `xml:"features>s390-pv"`
+	TDX             TDXConfiguration             `xml:"features>tdx"`
+	LaunchSecurity  LaunchSecurityConfiguration  `xml:"features>launchSecurity"`
 }
 
 // CPU represents slice of cpu modes
@@ -97,4 +99,22 @@ type SEVConfiguration struct {
 	MaxGuests       uint   `xml:"maxGuests"`
 	MaxESGuests     uint   `xml:"maxESGuests"`
 	SupportedES     string `xml:"-"`
+	SupportedSNP    string `xml:"-"`
+}
+type SecureExecutionConfiguration struct {
+	Supported string `xml:"supported,attr"`
+}
+
+type TDXConfiguration struct {
+	Supported string `xml:"supported,attr"`
+}
+
+type LaunchSecurityConfiguration struct {
+	Supported string      `xml:"supported,attr"`
+	SecTypes  SecTypeEnum `xml:"enum"`
+}
+
+type SecTypeEnum struct {
+	Name   string   `xml:"name,attr"`
+	Values []string `xml:"value"`
 }

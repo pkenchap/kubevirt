@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2018 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -234,9 +234,7 @@ func sortRoutes(routes []netlink.Route) []netlink.Route {
 		}
 		sortedRoutes = append(sortedRoutes, route)
 	}
-	for _, defaultRoute := range defaultRoutes {
-		sortedRoutes = append(sortedRoutes, defaultRoute)
-	}
+	sortedRoutes = append(sortedRoutes, defaultRoutes...)
 
 	return sortedRoutes
 }

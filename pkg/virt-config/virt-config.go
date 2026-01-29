@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2017, 2018 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -24,14 +24,14 @@ package virtconfig
 */
 
 import (
-	"fmt"
-
 	"kubevirt.io/client-go/log"
 
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	v1 "kubevirt.io/api/core/v1"
+
+	"kubevirt.io/kubevirt/pkg/virt-config/featuregate"
 )
 
 const (
@@ -41,15 +41,16 @@ const (
 	MigrationAllowAutoConverge               bool   = false
 	MigrationAllowPostCopy                   bool   = false
 	MigrationProgressTimeout                 int64  = 150
-	MigrationCompletionTimeoutPerGiB         int64  = 800
+	MigrationCompletionTimeoutPerGiB         int64  = 150
+	MigrationUtilityVolumesTimeoutSeconds    int64  = 150
 	DefaultAMD64MachineType                         = "q35"
-	DefaultPPC64LEMachineType                       = "pseries"
 	DefaultAARCH64MachineType                       = "virt"
+	DefaultS390XMachineType                         = "s390-ccw-virtio"
 	DefaultCPURequest                               = "100m"
 	DefaultMemoryOvercommit                         = 100
 	DefaultAMD64EmulatedMachines                    = "q35*,pc-q35*"
-	DefaultPPC64LEEmulatedMachines                  = "pseries*"
 	DefaultAARCH64EmulatedMachines                  = "virt*"
+	DefaultS390XEmulatedMachines                    = "s390-ccw-virtio*"
 	DefaultLessPVCSpaceToleration                   = 10
 	DefaultMinimumReservePVCBytes                   = 131072
 	DefaultNodeSelectors                            = ""
@@ -66,9 +67,10 @@ const (
 	SupportedGuestAgentVersions                     = "2.*,3.*,4.*,5.*"
 	DefaultARCHOVMFPath                             = "/usr/share/OVMF"
 	DefaultAARCH64OVMFPath                          = "/usr/share/AAVMF"
+	DefaultS390xOVMFPath                            = ""
 	DefaultMemBalloonStatsPeriod             uint32 = 10
 	DefaultCPUAllocationRatio                       = 10
-	DefaultDiskVerificationMemoryLimitMBytes        = 2000
+	DefaultDiskVerificationMemoryLimitBytes         = 2000 * 1024 * 1024
 	DefaultVirtAPILogVerbosity                      = 2
 	DefaultVirtControllerLogVerbosity               = 2
 	DefaultVirtHandlerLogVerbosity                  = 2
@@ -76,37 +78,23 @@ const (
 	DefaultVirtOperatorLogVerbosity                 = 2
 
 	// Default REST configuration settings
-	DefaultVirtHandlerQPS         float32 = 5
-	DefaultVirtHandlerBurst               = 10
+	DefaultVirtHandlerQPS         float32 = 50
+	DefaultVirtHandlerBurst               = 100
 	DefaultVirtControllerQPS      float32 = 200
 	DefaultVirtControllerBurst            = 400
-	DefaultVirtAPIQPS             float32 = 5
-	DefaultVirtAPIBurst                   = 10
+	DefaultVirtOperatorQPS        float32 = 200
+	DefaultVirtOperatorBurst              = 400
+	DefaultVirtAPIQPS             float32 = 200
+	DefaultVirtAPIBurst                   = 400
 	DefaultVirtWebhookClientQPS           = 200
 	DefaultVirtWebhookClientBurst         = 400
 
-	DefaultMaxHotplugRatio = 4
+	DefaultMaxHotplugRatio   = 4
+	DefaultVMRolloutStrategy = v1.VMRolloutStrategyLiveUpdate
 )
 
-func IsAMD64(arch string) bool {
-	if arch == "amd64" {
-		return true
-	}
-	return false
-}
-
 func IsARM64(arch string) bool {
-	if arch == "arm64" {
-		return true
-	}
-	return false
-}
-
-func IsPPC64(arch string) bool {
-	if arch == "ppc64le" {
-		return true
-	}
-	return false
+	return arch == "arm64"
 }
 
 func (c *ClusterConfig) GetMemBalloonStatsPeriod() uint32 {
@@ -118,7 +106,17 @@ func (c *ClusterConfig) AllowEmulation() bool {
 }
 
 func (c *ClusterConfig) GetMigrationConfiguration() *v1.MigrationConfiguration {
-	return c.GetConfig().MigrationConfiguration
+	migrationConfig := c.GetConfig().MigrationConfiguration
+	// For backward compatibility, AllowWorkloadDisruption will follow the
+	// value of AllowPostCopy, if not explicitly set
+	if migrationConfig.AllowWorkloadDisruption == nil {
+		allowPostCopy := false
+		if migrationConfig.AllowPostCopy != nil {
+			allowPostCopy = *migrationConfig.AllowPostCopy
+		}
+		migrationConfig.AllowWorkloadDisruption = &allowPostCopy
+	}
+	return migrationConfig
 }
 
 func (c *ClusterConfig) GetImagePullPolicy() (policy k8sv1.PullPolicy) {
@@ -139,8 +137,8 @@ func (c *ClusterConfig) GetMachineType(arch string) string {
 	switch arch {
 	case "arm64":
 		return c.GetConfig().ArchitectureConfiguration.Arm64.MachineType
-	case "ppc64le":
-		return c.GetConfig().ArchitectureConfiguration.Ppc64le.MachineType
+	case "s390x":
+		return c.GetConfig().ArchitectureConfiguration.S390x.MachineType
 	default:
 		return c.GetConfig().ArchitectureConfiguration.Amd64.MachineType
 	}
@@ -163,11 +161,16 @@ func (c *ClusterConfig) GetMemoryOvercommit() int {
 }
 
 func (c *ClusterConfig) GetEmulatedMachines(arch string) []string {
+	oldEmulatedMachines := c.GetConfig().EmulatedMachines
+	if oldEmulatedMachines != nil {
+		return oldEmulatedMachines
+	}
+
 	switch arch {
 	case "arm64":
 		return c.GetConfig().ArchitectureConfiguration.Arm64.EmulatedMachines
-	case "ppc64le":
-		return c.GetConfig().ArchitectureConfiguration.Ppc64le.EmulatedMachines
+	case "s390x":
+		return c.GetConfig().ArchitectureConfiguration.S390x.EmulatedMachines
 	default:
 		return c.GetConfig().ArchitectureConfiguration.Amd64.EmulatedMachines
 	}
@@ -191,40 +194,6 @@ func (c *ClusterConfig) GetDefaultNetworkInterface() string {
 
 func (c *ClusterConfig) GetDefaultArchitecture() string {
 	return c.GetConfig().ArchitectureConfiguration.DefaultArchitecture
-}
-
-func (c *ClusterConfig) SetVMISpecDefaultNetworkInterface(spec *v1.VirtualMachineInstanceSpec) error {
-	autoAttach := spec.Domain.Devices.AutoattachPodInterface
-	if autoAttach != nil && *autoAttach == false {
-		return nil
-	}
-
-	// Override only when nothing is specified
-	if len(spec.Networks) == 0 && len(spec.Domain.Devices.Interfaces) == 0 {
-		iface := v1.NetworkInterfaceType(c.GetDefaultNetworkInterface())
-		switch iface {
-		case v1.BridgeInterface:
-			if !c.IsBridgeInterfaceOnPodNetworkEnabled() {
-				return fmt.Errorf("Bridge interface is not enabled in kubevirt-config")
-			}
-			spec.Domain.Devices.Interfaces = []v1.Interface{*v1.DefaultBridgeNetworkInterface()}
-		case v1.MasqueradeInterface:
-			spec.Domain.Devices.Interfaces = []v1.Interface{*v1.DefaultMasqueradeNetworkInterface()}
-		case v1.SlirpInterface:
-			if !c.IsSlirpInterfaceEnabled() {
-				return fmt.Errorf("Slirp interface is not enabled in kubevirt-config")
-			}
-			defaultIface := v1.DefaultSlirpNetworkInterface()
-			spec.Domain.Devices.Interfaces = []v1.Interface{*defaultIface}
-		}
-
-		spec.Networks = []v1.Network{*v1.DefaultPodNetwork()}
-	}
-	return nil
-}
-
-func (c *ClusterConfig) IsSlirpInterfaceEnabled() bool {
-	return *c.GetConfig().NetworkConfiguration.PermitSlirpInterface
 }
 
 func (c *ClusterConfig) GetSMBIOS() *v1.SMBiosConfiguration {
@@ -252,11 +221,16 @@ func (c *ClusterConfig) GetSupportedAgentVersions() []string {
 }
 
 func (c *ClusterConfig) GetOVMFPath(arch string) string {
+	oldOvmfPath := c.GetConfig().OVMFPath
+	if oldOvmfPath != "" {
+		return oldOvmfPath
+	}
+
 	switch arch {
 	case "arm64":
 		return c.GetConfig().ArchitectureConfiguration.Arm64.OVMFPath
-	case "ppc64le":
-		return c.GetConfig().ArchitectureConfiguration.Ppc64le.OVMFPath
+	case "s390x":
+		return c.GetConfig().ArchitectureConfiguration.S390x.OVMFPath
 	default:
 		return c.GetConfig().ArchitectureConfiguration.Amd64.OVMFPath
 	}
@@ -330,7 +304,7 @@ func (c *ClusterConfig) GetDesiredMDEVTypes(node *k8sv1.Node) []string {
 		}
 		if len(mdevTypesMap) != 0 {
 			mdevTypesList := []string{}
-			for mdevType, _ := range mdevTypesMap {
+			for mdevType := range mdevTypesMap {
 				mdevTypesList = append(mdevTypesList, mdevType)
 			}
 			return mdevTypesList
@@ -351,6 +325,7 @@ const (
 	virtController
 	virtOperator
 	virtLauncher
+	virtSynchronizationController
 )
 
 // Gets the component verbosity. nodeName can be empty, then it's ignored.
@@ -374,6 +349,8 @@ func (c *ClusterConfig) getComponentVerbosity(component virtComponent, nodeName 
 		return logConf.VirtOperator
 	case virtLauncher:
 		return logConf.VirtLauncher
+	case virtSynchronizationController:
+		return logConf.VirtSynchronizationController
 	default:
 		log.Log.Errorf("getComponentVerbosity called with an unknown virtComponent: %v", component)
 		return 0
@@ -400,9 +377,8 @@ func (c *ClusterConfig) GetVirtLauncherVerbosity() uint {
 	return c.getComponentVerbosity(virtLauncher, "")
 }
 
-// GetMinCPUModel return minimal cpu which is used in node-labeller
-func (c *ClusterConfig) GetMinCPUModel() string {
-	return c.GetConfig().MinCPUModel
+func (c *ClusterConfig) GetVirtSynchronizationControllerVerbosity() uint {
+	return c.getComponentVerbosity(virtSynchronizationController, "")
 }
 
 // GetObsoleteCPUModels return slice of obsolete cpus which are used in node-labeller
@@ -468,10 +444,67 @@ func (c *ClusterConfig) GetMaxHotplugRatio() uint32 {
 	return liveConfig.MaxHotplugRatio
 }
 
+func (c *ClusterConfig) IsVMRolloutStrategyLiveUpdate() bool {
+	liveConfig := c.GetConfig().VMRolloutStrategy
+	return liveConfig == nil || *liveConfig == v1.VMRolloutStrategyLiveUpdate
+}
+
 func (c *ClusterConfig) GetNetworkBindings() map[string]v1.InterfaceBindingPlugin {
 	networkConfig := c.GetConfig().NetworkConfiguration
 	if networkConfig != nil {
 		return networkConfig.Binding
 	}
 	return nil
+}
+
+func (config *ClusterConfig) VGADisplayForEFIGuestsEnabled() bool {
+	VGADisplayForEFIGuestsAnnotationExists := false
+	kv := config.GetConfigFromKubeVirtCR()
+	if kv != nil {
+		_, VGADisplayForEFIGuestsAnnotationExists = kv.Annotations[v1.VGADisplayForEFIGuestsX86Annotation]
+	}
+	return VGADisplayForEFIGuestsAnnotationExists
+}
+
+func (c *ClusterConfig) GetInstancetypeReferencePolicy() v1.InstancetypeReferencePolicy {
+	instancetypeConfig := c.GetConfig().Instancetype
+	if instancetypeConfig != nil && instancetypeConfig.ReferencePolicy != nil {
+		return *instancetypeConfig.ReferencePolicy
+	}
+	// Default to the Reference InstancetypeReferencePolicy
+	return v1.Reference
+}
+
+func (c *ClusterConfig) ClusterProfilerEnabled() bool {
+	return c.GetConfig().DeveloperConfiguration.ClusterProfiler ||
+		c.isFeatureGateDefined(featuregate.ClusterProfiler)
+}
+
+func (c *ClusterConfig) MediatedDevicesHandlingDisabled() bool {
+	mdevConfig := c.GetConfig().MediatedDevicesConfiguration
+	if mdevConfig != nil && mdevConfig.Enabled != nil {
+		return !*mdevConfig.Enabled
+	}
+	return c.isFeatureGateEnabled(featuregate.DisableMediatedDevicesHandling)
+}
+
+func (c *ClusterConfig) GetHypervisor() *v1.HypervisorConfiguration {
+	return GetHypervisorFromKvConfig(c.GetConfig(), c.ConfigurableHypervisorEnabled())
+}
+
+// At the moment, we are restricting to a single hypervisor configuration.
+func GetHypervisorFromKvConfig(kvConfig *v1.KubeVirtConfiguration, configHypervisorEnabled bool) *v1.HypervisorConfiguration {
+	if configHypervisorEnabled {
+		if len(kvConfig.Hypervisors) > 0 {
+			// Currently, we are only supporting a single hypervisor configuration,
+			// even though the API allows specification of multiple.
+			// In the future, we will add support for nodes with different hypervisors in the same cluster.
+			return &kvConfig.Hypervisors[0]
+		}
+	}
+
+	// If no hypervisor configuration is specified, return the default KVM configuration.
+	return &v1.HypervisorConfiguration{
+		Name: v1.KvmHypervisorName,
+	}
 }

@@ -9,36 +9,46 @@ export ARTIFACTS=_out/artifacts/conformance
 mkdir -p ${ARTIFACTS}
 
 echo 'Obtaining KUBECONFIG of the development cluster'
-export KUBECONFIG=$(./cluster-up/kubeconfig.sh)
+export KUBECONFIG=$(./kubevirtci/cluster-up/kubeconfig.sh)
 
 sonobuoy_args="--wait --plugin _out/manifests/release/conformance.yaml"
+label_filter="(conformance)"
 
 if [[ ! -z "$DOCKER_PREFIX" ]]; then
-    sonobuoy_args="${sonobuoy_args} --plugin-env kubevirt-conformance.CONTAINER_PREFIX=${DOCKER_PREFIX}"
+    sonobuoy_args+=" --plugin-env kubevirt-conformance.CONTAINER_PREFIX=${DOCKER_PREFIX}"
 fi
 
 if [[ ! -z "$DOCKER_TAG" ]]; then
-    sonobuoy_args="${sonobuoy_args} --plugin-env kubevirt-conformance.CONTAINER_TAG=${DOCKER_TAG}"
+    sonobuoy_args+=" --plugin-env kubevirt-conformance.CONTAINER_TAG=${DOCKER_TAG}"
 fi
 
 if [[ ! -z "$KUBEVIRT_E2E_FOCUS" ]]; then
-    sonobuoy_args="${sonobuoy_args} --plugin-env kubevirt-conformance.E2E_FOCUS=${KUBEVIRT_E2E_FOCUS}"
+    label_filter+="&&(${KUBEVIRT_E2E_FOCUS})"
 fi
 
 if [[ ! -z "$SKIP_OUTSIDE_CONN_TESTS" ]]; then
-    sonobuoy_args="${sonobuoy_args} --plugin-env kubevirt-conformance.E2E_SKIP=\[outside_connectivity\]"
+    label_filter+="&&(!RequiresOutsideConnectivity)"
 fi
 
 if [[ ! -z "$RUN_ON_ARM64_INFRA" ]]; then
-    sonobuoy_args="${sonobuoy_args} --plugin-env kubevirt-conformance.E2E_SKIP=.*(\[outside_connectivity\].*\[IPv6\].*|\[IPv6\].*\[outside_connectivity\].*).*"
+    label_filter+="&&(wg-arm64)&&!(ACPI,requires-two-schedulable-nodes,cpumodel,requires-two-worker-nodes-with-cpu-manager,requires-amd64)&&!(RequiresOutsideConnectivity && IPv6)"
+fi
+
+if [[ ! -z "$SKIP_BLOCK_STORAGE_TESTS" ]]; then
+    label_filter+="&&(!RequiresBlockStorage)"
+fi
+
+if [[ ! -z "$SKIP_SNAPSHOT_STORAGE_TESTS" ]]; then
+    label_filter+="&&(!RequiresSnapshotStorageClass)"
 fi
 
 if [[ ! -z "$KUBEVIRT_PROVIDER" ]]; then
-    sonobuoy_args="${sonobuoy_args} --plugin-env kubevirt-conformance.KUBEVIRT_PROVIDER=${KUBEVIRT_PROVIDER}"
+    sonobuoy_args+=" --plugin-env kubevirt-conformance.KUBEVIRT_PROVIDER=${KUBEVIRT_PROVIDER}"
 fi
 
 echo 'Executing conformance tests and wait for them to finish'
-sonobuoy run ${sonobuoy_args}
+echo "Using $sonobuoy_args as arguments to sonobuoy"
+sonobuoy run ${sonobuoy_args} --plugin-env kubevirt-conformance.E2E_LABEL="${label_filter}"
 
 trap "{ echo 'Cleaning up after the test execution'; sonobuoy delete --wait; }" EXIT SIGINT SIGTERM SIGQUIT
 

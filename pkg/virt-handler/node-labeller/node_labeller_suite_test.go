@@ -1,4 +1,4 @@
-//go:build amd64
+//go:build amd64 || s390x
 
 /*
  * This file is part of the KubeVirt project
@@ -15,7 +15,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2021 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 

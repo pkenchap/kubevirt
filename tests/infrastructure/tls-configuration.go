@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2017 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -25,30 +25,26 @@ import (
 	"fmt"
 	"time"
 
-	"kubevirt.io/kubevirt/tests/framework/kubevirt"
-
-	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
-
-	kvtls "kubevirt.io/kubevirt/pkg/util/tls"
-
-	"kubevirt.io/kubevirt/tests/framework/checks"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"kubevirt.io/kubevirt/tests/util"
-
 	k8sv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
-	"kubevirt.io/kubevirt/tests"
+	kvtls "kubevirt.io/kubevirt/pkg/util/tls"
+	"kubevirt.io/kubevirt/pkg/virt-config/featuregate"
 	"kubevirt.io/kubevirt/tests/flags"
+	"kubevirt.io/kubevirt/tests/framework/checks"
+	"kubevirt.io/kubevirt/tests/framework/kubevirt"
+	"kubevirt.io/kubevirt/tests/libkubevirt"
+	"kubevirt.io/kubevirt/tests/libkubevirt/config"
+	"kubevirt.io/kubevirt/tests/libpod"
 )
 
-var _ = DescribeInfra("tls configuration", func() {
-
+var _ = Describe(SIGSerial("tls configuration", func() {
 	var virtClient kubecli.KubevirtClient
 
 	// FIPS-compliant so we can test on different platforms (otherwise won't revert properly)
@@ -60,20 +56,19 @@ var _ = DescribeInfra("tls configuration", func() {
 	BeforeEach(func() {
 		virtClient = kubevirt.Client()
 
-		if !checks.HasFeature(virtconfig.VMExportGate) {
-			Skip(fmt.Sprintf("Cluster has the %s featuregate disabled, skipping  the tests", virtconfig.VMExportGate))
+		if !checks.HasFeature(featuregate.VMExportGate) {
+			Fail(fmt.Sprintf(`Cluster has the %q featuregate disabled, skipping  the tests`, featuregate.VMExportGate))
 		}
 
-		kvConfig := util.GetCurrentKv(virtClient).Spec.Configuration.DeepCopy()
+		kvConfig := libkubevirt.GetCurrentKv(virtClient).Spec.Configuration.DeepCopy()
 		kvConfig.TLSConfiguration = &v1.TLSConfiguration{
 			MinTLSVersion: v1.VersionTLS12,
 			Ciphers:       []string{cipher.Name},
 		}
-		tests.UpdateKubeVirtConfigValueAndWait(*kvConfig)
-		newKv := util.GetCurrentKv(virtClient)
+		config.UpdateKubeVirtConfigValueAndWait(*kvConfig)
+		newKv := libkubevirt.GetCurrentKv(virtClient)
 		Expect(newKv.Spec.Configuration.TLSConfiguration.MinTLSVersion).To(BeEquivalentTo(v1.VersionTLS12))
 		Expect(newKv.Spec.Configuration.TLSConfiguration.Ciphers).To(BeEquivalentTo([]string{cipher.Name}))
-
 	})
 
 	It("[test_id:9306]should result only connections with the correct client-side tls configurations are accepted by the components", func() {
@@ -92,9 +87,12 @@ var _ = DescribeInfra("tls configuration", func() {
 			func(i int, pod k8sv1.Pod) {
 				stopChan := make(chan struct{})
 				defer close(stopChan)
-				Expect(tests.ForwardPorts(&pod, []string{fmt.Sprintf("844%d:%d", i, 8443)}, stopChan, 10*time.Second)).To(Succeed())
+				expectTimeout := 10 * time.Second
+				portNumber := 8443
+				Expect(libpod.ForwardPorts(&pod, []string{fmt.Sprintf("844%d:%d", i, portNumber)}, stopChan, expectTimeout)).To(Succeed())
 
 				acceptedTLSConfig := &tls.Config{
+					//nolint:gosec
 					InsecureSkipVerify: true,
 					MaxVersion:         tls.VersionTLS12,
 					CipherSuites:       kvtls.CipherSuiteIds([]string{cipher.Name}),
@@ -106,6 +104,7 @@ var _ = DescribeInfra("tls configuration", func() {
 				Expect(conn.ConnectionState().CipherSuite).To(BeEquivalentTo(cipher.ID), "Configure Cipher should be used")
 
 				rejectedTLSConfig := &tls.Config{
+					//nolint:gosec
 					InsecureSkipVerify: true,
 					MaxVersion:         tls.VersionTLS11,
 				}
@@ -120,4 +119,4 @@ var _ = DescribeInfra("tls configuration", func() {
 			}(i, pod)
 		}
 	})
-})
+}))

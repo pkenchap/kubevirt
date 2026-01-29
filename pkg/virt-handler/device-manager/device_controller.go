@@ -13,27 +13,28 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2018 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
 package device_manager
 
 import (
-	"context"
+	"fmt"
 	"math"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	k8scli "k8s.io/client-go/kubernetes/typed/core/v1"
+	k8sv1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/tools/cache"
 
 	"kubevirt.io/client-go/log"
 
 	"kubevirt.io/kubevirt/pkg/storage/reservation"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
+	"kubevirt.io/kubevirt/pkg/virt-handler/selinux"
 )
 
 var defaultBackoffTime = []time.Duration{1 * time.Second, 2 * time.Second, 5 * time.Second, 10 * time.Second}
@@ -111,7 +112,7 @@ func PermanentHostDevicePlugins(maxDevices int, permissions string) []Device {
 
 	ret := make([]Device, 0, len(permanentDevicePluginPaths))
 	for name, path := range permanentDevicePluginPaths {
-		ret = append(ret, NewGenericDevicePlugin(name, path, maxDevices, permissions, (name != "kvm")))
+		ret = append(ret, NewGenericDevicePlugin(name, path, maxDevices, permissions, name != "kvm"))
 	}
 	return ret
 }
@@ -130,9 +131,9 @@ type DeviceController struct {
 	permissions         string
 	backoff             []time.Duration
 	virtConfig          *virtconfig.ClusterConfig
-	stop                chan struct{}
 	mdevTypesManager    *MDEVTypesManager
-	clientset           k8scli.CoreV1Interface
+	nodeStore           cache.Store
+	mdevRefreshWG       *sync.WaitGroup
 }
 
 func NewDeviceController(
@@ -141,7 +142,7 @@ func NewDeviceController(
 	permissions string,
 	permanentPlugins []Device,
 	clusterConfig *virtconfig.ClusterConfig,
-	clientset k8scli.CoreV1Interface,
+	nodeStore cache.Store,
 ) *DeviceController {
 	permanentPluginsMap := make(map[string]Device, len(permanentPlugins))
 	for i := range permanentPlugins {
@@ -157,7 +158,8 @@ func NewDeviceController(
 		backoff:          defaultBackoffTime,
 		virtConfig:       clusterConfig,
 		mdevTypesManager: NewMDEVTypesManager(),
-		clientset:        clientset,
+		nodeStore:        nodeStore,
+		mdevRefreshWG:    &sync.WaitGroup{},
 	}
 
 	return controller
@@ -166,7 +168,7 @@ func NewDeviceController(
 func (c *DeviceController) NodeHasDevice(devicePath string) bool {
 	_, err := os.Stat(devicePath)
 	// Since this is a boolean question, any error means "no"
-	return (err == nil)
+	return err == nil
 }
 
 // updatePermittedHostDevicePlugins returns a slice of device plugins for permitted devices which are present on the node
@@ -191,7 +193,12 @@ func (c *DeviceController) updatePermittedHostDevicePlugins() []Device {
 	}
 
 	if c.virtConfig.PersistentReservationEnabled() {
-		permittedDevices = append(permittedDevices, NewSocketDevicePlugin(reservation.GetPrResourceName(), reservation.GetPrHelperSocketDir(), reservation.GetPrHelperSocket(), c.maxDevices))
+		d, err := NewSocketDevicePlugin(reservation.GetPrResourceName(), reservation.GetPrHelperSocketDir(), reservation.GetPrHelperSocket(), c.maxDevices, selinux.SELinuxExecutor{}, NewPermissionManager())
+		if err != nil {
+			log.Log.Reason(err).Errorf("failed to configure the desired mdev types, failed to get node details")
+		} else {
+			permittedDevices = append(permittedDevices, d)
+		}
 	}
 
 	hostDevs := c.virtConfig.GetPermittedHostDevices()
@@ -247,10 +254,9 @@ func (c *DeviceController) updatePermittedHostDevicePlugins() []Device {
 func removeSelectorSpaces(selectorName string) string {
 	// The name usually contain spaces which should be replaced with _
 	// Such as GRID T4-1Q
-	typeNameStr := strings.Replace(string(selectorName), " ", "_", -1)
+	typeNameStr := strings.Replace(selectorName, " ", "_", -1)
 	typeNameStr = strings.TrimSpace(typeNameStr)
 	return typeNameStr
-
 }
 
 func (c *DeviceController) splitPermittedDevices(devices []Device) (map[string]Device, map[string]struct{}) {
@@ -303,26 +309,45 @@ func (c *DeviceController) refreshMediatedDeviceTypes() bool {
 		return false
 	}
 
-	requiresDevicePluginsUpdate := false
-	node, err := c.clientset.Nodes().Get(context.Background(), c.host, metav1.GetOptions{})
+	node, err := c.getNode()
 	if err != nil {
 		log.Log.Reason(err).Errorf("failed to configure the desired mdev types, failed to get node details")
-		return requiresDevicePluginsUpdate
+		return false
 	}
 	externallyProvidedMdevMap := c.getExternallyProvidedMdevs()
 
 	nodeDesiredMdevTypesList := c.virtConfig.GetDesiredMDEVTypes(node)
-	requiresDevicePluginsUpdate, err = c.mdevTypesManager.updateMDEVTypesConfiguration(nodeDesiredMdevTypesList, externallyProvidedMdevMap)
+	requiresDevicePluginsUpdate, err := c.mdevTypesManager.updateMDEVTypesConfiguration(nodeDesiredMdevTypesList, externallyProvidedMdevMap)
 	if err != nil {
 		log.Log.Reason(err).Errorf("failed to configure the desired mdev types: %s", strings.Join(nodeDesiredMdevTypesList, ", "))
 	}
 	return requiresDevicePluginsUpdate
 }
 
+func (c *DeviceController) getNode() (*k8sv1.Node, error) {
+	nodeObj, exists, err := c.nodeStore.GetByKey(c.host)
+	if err != nil {
+		log.DefaultLogger().Errorf("Unable to get node: %s", err.Error())
+		return nil, err
+	}
+	if !exists {
+		log.DefaultLogger().Errorf("node %s does not exist", c.host)
+		return nil, fmt.Errorf("node %s does not exist", c.host)
+	}
+
+	node, ok := nodeObj.(*k8sv1.Node)
+	if !ok {
+		return nil, fmt.Errorf("unknown object type found in node informer")
+	}
+
+	return node, nil
+}
+
 func (c *DeviceController) refreshPermittedDevices() {
+	c.mdevRefreshWG.Add(1)
 	logger := log.DefaultLogger()
-	debugDevAdded := []string{}
-	debugDevRemoved := []string{}
+	var debugDevAdded []string
+	var debugDevRemoved []string
 
 	// This function can be called multiple times in parallel, either because of multiple
 	//   informer callbacks for the same event, or because the configmap was quickly updated
@@ -347,9 +372,14 @@ func (c *DeviceController) refreshPermittedDevices() {
 		debugDevRemoved = append(debugDevRemoved, resourceName)
 	}
 
-	logger.Info("refreshed device plugins for permitted/forbidden host devices")
-	logger.Infof("enabled device-plugins for: %v", debugDevAdded)
-	logger.Infof("disabled device-plugins for: %v", debugDevRemoved)
+	logger.V(3).Info("refreshed device plugins for permitted/forbidden host devices")
+	if len(debugDevAdded) > 0 {
+		logger.Infof("enabled device-plugins for: %v", debugDevAdded)
+	}
+	if len(debugDevRemoved) > 0 {
+		logger.Infof("disabled device-plugins for: %v", debugDevRemoved)
+	}
+	c.mdevRefreshWG.Done()
 }
 
 func (c *DeviceController) startDevice(resourceName string, dev Device) {
@@ -370,7 +400,7 @@ func (c *DeviceController) stopDevice(resourceName string) {
 	}
 }
 
-func (c *DeviceController) Run(stop chan struct{}) error {
+func (c *DeviceController) Run(stop chan struct{}) {
 	logger := log.DefaultLogger()
 
 	// start the permanent DevicePlugins
@@ -400,8 +430,11 @@ func (c *DeviceController) Run(stop chan struct{}) error {
 			c.stopDevice(name)
 		}
 	}()
+
+	// wait for any concurrent mdev refreshes to finish
+	c.mdevRefreshWG.Wait()
+
 	logger.Info("Shutting down device plugin controller")
-	return nil
 }
 
 func (c *DeviceController) Initialized() bool {

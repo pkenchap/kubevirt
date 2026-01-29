@@ -3,8 +3,10 @@ package services
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	backendstorage "kubevirt.io/kubevirt/pkg/storage/backend-storage"
+	"kubevirt.io/kubevirt/pkg/tpm"
 
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -14,29 +16,40 @@ import (
 	"kubevirt.io/client-go/log"
 
 	"kubevirt.io/kubevirt/pkg/config"
+	containerdisk "kubevirt.io/kubevirt/pkg/container-disk"
 	"kubevirt.io/kubevirt/pkg/hooks"
 	hostdisk "kubevirt.io/kubevirt/pkg/host-disk"
-	"kubevirt.io/kubevirt/pkg/network/sriov"
+	"kubevirt.io/kubevirt/pkg/network/downwardapi"
+	"kubevirt.io/kubevirt/pkg/storage/cbt"
 	"kubevirt.io/kubevirt/pkg/storage/types"
 	"kubevirt.io/kubevirt/pkg/util"
+	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	"kubevirt.io/kubevirt/pkg/virtiofs"
 )
 
 type VolumeRendererOption func(renderer *VolumeRenderer) error
 
 type VolumeRenderer struct {
-	containerDiskDir string
-	ephemeralDiskDir string
-	virtShareDir     string
-	namespace        string
-	vmiVolumes       []v1.Volume
-	podVolumes       []k8sv1.Volume
-	podVolumeMounts  []k8sv1.VolumeMount
-	volumeDevices    []k8sv1.VolumeDevice
+	useImageVolumes       bool
+	launcherImage         string
+	imageIDs              map[string]string
+	clusterConfig         *virtconfig.ClusterConfig
+	containerDiskDir      string
+	ephemeralDiskDir      string
+	virtShareDir          string
+	namespace             string
+	podVolumes            []k8sv1.Volume
+	podVolumeMounts       []k8sv1.VolumeMount
+	sharedFilesystemPaths []string
+	volumeDevices         []k8sv1.VolumeDevice
 }
 
-func NewVolumeRenderer(namespace string, ephemeralDisk string, containerDiskDir string, virtShareDir string, volumeOptions ...VolumeRendererOption) (*VolumeRenderer, error) {
+func NewVolumeRenderer(clusterConfig *virtconfig.ClusterConfig, imageVolumeFeatureGateEnabled bool, launcherImage string, imageIDs map[string]string, namespace string, ephemeralDisk string, containerDiskDir string, virtShareDir string, volumeOptions ...VolumeRendererOption) (*VolumeRenderer, error) {
 	volumeRenderer := &VolumeRenderer{
+		useImageVolumes:  imageVolumeFeatureGateEnabled,
+		launcherImage:    launcherImage,
+		imageIDs:         imageIDs,
+		clusterConfig:    clusterConfig,
 		containerDiskDir: containerDiskDir,
 		ephemeralDiskDir: ephemeralDisk,
 		namespace:        namespace,
@@ -55,9 +68,11 @@ func (vr *VolumeRenderer) Mounts() []k8sv1.VolumeMount {
 		mountPath("private", util.VirtPrivateDir),
 		mountPath("public", util.VirtShareDir),
 		mountPath("ephemeral-disks", vr.ephemeralDiskDir),
-		mountPathWithPropagation(containerDisks, vr.containerDiskDir, k8sv1.MountPropagationHostToContainer),
 		mountPath("libvirt-runtime", "/var/run/libvirt"),
 		mountPath("sockets", filepath.Join(vr.virtShareDir, "sockets")),
+	}
+	if !vr.useImageVolumes {
+		volumeMounts = append(volumeMounts, mountPathWithPropagation(containerDisks, vr.containerDiskDir, k8sv1.MountPropagationHostToContainer))
 	}
 	return append(volumeMounts, vr.podVolumeMounts...)
 }
@@ -70,13 +85,19 @@ func (vr *VolumeRenderer) Volumes() []k8sv1.Volume {
 		emptyDirVolume(virtBinDir),
 		emptyDirVolume("libvirt-runtime"),
 		emptyDirVolume("ephemeral-disks"),
-		emptyDirVolume(containerDisks),
+	}
+	if !vr.useImageVolumes {
+		volumes = append(volumes, emptyDirVolume(containerDisks))
 	}
 	return append(volumes, vr.podVolumes...)
 }
 
 func (vr *VolumeRenderer) VolumeDevices() []k8sv1.VolumeDevice {
 	return vr.volumeDevices
+}
+
+func (vr *VolumeRenderer) SharedFilesystemPaths() []string {
+	return vr.sharedFilesystemPaths
 }
 
 func mountPath(name string, path string) k8sv1.VolumeMount {
@@ -159,7 +180,9 @@ func withVMIVolumes(pvcStore cache.Store, vmiSpecVolumes []v1.Volume, vmiVolumeS
 			}
 
 			if volume.Sysprep != nil {
-				renderer.handleSysprep(volume)
+				if err := renderer.handleSysprep(volume); err != nil {
+					return err
+				}
 			}
 
 			if volume.CloudInitConfigDrive != nil {
@@ -207,6 +230,29 @@ func withVMIConfigVolumes(vmiDisks []v1.Disk, vmiVolumes []v1.Volume) VolumeRend
 				renderer.addDownwardAPIVolumeMount(volume)
 			}
 		}
+		return nil
+	}
+}
+
+func withImageVolumes(vmi *v1.VirtualMachineInstance) VolumeRendererOption {
+	return func(renderer *VolumeRenderer) error {
+		for i, volume := range vmi.Spec.Volumes {
+			if volume.ContainerDisk != nil {
+				renderer.addContainerDiskVolume(volume)
+				renderer.addContainerDiskVolumeMount(volume, i)
+			}
+		}
+
+		if util.HasKernelBootContainerImage(vmi) {
+			kbc := vmi.Spec.Domain.Firmware.KernelBoot.Container
+			renderer.addKernelBootVolume(kbc)
+			renderer.addKernelBootVolumeMount()
+		}
+
+		if shouldAddLauncherBinaryVolume(vmi, renderer.imageIDs) {
+			renderer.addLauncherBinaryVolume()
+		}
+
 		return nil
 	}
 }
@@ -264,13 +310,13 @@ func (vr *VolumeRenderer) handleCloudInitConfigDrive(volume v1.Volume) {
 	}
 }
 
-func (vr *VolumeRenderer) handleSysprep(volume v1.Volume) {
+func (vr *VolumeRenderer) handleSysprep(volume v1.Volume) error {
 	if volume.Sysprep != nil {
 		var volumeSource k8sv1.VolumeSource
 		// attach a Secret or ConfigMap referenced by the user
 		volumeSource, err := sysprepVolumeSource(*volume.Sysprep)
 		if err != nil {
-			//return nil, err
+			return err
 		}
 		vr.podVolumes = append(vr.podVolumes, k8sv1.Volume{
 			Name:         volume.Name,
@@ -282,6 +328,7 @@ func (vr *VolumeRenderer) handleSysprep(volume v1.Volume) {
 			ReadOnly:  true,
 		})
 	}
+	return nil
 }
 
 func hotplugVolumes(vmiVolumeStatus []v1.VolumeStatus, vmiSpecVolumes []v1.Volume) map[string]struct{} {
@@ -359,22 +406,28 @@ func PathForNVram(vmi *v1.VirtualMachineInstance) string {
 	return nvramPath
 }
 
-func withBackendStorage(vmi *v1.VirtualMachineInstance) VolumeRendererOption {
+func withBackendStorage(vmi *v1.VirtualMachineInstance, backendStoragePVCName string) VolumeRendererOption {
 	return func(renderer *VolumeRenderer) error {
-		if !backendstorage.IsBackendStorageNeededForVMI(&vmi.Spec) {
+		if !backendstorage.IsBackendStorageNeeded(vmi) {
 			return nil
 		}
 
-		volumeName := vmi.Name + "-state"
-		pvcName := backendstorage.PVCForVMI(vmi)
+		volumeName := "vm-state"
 		renderer.podVolumes = append(renderer.podVolumes, k8sv1.Volume{
 			Name: volumeName,
 			VolumeSource: k8sv1.VolumeSource{
 				PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{
-					ClaimName: pvcName,
+					ClaimName: backendStoragePVCName,
 					ReadOnly:  false,
 				},
 			},
+		})
+
+		renderer.podVolumeMounts = append(renderer.podVolumeMounts, k8sv1.VolumeMount{
+			Name:      volumeName,
+			ReadOnly:  false,
+			MountPath: "/run/kubevirt-private/backend-storage-meta",
+			SubPath:   "meta",
 		})
 
 		if util.IsNonRootVMI(vmi) {
@@ -398,7 +451,7 @@ func withBackendStorage(vmi *v1.VirtualMachineInstance) VolumeRendererOption {
 			})
 		}
 
-		if backendstorage.HasPersistentTPMDevice(&vmi.Spec) {
+		if tpm.HasPersistentDevice(&vmi.Spec) {
 			renderer.podVolumeMounts = append(renderer.podVolumeMounts, k8sv1.VolumeMount{
 				Name:      volumeName,
 				ReadOnly:  false,
@@ -418,6 +471,15 @@ func withBackendStorage(vmi *v1.VirtualMachineInstance) VolumeRendererOption {
 				ReadOnly:  false,
 				MountPath: PathForNVram(vmi),
 				SubPath:   "nvram",
+			})
+		}
+
+		if cbt.HasCBTStateEnabled(vmi.Status.ChangedBlockTracking) {
+			renderer.podVolumeMounts = append(renderer.podVolumeMounts, k8sv1.VolumeMount{
+				Name:      volumeName,
+				ReadOnly:  false,
+				MountPath: cbt.PathForCBT(vmi),
+				SubPath:   "cbt",
 			})
 		}
 
@@ -490,12 +552,11 @@ func withHotplugSupport(hotplugDiskDir string) VolumeRendererOption {
 	}
 }
 
-func withSRIOVPciMapAnnotation() VolumeRendererOption {
+func withNetworkDeviceInfoMapAnnotation() VolumeRendererOption {
 	return func(renderer *VolumeRenderer) error {
-		renderer.podVolumeMounts = append(renderer.podVolumeMounts, mountPath(sriov.VolumeName, sriov.MountPath))
 		renderer.podVolumes = append(renderer.podVolumes,
 			downwardAPIDirVolume(
-				sriov.VolumeName, sriov.VolumePath, fmt.Sprintf("metadata.annotations['%s']", sriov.NetworkPCIMapAnnot)),
+				downwardapi.NetworkInfoVolumeName, downwardapi.NetworkInfoVolumePath, fmt.Sprintf("metadata.annotations['%s']", downwardapi.NetworkInfoAnnot)),
 		)
 		return nil
 	}
@@ -524,7 +585,7 @@ func serviceAccount(volumes ...v1.Volume) string {
 
 func (vr *VolumeRenderer) addPVCToLaunchManifest(pvcStore cache.Store, volume v1.Volume, claimName string) error {
 	logger := log.DefaultLogger()
-	_, exists, isBlock, err := types.IsPVCBlockFromStore(pvcStore, vr.namespace, claimName)
+	pvc, exists, isBlock, err := types.IsPVCBlockFromStore(pvcStore, vr.namespace, claimName)
 	if err != nil {
 		logger.Errorf("error getting PVC: %v", claimName)
 		return err
@@ -539,11 +600,15 @@ func (vr *VolumeRenderer) addPVCToLaunchManifest(pvcStore cache.Store, volume v1
 		}
 		vr.volumeDevices = append(vr.volumeDevices, device)
 	} else {
+		path := hostdisk.GetMountedHostDiskDir(volume.Name)
 		volumeMount := k8sv1.VolumeMount{
 			Name:      volume.Name,
-			MountPath: hostdisk.GetMountedHostDiskDir(volume.Name),
+			MountPath: path,
 		}
 		vr.podVolumeMounts = append(vr.podVolumeMounts, volumeMount)
+		if types.HasSharedAccessMode(pvc.Spec.AccessModes) {
+			vr.sharedFilesystemPaths = append(vr.sharedFilesystemPaths, path)
+		}
 	}
 	return nil
 }
@@ -679,6 +744,66 @@ func (vr *VolumeRenderer) addDownwardAPIVolumeMount(volume v1.Volume) {
 	})
 }
 
+func (vr *VolumeRenderer) addContainerDiskVolume(volume v1.Volume) {
+	diskContainerImage := volume.ContainerDisk.Image
+	if img, exists := vr.imageIDs[volume.Name]; exists {
+		diskContainerImage = img
+	}
+	vr.podVolumes = append(vr.podVolumes, k8sv1.Volume{
+		Name: volume.Name,
+		VolumeSource: k8sv1.VolumeSource{
+			Image: &k8sv1.ImageVolumeSource{
+				Reference:  diskContainerImage,
+				PullPolicy: volume.ContainerDisk.ImagePullPolicy,
+			},
+		},
+	})
+}
+
+func (vr *VolumeRenderer) addContainerDiskVolumeMount(volume v1.Volume, volumeIndex int) {
+	vr.podVolumeMounts = append(vr.podVolumeMounts, k8sv1.VolumeMount{
+		Name:      volume.Name,
+		MountPath: filepath.Join(filepath.Join(util.VirtImageVolumeDir), fmt.Sprintf("disk_%d", volumeIndex)),
+		ReadOnly:  true,
+	})
+}
+
+func (vr *VolumeRenderer) addKernelBootVolume(kbc *v1.KernelBootContainer) {
+	kernelBootContainerImage := kbc.Image
+	if img, exists := vr.imageIDs[containerdisk.KernelBootVolumeName]; exists {
+		kernelBootContainerImage = img
+	}
+	vr.podVolumes = append(vr.podVolumes, k8sv1.Volume{
+		Name: containerdisk.KernelBootVolumeName,
+		VolumeSource: k8sv1.VolumeSource{
+			Image: &k8sv1.ImageVolumeSource{
+				Reference:  kernelBootContainerImage,
+				PullPolicy: kbc.ImagePullPolicy,
+			},
+		},
+	})
+}
+
+func (vr *VolumeRenderer) addKernelBootVolumeMount() {
+	vr.podVolumeMounts = append(vr.podVolumeMounts, k8sv1.VolumeMount{
+		Name:      containerdisk.KernelBootVolumeName,
+		MountPath: util.VirtKernelBootVolumeDir,
+		ReadOnly:  true,
+	})
+}
+
+func (vr *VolumeRenderer) addLauncherBinaryVolume() {
+	vr.podVolumes = append(vr.podVolumes, k8sv1.Volume{
+		Name: containerdisk.LauncherVolume,
+		VolumeSource: k8sv1.VolumeSource{
+			Image: &k8sv1.ImageVolumeSource{
+				Reference:  vr.launcherImage,
+				PullPolicy: vr.clusterConfig.GetImagePullPolicy(),
+			},
+		},
+	})
+}
+
 func (vr *VolumeRenderer) handleCloudInitNoCloud(volume v1.Volume) {
 	if volume.CloudInitNoCloud.UserDataSecretRef != nil {
 		// attach a secret referenced by the user
@@ -745,4 +870,20 @@ func (vr *VolumeRenderer) handleDownwardMetrics(volume v1.Volume) {
 		Name:      volume.Name,
 		MountPath: config.DownwardMetricDisksDir,
 	})
+}
+
+// shouldAddLauncherBinaryVolume decides if we need to add the launcher image volume.
+// Even if only one init container is required for digest extraction, we must add the
+// volume that contains the binary used by that init container. Without this volume,
+// the init container cannot run.
+func shouldAddLauncherBinaryVolume(vmi *v1.VirtualMachineInstance, imageIDs map[string]string) bool {
+	for _, volume := range vmi.Spec.Volumes {
+		containerDiskImageIDAlreadyExists := strings.Contains(imageIDs[volume.Name], "@sha256:")
+		if volume.ContainerDisk == nil || containerDiskImageIDAlreadyExists {
+			continue
+		}
+		return true
+	}
+	kernelBootImageIDAlreadyExists := strings.Contains(imageIDs[containerdisk.KernelBootVolumeName], "@sha256:")
+	return util.HasKernelBootContainerImage(vmi) && !kernelBootImageIDAlreadyExists
 }

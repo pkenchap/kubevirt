@@ -35,20 +35,12 @@ const (
 
 func main() {
 	namespace := flag.String("namespace", "placeholder", "Namespace to use.")
-	operatorImageVersion := flag.String("operatorImageVersion", "latest", "Image sha256 hash or image tag used to uniquely identify the operator container image to use in the CSV")
+	operatorImageVersion := flag.String("operatorImageVersion", "latest", "Image tag used to uniquely identify the operator container image to use in the CSV")
 	imagePrefix := flag.String("imagePrefix", "", "Optional prefix for virt-* image names.")
 	dockerPrefix := flag.String("dockerPrefix", "kubevirt", "Image Repository to use.")
 	kubeVirtVersion := flag.String("kubeVirtVersion", "", "represents the KubeVirt releaseassociated with this CSV. Required when image SHAs are used.")
 	pullPolicy := flag.String("pullPolicy", "IfNotPresent", "ImagePullPolicy to use.")
 	verbosity := flag.String("verbosity", "2", "Verbosity level to use.")
-	apiSha := flag.String("apiSha", "", "virt-api image sha. "+shaEnvDeprecationMsg)
-	controllerSha := flag.String("controllerSha", "", "virt-controller image sha. "+shaEnvDeprecationMsg)
-	handlerSha := flag.String("handlerSha", "", "virt-handler image sha. "+shaEnvDeprecationMsg)
-	launcherSha := flag.String("launcherSha", "", "virt-launcher image sha. "+shaEnvDeprecationMsg)
-	exportProxySha := flag.String("exportProxySha", "", "virt-exportproxy image sha. "+shaEnvDeprecationMsg)
-	exportServerSha := flag.String("exportServerSha", "", "virt-exportserver image sha. "+shaEnvDeprecationMsg)
-	gsSha := flag.String("gsSha", "", "libguestfs-tools image sha")
-	prHelperSha := flag.String("prHelperSha", "", "pr-helper image sha")
 	runbookURLTemplate := flag.String("", "", "")
 	kubeVirtLogo := flag.String("kubevirtLogo", "", "kubevirt logo data in base64")
 	csvVersion := flag.String("csvVersion", "", "the CSV version being generated")
@@ -62,47 +54,44 @@ func main() {
 	virtLauncherImage := flag.String("virt-launcher-image", "", "custom image for virt-launcher. "+customImageExample)
 	virtExportProxyImage := flag.String("virt-export-proxy-image", "", "custom image for virt-export-proxy. "+customImageExample)
 	virtExportServerImage := flag.String("virt-export-server-image", "", "custom image for virt-export-server. "+customImageExample)
+	virtSynchronizationControllerImage := flag.String("virt-synchronization-controller-image", "", "custom image for virt-synchronization-controller. "+customImageExample)
 	gsImage := flag.String("gs-image", "", "custom image for gs. "+customImageExample)
-	prHelperImage := flag.String("pr-helper-image", "", "custom image for gs. "+customImageExample)
+	prHelperImage := flag.String("pr-helper-image", "", "custom image for pr-helper. "+customImageExample)
+	sidecarShimImage := flag.String("sidecar-shim-image", "", "custom image for sidecar-shim. "+customImageExample)
+	dumpNetworkPolicies := flag.Bool("dump-network-policies", false, "dump Network Policies along with CSV manifests to stdout")
 
 	flag.Parse()
 
 	csvData := csv.NewClusterServiceVersionData{
-		Namespace:             *namespace,
-		KubeVirtVersion:       *kubeVirtVersion,
-		OperatorImageVersion:  *operatorImageVersion,
-		DockerPrefix:          *dockerPrefix,
-		ImagePrefix:           *imagePrefix,
-		ImagePullPolicy:       *pullPolicy,
-		Verbosity:             *verbosity,
-		CsvVersion:            *csvVersion,
-		VirtApiSha:            *apiSha,
-		VirtControllerSha:     *controllerSha,
-		VirtHandlerSha:        *handlerSha,
-		VirtLauncherSha:       *launcherSha,
-		VirtExportProxySha:    *exportProxySha,
-		VirtExportServerSha:   *exportServerSha,
-		GsSha:                 *gsSha,
-		PrHelperSha:           *prHelperSha,
-		RunbookURLTemplate:    *runbookURLTemplate,
-		ReplacesCsvVersion:    *replacesCsvVersion,
-		IconBase64:            *kubeVirtLogo,
-		Replicas:              2,
-		CreatedAtTimestamp:    *csvCreatedAtTimestamp,
-		VirtOperatorImage:     *virtOperatorImage,
-		VirtApiImage:          *virtApiImage,
-		VirtControllerImage:   *virtControllerImage,
-		VirtHandlerImage:      *virtHandlerImage,
-		VirtLauncherImage:     *virtLauncherImage,
-		VirtExportProxyImage:  *virtExportProxyImage,
-		VirtExportServerImage: *virtExportServerImage,
-		GsImage:               *gsImage,
-		PrHelperImage:         *prHelperImage,
+		Namespace:                          *namespace,
+		KubeVirtVersion:                    *kubeVirtVersion,
+		OperatorImageVersion:               *operatorImageVersion,
+		DockerPrefix:                       *dockerPrefix,
+		ImagePrefix:                        *imagePrefix,
+		ImagePullPolicy:                    *pullPolicy,
+		Verbosity:                          *verbosity,
+		CsvVersion:                         *csvVersion,
+		RunbookURLTemplate:                 *runbookURLTemplate,
+		ReplacesCsvVersion:                 *replacesCsvVersion,
+		IconBase64:                         *kubeVirtLogo,
+		Replicas:                           2,
+		CreatedAtTimestamp:                 *csvCreatedAtTimestamp,
+		VirtOperatorImage:                  *virtOperatorImage,
+		VirtApiImage:                       *virtApiImage,
+		VirtControllerImage:                *virtControllerImage,
+		VirtHandlerImage:                   *virtHandlerImage,
+		VirtLauncherImage:                  *virtLauncherImage,
+		VirtExportProxyImage:               *virtExportProxyImage,
+		VirtExportServerImage:              *virtExportServerImage,
+		VirtSynchronizationControllerImage: *virtSynchronizationControllerImage,
+		GsImage:                            *gsImage,
+		PrHelperImage:                      *prHelperImage,
+		SidecarShimImage:                   *sidecarShimImage,
 	}
 
 	operatorCsv, err := csv.NewClusterServiceVersion(&csvData)
 	if err != nil {
-		panic(nil)
+		panic(err)
 	}
 
 	util.MarshallObject(operatorCsv, os.Stdout)
@@ -113,5 +102,12 @@ func main() {
 			panic(err)
 		}
 		util.MarshallObject(kvCRD, os.Stdout)
+	}
+
+	if *dumpNetworkPolicies {
+		kvNPs := components.NewKubeVirtNetworkPolicies(*namespace)
+		for _, v := range kvNPs {
+			util.MarshallObject(v, os.Stdout)
+		}
 	}
 }

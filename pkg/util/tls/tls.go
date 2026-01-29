@@ -17,6 +17,7 @@ import (
 )
 
 const noSrvCertMessage = "No server certificate, server is not yet ready to receive traffic"
+const serverNotReadyMsg = "Server is not yet ready to receive traffic"
 
 var (
 	cipherSuites         = tls.CipherSuites()
@@ -58,7 +59,7 @@ func SetupPromTLS(certManager certificate.Manager, clusterConfig *virtconfig.Clu
 	return tlsConfig
 }
 
-func SetupExportProxyTLS(certManager certificate.Manager, kubeVirtInformer cache.SharedIndexInformer) *tls.Config {
+func SetupExportProxyTLS(certManager certificate.Manager, kubeVirtStore cache.Store) *tls.Config {
 	tlsConfig := &tls.Config{
 		GetCertificate: func(info *tls.ClientHelloInfo) (certificate *tls.Certificate, err error) {
 			cert := certManager.Current()
@@ -74,7 +75,7 @@ func SetupExportProxyTLS(certManager certificate.Manager, kubeVirtInformer cache
 				return nil, fmt.Errorf(noSrvCertMessage)
 			}
 
-			kv := getKubevirt(kubeVirtInformer)
+			kv := getKubevirt(kubeVirtStore)
 			tlsConfig := getTLSConfiguration(kv)
 			ciphers := CipherSuiteIds(tlsConfig.Ciphers)
 			minTLSVersion := TLSVersion(tlsConfig.MinTLSVersion)
@@ -91,7 +92,7 @@ func SetupExportProxyTLS(certManager certificate.Manager, kubeVirtInformer cache
 	return tlsConfig
 }
 
-func SetupTLSWithCertManager(caManager ClientCAManager, certManager certificate.Manager, clientAuth tls.ClientAuthType, clusterConfig *virtconfig.ClusterConfig) *tls.Config {
+func SetupTLSWithCertManager(caManager KubernetesCAManager, certManager certificate.Manager, clientAuth tls.ClientAuthType, clusterConfig *virtconfig.ClusterConfig) *tls.Config {
 	tlsConfig := &tls.Config{
 		GetCertificate: func(info *tls.ClientHelloInfo) (certificate *tls.Certificate, err error) {
 			cert := certManager.Current()
@@ -122,6 +123,33 @@ func SetupTLSWithCertManager(caManager ClientCAManager, certManager certificate.
 				Certificates: []tls.Certificate{*cert},
 				ClientCAs:    clientCAPool,
 				ClientAuth:   clientAuth,
+				VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+					if len(verifiedChains) == 0 || len(verifiedChains[0]) == 0 {
+						return nil
+					}
+
+					certificate, err := x509.ParseCertificate(rawCerts[0])
+					if err != nil {
+						return fmt.Errorf("failed to parse peer certificate: %v", err)
+					}
+
+					CNs, err := caManager.GetCNs()
+					if err != nil {
+						log.Log.Reason(err).Error(serverNotReadyMsg)
+						return fmt.Errorf(serverNotReadyMsg)
+					}
+
+					if len(CNs) == 0 {
+						return nil
+					}
+					for _, CN := range CNs {
+						if certificate.Subject.CommonName == CN {
+							return nil
+						}
+					}
+
+					return fmt.Errorf("Common name is invalid")
+				},
 			}
 
 			config.BuildNameToCertificate()
@@ -132,7 +160,15 @@ func SetupTLSWithCertManager(caManager ClientCAManager, certManager certificate.
 	return tlsConfig
 }
 
-func SetupTLSForVirtHandlerServer(caManager ClientCAManager, certManager certificate.Manager, externallyManaged bool, clusterConfig *virtconfig.ClusterConfig) *tls.Config {
+func SetupTLSForVirtSynchronizationControllerServer(caManager ClientCAManager, certManager certificate.Manager, externallyManaged bool, clusterConfig *virtconfig.ClusterConfig) *tls.Config {
+	return SetupTLSForServer(caManager, certManager, externallyManaged, clusterConfig, []string{"virt-synchronization-controller"})
+}
+
+func SetupTLSForVirtHandlerServer(caManager ClientCAManager, certManager certificate.Manager, externallyManaged bool, clusterConfig *virtconfig.ClusterConfig, commonNameTypes []string) *tls.Config {
+	return SetupTLSForServer(caManager, certManager, externallyManaged, clusterConfig, commonNameTypes)
+}
+
+func SetupTLSForServer(caManager ClientCAManager, certManager certificate.Manager, externallyManaged bool, clusterConfig *virtconfig.ClusterConfig, commonNameTypes []string) *tls.Config {
 	// #nosec cause: InsecureSkipVerify: true
 	// resolution: Neither the client nor the server should validate anything itself, `VerifyPeerCertificate` is still executed
 	return &tls.Config{
@@ -174,7 +210,7 @@ func SetupTLSForVirtHandlerServer(caManager ClientCAManager, certManager certifi
 				InsecureSkipVerify: true,
 				// XXX: We need to verify the cert ourselves because we don't have DNS or IP on the certs at the moment
 				VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-					return verifyPeerCert(rawCerts, externallyManaged, certPool, x509.ExtKeyUsageClientAuth, "client")
+					return verifyPeerCert(rawCerts, externallyManaged, certPool, x509.ExtKeyUsageClientAuth, "client", commonNameTypes)
 				},
 				ClientAuth: tls.RequireAndVerifyClientCert,
 			}
@@ -183,7 +219,15 @@ func SetupTLSForVirtHandlerServer(caManager ClientCAManager, certManager certifi
 	}
 }
 
+func SetupTLSForVirtSynchronizationControllerClients(caManager ClientCAManager, certManager certificate.Manager, externallyManaged bool) *tls.Config {
+	return SetupTLSForClients(caManager, certManager, externallyManaged, "virt-synchronization-controller")
+}
+
 func SetupTLSForVirtHandlerClients(caManager ClientCAManager, certManager certificate.Manager, externallyManaged bool) *tls.Config {
+	return SetupTLSForClients(caManager, certManager, externallyManaged, "virt-handler")
+}
+
+func SetupTLSForClients(caManager ClientCAManager, certManager certificate.Manager, externallyManaged bool, commonNameType string) *tls.Config {
 	// #nosec cause: InsecureSkipVerify: true
 	// resolution: Neither the client nor the server should validate anything itself, `VerifyPeerCertificate` is still executed
 	return &tls.Config{
@@ -210,7 +254,7 @@ func SetupTLSForVirtHandlerClients(caManager ClientCAManager, certManager certif
 				log.Log.Reason(err).Error("Failed to get kubevirt CA")
 				return err
 			}
-			return verifyPeerCert(rawCerts, externallyManaged, certPool, x509.ExtKeyUsageServerAuth, "node")
+			return verifyPeerCert(rawCerts, externallyManaged, certPool, x509.ExtKeyUsageServerAuth, "node", []string{commonNameType})
 		},
 	}
 }
@@ -282,7 +326,7 @@ func TLSVersionName(versionId uint16) string {
 	}
 }
 
-func verifyPeerCert(rawCerts [][]byte, externallyManaged bool, certPool *x509.CertPool, usage x509.ExtKeyUsage, commonName string) error {
+func verifyPeerCert(rawCerts [][]byte, externallyManaged bool, certPool *x509.CertPool, usage x509.ExtKeyUsage, commonName string, commonNameTypes []string) error {
 	// impossible with RequireAnyClientCert
 	if len(rawCerts) == 0 {
 		return fmt.Errorf("no client certificate provided.")
@@ -305,12 +349,17 @@ func verifyPeerCert(rawCerts [][]byte, externallyManaged bool, certPool *x509.Ce
 		return fmt.Errorf("could not verify peer certificate: %v", err)
 	}
 
-	fullCommonName := fmt.Sprintf("kubevirt.io:system:%s:virt-handler", commonName)
-	if !externallyManaged && c.Subject.CommonName != fullCommonName {
-		return fmt.Errorf("common name is invalid, expected %s, but got %s", fullCommonName, c.Subject.CommonName)
+	if externallyManaged {
+		return nil
+	}
+	for _, commonNameType := range commonNameTypes {
+		fullCommonName := fmt.Sprintf("kubevirt.io:system:%s:%s", commonName, commonNameType)
+		if c.Subject.CommonName == fullCommonName {
+			return nil
+		}
 	}
 
-	return nil
+	return fmt.Errorf("common name is invalid, got %s", c.Subject.CommonName)
 }
 
 func createIntermediatePool(externallyManaged bool, rawIntermediates [][]byte) *x509.CertPool {
@@ -328,8 +377,8 @@ func createIntermediatePool(externallyManaged bool, rawIntermediates [][]byte) *
 	return intermediatePool
 }
 
-func getKubevirt(kubeVirtInformer cache.SharedIndexInformer) *v1.KubeVirt {
-	objects := kubeVirtInformer.GetStore().List()
+func getKubevirt(kubeVirtStore cache.Store) *v1.KubeVirt {
+	objects := kubeVirtStore.List()
 	for _, obj := range objects {
 		if kv, ok := obj.(*v1.KubeVirt); ok && kv.DeletionTimestamp == nil {
 			if kv.Status.Phase != "" {

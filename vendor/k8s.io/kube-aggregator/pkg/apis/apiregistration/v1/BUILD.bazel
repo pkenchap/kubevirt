@@ -11,6 +11,7 @@ go_library(
         "zz_generated.conversion.go",
         "zz_generated.deepcopy.go",
         "zz_generated.defaults.go",
+        "zz_generated.prerelease-lifecycle.go",
     ],
     importmap = "kubevirt.io/kubevirt/vendor/k8s.io/kube-aggregator/pkg/apis/apiregistration/v1",
     importpath = "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1",
@@ -22,6 +23,6 @@ go_library(
         "//vendor/k8s.io/apimachinery/pkg/runtime:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/runtime/schema:go_default_library",
         "//vendor/k8s.io/kube-aggregator/pkg/apis/apiregistration:go_default_library",
-        "//vendor/k8s.io/utils/pointer:go_default_library",
+        "//vendor/k8s.io/utils/ptr:go_default_library",
     ],
 )

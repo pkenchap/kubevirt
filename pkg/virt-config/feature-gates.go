@@ -13,84 +13,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2017, 2018 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
 package virtconfig
 
-import "kubevirt.io/kubevirt/pkg/virt-config/deprecation"
+import "kubevirt.io/kubevirt/pkg/virt-config/featuregate"
 
 /*
  This module is intended for determining whether an optional feature is enabled or not at the cluster-level.
 */
 
-const (
-	ExpandDisksGate       = "ExpandDisks"
-	CPUManager            = "CPUManager"
-	NUMAFeatureGate       = "NUMA"
-	IgnitionGate          = "ExperimentalIgnitionSupport"
-	HypervStrictCheckGate = "HypervStrictCheck"
-	SidecarGate           = "Sidecar"
-	GPUGate               = "GPU"
-	HostDevicesGate       = "HostDevices"
-	SnapshotGate          = "Snapshot"
-	VMExportGate          = "VMExport"
-	HotplugVolumesGate    = "HotplugVolumes"
-	HostDiskGate          = "HostDisk"
-	VirtIOFSGate          = "ExperimentalVirtiofsSupport"
-
-	DownwardMetricsFeatureGate = "DownwardMetrics"
-	Root                       = "Root"
-	ClusterProfiler            = "ClusterProfiler"
-	WorkloadEncryptionSEV      = "WorkloadEncryptionSEV"
-	// DockerSELinuxMCSWorkaround sets the SELinux level of all the non-compute virt-launcher containers to "s0".
-	DockerSELinuxMCSWorkaround = "DockerSELinuxMCSWorkaround"
-	VSOCKGate                  = "VSOCK"
-	// DisableCustomSELinuxPolicy disables the installation of the custom SELinux policy for virt-launcher
-	DisableCustomSELinuxPolicy = "DisableCustomSELinuxPolicy"
-	// KubevirtSeccompProfile indicate that Kubevirt will install its custom profile and
-	// user can tell Kubevirt to use it
-	KubevirtSeccompProfile = "KubevirtSeccompProfile"
-	// DisableMediatedDevicesHandling disables the handling of mediated
-	// devices, its creation and deletion
-	DisableMediatedDevicesHandling = "DisableMDEVConfiguration"
-	// HotplugNetworkIfacesGate enables the virtio network interface hotplug feature
-	HotplugNetworkIfacesGate = "HotplugNICs"
-	// PersistentReservation enables the use of the SCSI persistent reservation with the pr-helper daemon
-	PersistentReservation = "PersistentReservation"
-	// VMPersistentState enables persisting backend state files of VMs, such as the contents of the vTPM
-	VMPersistentState = "VMPersistentState"
-	Multiarchitecture = "MultiArchitecture"
-	// VMLiveUpdateFeaturesGate allows updating ceratin VM fields, such as CPU sockets to enable hot-plug functionality.
-	VMLiveUpdateFeaturesGate = "VMLiveUpdateFeatures"
-	// When BochsDisplayForEFIGuests is enabled, EFI guests will be started with Bochs display instead of VGA
-	BochsDisplayForEFIGuests = "BochsDisplayForEFIGuests"
-	// NetworkBindingPlugingsGate enables using a plugin to bind the pod and the VM network
-	NetworkBindingPlugingsGate = "NetworkBindingPlugins"
-	// AutoResourceLimitsGate enables automatic setting of vmi limits if there is a ResourceQuota with limits associated with the vmi namespace.
-	AutoResourceLimitsGate = "AutoResourceLimitsGate"
-
-	// Owner: @lyarwood
-	// Alpha: v1.1.0
-	//
-	// CommonInstancetypesDeploymentGate enables the deployment of common-instancetypes by virt-operator
-	CommonInstancetypesDeploymentGate = "CommonInstancetypesDeploymentGate"
-	// AlignCPUsGate allows emulator thread to assign two extra CPUs if needed to complete even parity.
-	AlignCPUsGate = "AlignCPUs"
-)
-
-func (config *ClusterConfig) isFeatureGateEnabled(featureGate string) bool {
-	deprecatedFeature := deprecation.FeatureGateInfo(featureGate)
-	if deprecatedFeature != nil {
-		switch state := deprecatedFeature.State; state {
-		case deprecation.GA:
-			return true
-		case deprecation.Discontinued:
-			return false
-		}
-	}
-
+func (config *ClusterConfig) isFeatureGateDefined(featureGate string) bool {
 	for _, fg := range config.GetConfig().DeveloperConfiguration.FeatureGates {
 		if fg == featureGate {
 			return true
@@ -99,150 +34,177 @@ func (config *ClusterConfig) isFeatureGateEnabled(featureGate string) bool {
 	return false
 }
 
+func (config *ClusterConfig) isFeatureGateEnabled(featureGate string) bool {
+	if fg := featuregate.FeatureGateInfo(featureGate); fg != nil && fg.State == featuregate.GA {
+		return true
+	}
+
+	if config.isFeatureGateDefined(featureGate) {
+		return true
+	}
+	return false
+}
+
 func (config *ClusterConfig) ExpandDisksEnabled() bool {
-	return config.isFeatureGateEnabled(ExpandDisksGate)
+	return config.isFeatureGateEnabled(featuregate.ExpandDisksGate)
 }
 
 func (config *ClusterConfig) CPUManagerEnabled() bool {
-	return config.isFeatureGateEnabled(CPUManager)
+	return config.isFeatureGateEnabled(featuregate.CPUManager)
 }
 
 func (config *ClusterConfig) NUMAEnabled() bool {
-	return config.isFeatureGateEnabled(NUMAFeatureGate)
+	return config.isFeatureGateEnabled(featuregate.NUMAFeatureGate)
 }
 
 func (config *ClusterConfig) DownwardMetricsEnabled() bool {
-	return config.isFeatureGateEnabled(DownwardMetricsFeatureGate)
+	return config.isFeatureGateEnabled(featuregate.DownwardMetricsFeatureGate)
 }
 
 func (config *ClusterConfig) IgnitionEnabled() bool {
-	return config.isFeatureGateEnabled(IgnitionGate)
+	return config.isFeatureGateEnabled(featuregate.IgnitionGate)
 }
 
 func (config *ClusterConfig) LiveMigrationEnabled() bool {
-	return config.isFeatureGateEnabled(deprecation.LiveMigrationGate)
+	return config.isFeatureGateEnabled(featuregate.LiveMigrationGate)
 }
 
-func (config *ClusterConfig) SRIOVLiveMigrationEnabled() bool {
-	return config.isFeatureGateEnabled(deprecation.SRIOVLiveMigrationGate)
+func (config *ClusterConfig) UtilityVolumesEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.UtilityVolumesGate)
 }
 
 func (config *ClusterConfig) HypervStrictCheckEnabled() bool {
-	return config.isFeatureGateEnabled(HypervStrictCheckGate)
+	return config.isFeatureGateEnabled(featuregate.HypervStrictCheckGate)
 }
 
 func (config *ClusterConfig) CPUNodeDiscoveryEnabled() bool {
-	return config.isFeatureGateEnabled(deprecation.CPUNodeDiscoveryGate)
+	return config.isFeatureGateEnabled(featuregate.CPUNodeDiscoveryGate)
 }
 
 func (config *ClusterConfig) SidecarEnabled() bool {
-	return config.isFeatureGateEnabled(SidecarGate)
+	return config.isFeatureGateEnabled(featuregate.SidecarGate)
 }
 
 func (config *ClusterConfig) GPUPassthroughEnabled() bool {
-	return config.isFeatureGateEnabled(GPUGate)
+	return config.isFeatureGateEnabled(featuregate.GPUGate)
 }
 
 func (config *ClusterConfig) SnapshotEnabled() bool {
-	return config.isFeatureGateEnabled(SnapshotGate)
+	return config.isFeatureGateEnabled(featuregate.SnapshotGate)
 }
 
 func (config *ClusterConfig) VMExportEnabled() bool {
-	return config.isFeatureGateEnabled(VMExportGate)
+	return config.isFeatureGateEnabled(featuregate.VMExportGate)
 }
 
 func (config *ClusterConfig) HotplugVolumesEnabled() bool {
-	return config.isFeatureGateEnabled(HotplugVolumesGate)
+	return config.isFeatureGateEnabled(featuregate.HotplugVolumesGate)
 }
 
 func (config *ClusterConfig) HostDiskEnabled() bool {
-	return config.isFeatureGateEnabled(HostDiskGate)
+	return config.isFeatureGateEnabled(featuregate.HostDiskGate)
 }
 
-func (config *ClusterConfig) VirtiofsEnabled() bool {
-	return config.isFeatureGateEnabled(VirtIOFSGate)
-}
-
-func (config *ClusterConfig) MacvtapEnabled() bool {
-	return config.isFeatureGateEnabled(deprecation.MacvtapGate)
-}
-
-func (config *ClusterConfig) PasstEnabled() bool {
-	return config.isFeatureGateEnabled(deprecation.PasstGate)
+func (config *ClusterConfig) VirtiofsStorageEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.VirtIOFSStorageVolumeGate)
 }
 
 func (config *ClusterConfig) HostDevicesPassthroughEnabled() bool {
-	return config.isFeatureGateEnabled(HostDevicesGate)
+	return config.isFeatureGateEnabled(featuregate.HostDevicesGate)
 }
 
 func (config *ClusterConfig) RootEnabled() bool {
-	return config.isFeatureGateEnabled(Root)
-}
-
-func (config *ClusterConfig) ClusterProfilerEnabled() bool {
-	return config.isFeatureGateEnabled(ClusterProfiler)
+	return config.isFeatureGateEnabled(featuregate.Root)
 }
 
 func (config *ClusterConfig) WorkloadEncryptionSEVEnabled() bool {
-	return config.isFeatureGateEnabled(WorkloadEncryptionSEV)
+	return config.isFeatureGateEnabled(featuregate.WorkloadEncryptionSEV)
+}
+
+func (config *ClusterConfig) WorkloadEncryptionTDXEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.WorkloadEncryptionTDX)
 }
 
 func (config *ClusterConfig) DockerSELinuxMCSWorkaroundEnabled() bool {
-	return config.isFeatureGateEnabled(DockerSELinuxMCSWorkaround)
+	return config.isFeatureGateEnabled(featuregate.DockerSELinuxMCSWorkaround)
 }
 
 func (config *ClusterConfig) VSOCKEnabled() bool {
-	return config.isFeatureGateEnabled(VSOCKGate)
-}
-
-func (config *ClusterConfig) CustomSELinuxPolicyDisabled() bool {
-	return config.isFeatureGateEnabled(DisableCustomSELinuxPolicy)
-}
-
-func (config *ClusterConfig) MediatedDevicesHandlingDisabled() bool {
-	return config.isFeatureGateEnabled(DisableMediatedDevicesHandling)
+	return config.isFeatureGateEnabled(featuregate.VSOCKGate)
 }
 
 func (config *ClusterConfig) KubevirtSeccompProfileEnabled() bool {
-	return config.isFeatureGateEnabled(KubevirtSeccompProfile)
-}
-
-func (config *ClusterConfig) HotplugNetworkInterfacesEnabled() bool {
-	return config.isFeatureGateEnabled(HotplugNetworkIfacesGate)
+	return config.isFeatureGateEnabled(featuregate.KubevirtSeccompProfile)
 }
 
 func (config *ClusterConfig) PersistentReservationEnabled() bool {
-	return config.isFeatureGateEnabled(PersistentReservation)
-}
-
-func (config *ClusterConfig) VMPersistentStateEnabled() bool {
-	return config.isFeatureGateEnabled(VMPersistentState)
+	return config.isFeatureGateEnabled(featuregate.PersistentReservation)
 }
 
 func (config *ClusterConfig) MultiArchitectureEnabled() bool {
-	return config.isFeatureGateEnabled(Multiarchitecture)
-}
-
-func (config *ClusterConfig) VMLiveUpdateFeaturesEnabled() bool {
-	return config.isFeatureGateEnabled(VMLiveUpdateFeaturesGate)
-}
-
-func (config *ClusterConfig) BochsDisplayForEFIGuestsEnabled() bool {
-	return config.isFeatureGateEnabled(BochsDisplayForEFIGuests)
-}
-
-func (config *ClusterConfig) NetworkBindingPlugingsEnabled() bool {
-	return config.isFeatureGateEnabled(NetworkBindingPlugingsGate)
-}
-
-func (config *ClusterConfig) AutoResourceLimitsEnabled() bool {
-	return config.isFeatureGateEnabled(AutoResourceLimitsGate)
-}
-
-func (config *ClusterConfig) CommonInstancetypesDeploymentEnabled() bool {
-	return config.isFeatureGateEnabled(CommonInstancetypesDeploymentGate)
+	return config.isFeatureGateEnabled(featuregate.MultiArchitecture)
 }
 
 func (config *ClusterConfig) AlignCPUsEnabled() bool {
-	return config.isFeatureGateEnabled(AlignCPUsGate)
+	return config.isFeatureGateEnabled(featuregate.AlignCPUsGate)
+}
+
+func (config *ClusterConfig) ImageVolumeEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.ImageVolume)
+}
+
+func (config *ClusterConfig) LibvirtHooksServerAndClientEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.LibvirtHooksServerAndClient)
+}
+
+func (config *ClusterConfig) VideoConfigEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.VideoConfig)
+}
+
+func (config *ClusterConfig) NodeRestrictionEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.NodeRestrictionGate)
+}
+
+func (config *ClusterConfig) ObjectGraphEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.ObjectGraph)
+}
+
+func (config *ClusterConfig) DeclarativeHotplugVolumesEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.DeclarativeHotplugVolumesGate)
+}
+
+func (config *ClusterConfig) SecureExecutionEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.SecureExecution)
+}
+
+func (config *ClusterConfig) PanicDevicesEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.PanicDevicesGate)
+}
+
+func (config *ClusterConfig) PasstIPStackMigrationEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.PasstIPStackMigration)
+}
+
+func (config *ClusterConfig) DecentralizedLiveMigrationEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.DecentralizedLiveMigration)
+}
+
+func (config *ClusterConfig) GPUsWithDRAGateEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.GPUsWithDRAGate)
+}
+
+func (config *ClusterConfig) HostDevicesWithDRAEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.HostDevicesWithDRAGate)
+}
+
+func (config *ClusterConfig) ConfigurableHypervisorEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.ConfigurableHypervisor)
+}
+
+func (config *ClusterConfig) IncrementalBackupEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.IncrementalBackupGate)
+}
+
+func (config *ClusterConfig) MigrationPriorityQueueEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.MigrationPriorityQueue)
 }

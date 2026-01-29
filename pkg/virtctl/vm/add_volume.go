@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2023 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -22,61 +22,68 @@ package vm
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
+	"time"
 
 	"github.com/spf13/cobra"
 	k8sv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/clientcmd"
+
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+
+	"kubevirt.io/kubevirt/pkg/virtctl/clientconfig"
 	"kubevirt.io/kubevirt/pkg/virtctl/templates"
 )
 
 const (
-	COMMAND_ADDVOLUME = "addvolume"
-	serialArg         = "serial"
-	cacheArg          = "cache"
-	diskTypeArg       = "disk-type"
+	serialArg       = "serial"
+	cacheArg        = "cache"
+	diskTypeArg     = "disk-type"
+	busTypeArg      = "bus"
+	concurrentError = "the server rejected our request due to an error in our request"
+	maxRetries      = 15
 )
 
 var (
 	serial   string
 	cache    string
 	diskType string
+	busType  string
 )
 
-func NewAddVolumeCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
+func NewAddVolumeCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "addvolume VMI",
 		Short:   "add a volume to a running VM",
 		Example: usageAddVolume(),
-		Args:    templates.ExactArgs("addvolume", 1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			c := Command{command: COMMAND_ADDVOLUME, clientConfig: clientConfig}
-			return c.addVolumeRun(args)
-		},
+		Args:    cobra.ExactArgs(1),
+		RunE:    addVolumeRun,
 	}
 	cmd.SetUsageTemplate(templates.UsageTemplate())
 	cmd.Flags().StringVar(&volumeName, volumeNameArg, "", "name used in volumes section of spec")
 	cmd.MarkFlagRequired(volumeNameArg)
 	cmd.Flags().StringVar(&serial, serialArg, "", "serial number you want to assign to the disk")
 	cmd.Flags().StringVar(&cache, cacheArg, "", "caching options attribute control the cache mechanism")
-	cmd.Flags().BoolVar(&persist, persistArg, false, "if set, the added volume will be persisted in the VM spec (if it exists)")
+	cmd.Flags().BoolVar(&persist, persistArg, false, "[deprecated] this flag has no effect and will be removed in a future release")
 	cmd.Flags().BoolVar(&dryRun, dryRunArg, false, dryRunCommandUsage)
 	cmd.Flags().StringVar(&diskType, diskTypeArg, "disk", "specifies disk type to be hotplugged (disk/lun). Disk by default.")
+	cmd.Flags().StringVar(&busType, busTypeArg, string(v1.DiskBusSCSI), fmt.Sprintf("specifies disk bus. %s by default.", v1.DiskBusSCSI))
 
 	return cmd
 }
 
 func usageAddVolume() string {
-	return `  #Dynamically attach a volume to a running VM.
-  {{ProgramName}} addvolume fedora-dv --volume-name=example-dv
-
-  #Dynamically attach a volume to a running VM giving it a serial number to identify the volume inside the guest.
+	return `	#Dynamically attach a volume to a running VM giving it a serial number to identify the volume inside the guest.
   {{ProgramName}} addvolume fedora-dv --volume-name=example-dv --serial=1234567890
 
-  #Dynamically attach a volume to a running VM and persisting it in the VM spec. At next VM restart the volume will be attached like any other volume.
+  #Dynamically attach a volume to a running VM, persisting it in the VM spec. At next VM restart the volume will be attached like any other volume.
+  {{ProgramName}} addvolume fedora-dv --volume-name=example-dv
+
+  #[deprecated]: Dynamically attach a volume to a running VM and persisting it in the VM spec. At next VM restart the volume will be attached like any other volume.
+  --persist flag has no effect and will be removed in future release. New default behavior will be to persist in VM spec even if flag is not provided.
   {{ProgramName}} addvolume fedora-dv --volume-name=example-dv --persist
 
   #Dynamically attach a volume with 'none' cache attribute to a running VM.
@@ -84,8 +91,8 @@ func usageAddVolume() string {
   `
 }
 
-func (o *Command) addVolumeRun(args []string) error {
-	virtClient, namespace, err := GetNamespaceAndClient(o.clientConfig)
+func addVolumeRun(cmd *cobra.Command, args []string) error {
+	virtClient, namespace, _, err := clientconfig.ClientAndNamespaceFromContext(cmd.Context())
 	if err != nil {
 		return err
 	}
@@ -136,14 +143,21 @@ func addVolume(vmiName, volumeName, namespace string, virtClient kubecli.Kubevir
 		DryRun:       *dryRunOption,
 	}
 
+	bus := v1.DiskBus(busType)
 	switch diskType {
 	case "disk":
+		if bus != v1.DiskBusSCSI && bus != v1.DiskBusVirtio {
+			return fmt.Errorf("Invalid bus type '%s' for disk. Only '%s' and '%s' are supported.", busType, v1.DiskBusSCSI, v1.DiskBusVirtio)
+		}
 		hotplugRequest.Disk.DiskDevice.Disk = &v1.DiskTarget{
-			Bus: "scsi",
+			Bus: bus,
 		}
 	case "lun":
+		if bus != v1.DiskBusSCSI {
+			return fmt.Errorf("Invalid bus type '%s' for LUN disk. Only '%s' bus is supported.", busType, v1.DiskBusSCSI)
+		}
 		hotplugRequest.Disk.DiskDevice.LUN = &v1.LunTarget{
-			Bus: "scsi",
+			Bus: bus,
 		}
 	default:
 		return fmt.Errorf("Invalid disk type '%s'. Only LUN and Disk are supported.", diskType)
@@ -163,13 +177,29 @@ func addVolume(vmiName, volumeName, namespace string, virtClient kubecli.Kubevir
 			return fmt.Errorf("error adding volume, invalid cache value %s", cache)
 		}
 	}
-	if !persist {
-		err = virtClient.VirtualMachineInstance(namespace).AddVolume(context.Background(), vmiName, hotplugRequest)
-	} else {
+	retry := 0
+	for retry < maxRetries {
+		// default to adding volume to both VM and VMI if owner VM exists
 		err = virtClient.VirtualMachine(namespace).AddVolume(context.Background(), vmiName, hotplugRequest)
+
+		// If VM is not found, VMI is standalone
+		if k8serrors.IsNotFound(err) {
+			err = virtClient.VirtualMachineInstance(namespace).AddVolume(context.Background(), vmiName, hotplugRequest)
+		}
+
+		if err != nil && err.Error() != concurrentError {
+			return fmt.Errorf("error adding volume, %v", err)
+		}
+		if err == nil {
+			break
+		}
+		retry++
+		if retry < maxRetries {
+			time.Sleep(time.Duration(retry*(rand.IntN(5))) * time.Millisecond)
+		}
 	}
-	if err != nil {
-		return fmt.Errorf("error adding volume, %v", err)
+	if err != nil && retry == maxRetries {
+		return fmt.Errorf("error adding volume after %d retries", maxRetries)
 	}
 	fmt.Printf("Successfully submitted add volume request to VM %s for volume %s\n", vmiName, volumeName)
 	return nil

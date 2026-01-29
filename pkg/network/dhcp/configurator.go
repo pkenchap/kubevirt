@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2021 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -53,7 +53,7 @@ type ConfigGenerator interface {
 	Generate() (*cache.DHCPConfig, error)
 }
 
-func NewBridgeConfigurator(cacheCreator cacheCreator, launcherPID string, advertisingIfaceName string, handler netdriver.NetworkHandler, podInterfaceName string,
+func NewBridgeConfigurator(cacheCreator cacheCreator, advertisingIfaceName string, handler netdriver.NetworkHandler, podInterfaceName string,
 	vmiSpecIfaces []v1.Interface, vmiSpecIface *v1.Interface, subdomain string) *configurator {
 	return &configurator{
 		podInterfaceName:     podInterfaceName,
@@ -64,7 +64,6 @@ func NewBridgeConfigurator(cacheCreator cacheCreator, launcherPID string, advert
 			handler:          handler,
 			podInterfaceName: podInterfaceName,
 			cacheCreator:     cacheCreator,
-			launcherPID:      launcherPID,
 			vmiSpecIfaces:    vmiSpecIfaces,
 			vmiSpecIface:     vmiSpecIface,
 			subdomain:        subdomain,

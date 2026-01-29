@@ -1,4 +1,4 @@
-//go:build amd64
+//go:build amd64 || s390x
 
 /*
  * This file is part of the KubeVirt project
@@ -15,7 +15,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2021 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -33,12 +33,14 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
+	"libvirt.org/go/libvirtxml"
 
 	v1 "kubevirt.io/api/core/v1"
 
 	"kubevirt.io/kubevirt/pkg/testutils"
-	util "kubevirt.io/kubevirt/pkg/virt-handler/node-labeller/util"
+	"kubevirt.io/kubevirt/pkg/virt-handler/node-labeller/util"
 )
 
 const nodeName = "testNode"
@@ -46,6 +48,9 @@ const nodeName = "testNode"
 var _ = Describe("Node-labeller ", func() {
 	var nlController *NodeLabeller
 	var kubeClient *fake.Clientset
+	var fakeNodeStore cache.Store
+	var cpuCounter *libvirtxml.CapsHostCPUCounter
+	var supportedMachines []libvirtxml.CapsGuestMachine
 
 	initNodeLabeller := func(kubevirt *v1.KubeVirt) {
 		config, _, _ := testutils.NewFakeClusterConfigUsingKV(kubevirt)
@@ -53,14 +58,24 @@ var _ = Describe("Node-labeller ", func() {
 		recorder.IncludeObject = true
 
 		var err error
-		nlController, err = newNodeLabeller(config, kubeClient.CoreV1().Nodes(), nodeName, "testdata", recorder)
+		nlController, err = newNodeLabeller(config, kubeClient.CoreV1().Nodes(), fakeNodeStore, nodeName, "testdata", recorder, cpuCounter, supportedMachines)
 		Expect(err).ToNot(HaveOccurred())
 	}
 
 	BeforeEach(func() {
-		node := newNode(nodeName)
+		cpuCounter = &libvirtxml.CapsHostCPUCounter{
+			Name:      "tsc",
+			Frequency: 4008012000,
+			Scaling:   "no",
+		}
 
+		supportedMachines = []libvirtxml.CapsGuestMachine{{Name: "testmachine"}}
+
+		node := newNode(nodeName)
 		kubeClient = fake.NewSimpleClientset(node)
+		fakeNodeInformer, _ := testutils.NewFakeInformerFor(&k8sv1.Node{})
+		fakeNodeStore = fakeNodeInformer.GetStore()
+		fakeNodeStore.Add(node)
 		initNodeLabeller(&v1.KubeVirt{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "kubevirt",
@@ -69,7 +84,6 @@ var _ = Describe("Node-labeller ", func() {
 			Spec: v1.KubeVirtSpec{
 				Configuration: v1.KubeVirtConfiguration{
 					ObsoleteCPUModels: util.DefaultObsoleteCPUModels,
-					MinCPUModel:       "Penryn",
 				},
 			},
 		})
@@ -77,7 +91,7 @@ var _ = Describe("Node-labeller ", func() {
 		nlController.queue = mockQueue
 
 		mockQueue.ExpectAdds(1)
-		nlController.queue.Add(node)
+		nlController.queue.Add(node.Name)
 		mockQueue.Wait()
 	})
 
@@ -90,9 +104,7 @@ var _ = Describe("Node-labeller ", func() {
 		Expect(node.Labels).ToNot(BeEmpty())
 
 		Expect(res).To(BeTrue(), "labeller should end with true result")
-		Consistently(func() int {
-			return nlController.queue.Len()
-		}, 5*time.Second, time.Second).Should(Equal(0), "labeller should process all nodes from queue")
+		Expect(nlController.queue.Len()).To(BeZero(), "labeller should process all nodes from queue")
 	})
 
 	It("should re-queue node if node-labelling fail", func() {
@@ -114,6 +126,14 @@ var _ = Describe("Node-labeller ", func() {
 
 		node := retrieveNode(kubeClient)
 		Expect(node.Labels).To(HaveKey(HavePrefix(v1.HostModelCPULabel)))
+	})
+
+	It("should add supported machine type labels", func() {
+		res := nlController.execute()
+		Expect(res).To(BeTrue())
+
+		node := retrieveNode(kubeClient)
+		Expect(node.Labels).To(HaveKey(v1.SupportedMachineTypeLabel + "testmachine"))
 	})
 	It("should add host cpu required features", func() {
 		res := nlController.execute()
@@ -139,6 +159,65 @@ var _ = Describe("Node-labeller ", func() {
 		Expect(node.Labels).To(HaveKey(v1.SEVESLabel))
 	})
 
+	It("should not add SecureExecution label", func() {
+		nlController.volumePath = "testdata/s390x"
+		Expect(nlController.loadAll()).Should(Succeed())
+
+		res := nlController.execute()
+		Expect(res).To(BeTrue())
+
+		node := retrieveNode(kubeClient)
+		Expect(node.Labels).To(Not(HaveKey(v1.SecureExecutionLabel)))
+	})
+
+	It("should  add SecureExecution label", func() {
+		nlController.domCapabilitiesFileName = "s390x/domcapabilities_s390-pv.xml"
+		Expect(nlController.loadAll()).Should(Succeed())
+
+		res := nlController.execute()
+		Expect(res).To(BeTrue())
+
+		node := retrieveNode(kubeClient)
+		Expect(node.Labels).To(HaveKey(v1.SecureExecutionLabel))
+	})
+
+	It("should add SEV-SNP label", func() {
+		res := nlController.execute()
+		Expect(res).To(BeTrue())
+
+		node := retrieveNode(kubeClient)
+		Expect(node.Labels).To(HaveKey(v1.SEVSNPLabel))
+	})
+
+	It("should not add SEV-SNP label when SNP is not supported", func() {
+		nlController.SEV.SupportedSNP = "no"
+		res := nlController.execute()
+		Expect(res).To(BeTrue())
+
+		node := retrieveNode(kubeClient)
+		Expect(node.Labels).To(Not(HaveKey(v1.SEVSNPLabel)))
+	})
+
+	It("should not add TDX label", func() {
+		// virsh_domcapabilities.xml in which tdx is disabled
+		res := nlController.execute()
+		Expect(res).To(BeTrue())
+
+		node := retrieveNode(kubeClient)
+		Expect(node.Labels).To(Not(HaveKey(v1.TDXLabel)))
+	})
+
+	It("should add TDX label with value set to true", func() {
+		nlController.domCapabilitiesFileName = "domcapabilities_tdx.xml"
+		Expect(nlController.loadAll()).Should(Succeed())
+
+		res := nlController.execute()
+		Expect(res).To(BeTrue())
+
+		node := retrieveNode(kubeClient)
+		Expect(node.Labels).To(HaveKeyWithValue(v1.TDXLabel, "true"))
+	})
+
 	It("should add usable cpu model labels for the host cpu model", func() {
 		res := nlController.execute()
 		Expect(res).To(BeTrue())
@@ -148,6 +227,17 @@ var _ = Describe("Node-labeller ", func() {
 			HaveKey(v1.HostModelCPULabel+"Skylake-Client-IBRS"),
 			HaveKey(v1.CPUModelLabel+"Skylake-Client-IBRS"),
 			HaveKey(v1.SupportedHostModelMigrationCPU+"Skylake-Client-IBRS"),
+		))
+	})
+
+	It("should not include non-usable CPU models with the CPU model label but include them with the SupportedHostModelMigrationCPU label", func() {
+		res := nlController.execute()
+		Expect(res).To(BeTrue())
+
+		node := retrieveNode(kubeClient)
+		Expect(node.Labels).To(SatisfyAll(
+			Not(HaveKey(v1.CPUModelLabel+"EPYC-IBPB")),
+			HaveKey(v1.SupportedHostModelMigrationCPU+"EPYC-IBPB"),
 		))
 	})
 
@@ -162,16 +252,35 @@ var _ = Describe("Node-labeller ", func() {
 		))
 	})
 
-	It("should not add usable cpu model labels if some features are not suported (svm)", func() {
+	DescribeTable("should add cpu tsc labels if tsc counter exists, its name is tsc and according to scaling value", func(scaling, result string) {
+		nlController.cpuCounter.Scaling = scaling
 		res := nlController.execute()
 		Expect(res).To(BeTrue())
 
 		node := retrieveNode(kubeClient)
-		Expect(node.Labels).ToNot(SatisfyAny(
-			HaveKey(v1.CPUModelLabel+"Opteron_G2"),
-			HaveKey(v1.SupportedHostModelMigrationCPU+"Opteron_G2"),
+		Expect(node.Labels).To(SatisfyAll(
+			HaveKeyWithValue(v1.CPUTimerLabel+"tsc-frequency", fmt.Sprintf("%d", cpuCounter.Frequency)),
+			HaveKeyWithValue(v1.CPUTimerLabel+"tsc-scalable", result),
 		))
-	})
+	},
+		Entry("scaling is set to no", "no", "false"),
+		Entry("scaling is set to yes", "yes", "true"),
+	)
+
+	DescribeTable("should not add cpu tsc labels", func(counter *libvirtxml.CapsHostCPUCounter) {
+		nlController.cpuCounter = counter
+		res := nlController.execute()
+		Expect(res).To(BeTrue())
+
+		node := retrieveNode(kubeClient)
+		Expect(node.Labels).To(SatisfyAll(
+			Not(HaveKey(v1.CPUTimerLabel+"tsc-frequency")),
+			Not(HaveKey(v1.CPUTimerLabel+"tsc-scalable")),
+		))
+	},
+		Entry("cpuCounter name is not tsc", &libvirtxml.CapsHostCPUCounter{}),
+		Entry("cpuCounter is nil", nil),
+	)
 
 	It("should remove not found cpu model and migration model", func() {
 		node := retrieveNode(kubeClient)
@@ -183,6 +292,7 @@ var _ = Describe("Node-labeller ", func() {
 			HaveKey(v1.CPUModelLabel+"Cascadelake-Server"),
 			HaveKey(v1.SupportedHostModelMigrationCPU+"Cascadelake-Server"),
 		))
+		fakeNodeStore.Update(node)
 
 		res := nlController.execute()
 		Expect(res).To(BeTrue())
@@ -211,6 +321,7 @@ var _ = Describe("Node-labeller ", func() {
 			HaveKey(v1.CPUModelLabel+"Cascadelake-Server"),
 			HaveKey(v1.SupportedHostModelMigrationCPU+"Cascadelake-Server"),
 		))
+		fakeNodeStore.Update(node)
 
 		res := nlController.execute()
 		Expect(res).To(BeTrue())
@@ -244,6 +355,33 @@ var _ = Describe("Node-labeller ", func() {
 		// Added in BeforeEach
 		Expect(node.Labels).To(HaveKey("INeedToBeHere"))
 	})
+
+	DescribeTable("should add machine type labels", func(machines []libvirtxml.CapsGuestMachine, arch string) {
+		supportedMachines = machines
+
+		initNodeLabeller(&v1.KubeVirt{})
+		nlController.arch = newArchLabeller(arch)
+		mockQueue := testutils.NewMockWorkQueue(nlController.queue)
+		nlController.queue = mockQueue
+
+		mockQueue.ExpectAdds(1)
+		nlController.queue.Add(nodeName)
+		mockQueue.Wait()
+
+		res := nlController.execute()
+		Expect(res).To(BeTrue(), "labeller should complete successfully")
+
+		node := retrieveNode(kubeClient)
+
+		for _, machine := range machines {
+			expectedLabelKey := v1.SupportedMachineTypeLabel + machine.Name
+			Expect(node.Labels).To(HaveKey(expectedLabelKey), "expected machine type label %s to be present", expectedLabelKey)
+		}
+	},
+		Entry("for amd64", []libvirtxml.CapsGuestMachine{{Name: "q35"}, {Name: "q35-rhel9.6.0"}}, amd64),
+		Entry("for arm64", []libvirtxml.CapsGuestMachine{{Name: "virt"}, {Name: "virt-rhel9.6.0"}}, arm64),
+	)
+
 })
 
 func newNode(name string) *k8sv1.Node {

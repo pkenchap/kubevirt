@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2018 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -25,12 +25,12 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/golang/mock/gomock"
+	"go.uber.org/mock/gomock"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
 	virtv1 "kubevirt.io/api/core/v1"
-	cdifake "kubevirt.io/client-go/generated/containerized-data-importer/clientset/versioned/fake"
+	cdifake "kubevirt.io/client-go/containerizeddataimporter/fake"
 	"kubevirt.io/client-go/kubecli"
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
 )
@@ -142,5 +142,47 @@ var _ = Describe("DataVolume utils test", func() {
 			Entry("sourceRef namespace not specified", "", "bar", "bar"),
 			Entry("everything specified", "foo", "bar", "bar"),
 		)
+
+		It("should properly handle DataVolume sourceRef pointer", func() {
+			sourceRefName := "sourceRef"
+			sourceRefPointerName := "sourceRefPointer"
+			sourceName := "name"
+
+			pointerRef := &cdiv1.DataSource{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: vm.Namespace,
+					Name:      sourceRefPointerName,
+				},
+				Spec: cdiv1.DataSourceSpec{
+					Source: cdiv1.DataSourceSource{
+						DataSource: &cdiv1.DataSourceRefSourceDataSource{
+							Namespace: vm.Namespace,
+							Name:      sourceRefName,
+						},
+					},
+				},
+				Status: cdiv1.DataSourceStatus{
+					Source: cdiv1.DataSourceSource{
+						PVC: &cdiv1.DataVolumeSourcePVC{
+							Namespace: vm.Namespace,
+							Name:      sourceName,
+						},
+					},
+				},
+			}
+
+			dv := &cdiv1.DataVolumeSpec{
+				SourceRef: &cdiv1.DataVolumeSourceRef{
+					Kind: "DataSource",
+					Name: sourceRefPointerName,
+				},
+			}
+
+			cs, err := GetResolvedCloneSource(context.TODO(), createClient(pointerRef), vm.Namespace, dv)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(cs).ToNot(BeNil())
+			Expect(cs.PVC.Namespace).To(Equal(vm.Namespace))
+			Expect(cs.PVC.Name).To(Equal(sourceName))
+		})
 	})
 })

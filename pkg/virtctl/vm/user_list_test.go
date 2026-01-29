@@ -13,7 +13,7 @@
 * See the License for the specific language governing permissions and
 * limitations under the License.
 *
-* Copyright 2023 Red Hat, Inc.
+* Copyright The KubeVirt Authors.
 *
  */
 
@@ -23,15 +23,16 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
 
 	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
-	"kubevirt.io/kubevirt/tests/clientcmd"
+	"kubevirt.io/kubevirt/pkg/virtctl/testing"
 )
 
 var _ = Describe("User list command", func() {
@@ -47,10 +48,10 @@ var _ = Describe("User list command", func() {
 	})
 
 	It("should fail with missing input parameters", func() {
-		cmd := clientcmd.NewRepeatableVirtctlCommand("userlist")
+		cmd := testing.NewRepeatableVirtctlCommand("userlist")
 		err := cmd()
 		Expect(err).To(HaveOccurred())
-		Expect(err).Should(MatchError("argument validation failed"))
+		Expect(err).Should(MatchError("accepts 1 arg(s), received 0"))
 	})
 
 	It("should fail with non existing VM", func() {
@@ -62,7 +63,7 @@ var _ = Describe("User list command", func() {
 
 		vmiInterface.EXPECT().UserList(context.Background(), vmName).Return(v1.VirtualMachineInstanceGuestOSUserList{}, fmt.Errorf("an error on the server (\"virtualmachineinstance.kubevirt.io \"testvm\" not found\") has prevented the request from succeeding")).Times(1)
 
-		cmd := clientcmd.NewRepeatableVirtctlCommand("userlist", vmName)
+		cmd := testing.NewRepeatableVirtctlCommand("userlist", vmName)
 		err := cmd()
 		Expect(err).To(HaveOccurred())
 		Expect(err).Should(MatchError("Error listing users of VirtualMachineInstance testvm, an error on the server (\"virtualmachineinstance.kubevirt.io \"testvm\" not found\") has prevented the request from succeeding"))
@@ -79,7 +80,7 @@ var _ = Describe("User list command", func() {
 
 		vmiInterface.EXPECT().UserList(context.Background(), vm.Name).Return(v1.VirtualMachineInstanceGuestOSUserList{}, fmt.Errorf("an error on the server (\"Operation cannot be fulfilled on virtualmachineinstance.kubevirt.io \"testvm\": VMI does not have guest agent connected\") has prevented the request from succeeding")).Times(1)
 
-		cmd := clientcmd.NewRepeatableVirtctlCommand("userlist", vm.Name)
+		cmd := testing.NewRepeatableVirtctlCommand("userlist", vm.Name)
 		err := cmd()
 		Expect(err).To(HaveOccurred())
 		Expect(err).Should(MatchError("Error listing users of VirtualMachineInstance testvm, an error on the server (\"Operation cannot be fulfilled on virtualmachineinstance.kubevirt.io \"testvm\": VMI does not have guest agent connected\") has prevented the request from succeeding"))
@@ -103,7 +104,7 @@ var _ = Describe("User list command", func() {
 
 		vmiInterface.EXPECT().UserList(context.Background(), vm.Name).Return(userList, nil).Times(1)
 
-		cmd := clientcmd.NewRepeatableVirtctlCommand("userlist", vm.Name)
+		cmd := testing.NewRepeatableVirtctlCommand("userlist", vm.Name)
 		Expect(cmd()).To(Succeed())
 	})
 })

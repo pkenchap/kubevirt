@@ -23,8 +23,8 @@ fail_if_cri_bin_missing() {
     fi
 }
 
-if [ -f cluster-up/hack/common.sh ]; then
-    source cluster-up/hack/common.sh
+if [ -f kubevirtci/cluster-up/hack/common.sh ]; then
+    source kubevirtci/cluster-up/hack/common.sh
 fi
 
 export GOFLAGS="$GOFLAGS -mod=vendor"
@@ -132,8 +132,17 @@ function format_archname() {
             fi
             echo ${arch}
             ;;
+        crossbuild-s390x | s390x)
+            [[ $tag ]] && echo "s390x" && return
+            if [ ${local_platform} != "s390x" ]; then
+                arch="crossbuild-s390x"
+            else
+                arch="s390x"
+            fi
+            echo ${arch}
+            ;;
         *)
-            echo "ERROR: invalid Arch, ${platform}, only support x86_64 and aarch64"
+            echo "ERROR: invalid Arch, ${platform}, only support x86_64, aarch64 and s390x"
             exit 1
             ;;
         esac

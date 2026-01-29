@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2022 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -144,7 +144,7 @@ func (w *ObjectEventWatcher) Watch(ctx context.Context, processFunc ProcessFunc,
 	if w.warningPolicy.FailOnWarnings {
 		f = func(event *v1.Event) bool {
 			msg := fmt.Sprintf("Event(%#v): type: '%v' reason: '%v' %v", event.InvolvedObject, event.Type, event.Reason, event.Message)
-			if w.warningPolicy.shouldIgnoreWarning(event) == false {
+			if !w.warningPolicy.shouldIgnoreWarning(event) {
 				ExpectWithOffset(1, event.Type).NotTo(Equal(string(WarningEvent)), "Unexpected Warning event received: %s,%s: %s", event.InvolvedObject.Name, event.InvolvedObject.UID, event.Message)
 			}
 			log.Log.With(objectRefOption(&event.InvolvedObject)).Info(msg)

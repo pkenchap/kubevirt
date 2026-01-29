@@ -6,14 +6,14 @@ import (
 	jsonpatch "github.com/evanphx/json-patch"
 	promv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 
-	promclientfake "kubevirt.io/client-go/generated/prometheus-operator/clientset/versioned/fake"
+	promclientfake "kubevirt.io/client-go/prometheusoperator/fake"
 
 	"kubevirt.io/kubevirt/pkg/monitoring/rules"
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/components"
 
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
 
 	extclientfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -201,5 +201,24 @@ var _ = Describe("Apply Prometheus", func() {
 
 		Expect(r.createOrUpdatePrometheusRule(requiredPR)).To(Succeed())
 		Expect(patched).To(BeTrue())
+	})
+
+	It("should not create PrometheusRules when PrometheusRules is disabled", func() {
+		created := false
+		promClient.Fake.PrependReactor("create", "prometheusrules", func(action testing.Action) (handled bool, ret runtime.Object, err error) {
+			created = true
+			return true, nil, nil
+		})
+
+		r := &Reconciler{
+			kv:           kv,
+			stores:       stores,
+			clientset:    clientset,
+			expectations: expectations,
+			config:       util.OperatorConfig{PrometheusRulesEnabled: false},
+		}
+
+		Expect(r.createOrUpdatePrometheusRules()).To(Succeed())
+		Expect(created).To(BeFalse(), "PrometheusRule should not be created when disabled")
 	})
 })

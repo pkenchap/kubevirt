@@ -1,24 +1,47 @@
+/*
+ * This file is part of the KubeVirt project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * Copyright The KubeVirt Authors.
+ *
+ */
+
 package fuzz
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"reflect"
 	"testing"
 	"time"
 
-	gofuzz "github.com/google/gofuzz"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	v1 "kubevirt.io/api/core/v1"
+	"sigs.k8s.io/randfill"
 
+	instancetypeWebhooks "kubevirt.io/kubevirt/pkg/instancetype/webhooks/vm"
+	netadmitter "kubevirt.io/kubevirt/pkg/network/admitter"
 	"kubevirt.io/kubevirt/pkg/testutils"
 	"kubevirt.io/kubevirt/pkg/virt-api/webhooks"
 	"kubevirt.io/kubevirt/pkg/virt-api/webhooks/validating-webhook/admitters"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
-	"kubevirt.io/kubevirt/pkg/virt-config/deprecation"
+	"kubevirt.io/kubevirt/pkg/virt-config/featuregate"
 )
 
 type fuzzOption int
@@ -37,14 +60,25 @@ type testCase struct {
 
 // FuzzAdmitter tests the Validation webhook execution logic with random input: It does schema validation (syntactic check), followed by executing the domain specific validation logic (semantic checks).
 func FuzzAdmitter(f *testing.F) {
+	validateNetwork := func(field *field.Path, vmiSpec *v1.VirtualMachineInstanceSpec, clusterCfg *virtconfig.ClusterConfig) []metav1.StatusCause {
+		return netadmitter.Validate(field, vmiSpec, clusterCfg)
+	}
+
+	const kubeVirtNamespace = "kubevirt"
+	kubeVirtServiceAccounts := webhooks.KubeVirtServiceAccounts(kubeVirtNamespace)
+
 	testCases := []testCase{
 		{
 			name:    "SyntacticVirtualMachineInstanceFuzzing",
 			gvk:     webhooks.VirtualMachineInstanceGroupVersionResource,
 			objType: &v1.VirtualMachineInstance{},
 			admit: func(config *virtconfig.ClusterConfig, request *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
-				adm := &admitters.VMICreateAdmitter{ClusterConfig: config}
-				return adm.Admit(request)
+				adm := &admitters.VMICreateAdmitter{
+					ClusterConfig:           config,
+					KubeVirtServiceAccounts: kubeVirtServiceAccounts,
+					SpecValidators:          []admitters.SpecValidator{validateNetwork},
+				}
+				return adm.Admit(context.Background(), request)
 			},
 			fuzzFuncs: fuzzFuncs(withSyntaxErrors),
 		},
@@ -53,8 +87,12 @@ func FuzzAdmitter(f *testing.F) {
 			gvk:     webhooks.VirtualMachineInstanceGroupVersionResource,
 			objType: &v1.VirtualMachineInstance{},
 			admit: func(config *virtconfig.ClusterConfig, request *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
-				adm := &admitters.VMICreateAdmitter{ClusterConfig: config}
-				return adm.Admit(request)
+				adm := &admitters.VMICreateAdmitter{
+					ClusterConfig:           config,
+					KubeVirtServiceAccounts: kubeVirtServiceAccounts,
+					SpecValidators:          []admitters.SpecValidator{validateNetwork},
+				}
+				return adm.Admit(context.Background(), request)
 			},
 			fuzzFuncs: fuzzFuncs(),
 		},
@@ -64,10 +102,11 @@ func FuzzAdmitter(f *testing.F) {
 			objType: &v1.VirtualMachine{},
 			admit: func(config *virtconfig.ClusterConfig, request *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 				adm := &admitters.VMsAdmitter{
-					ClusterConfig:       config,
-					InstancetypeMethods: testutils.NewMockInstancetypeMethods(),
+					ClusterConfig:           config,
+					KubeVirtServiceAccounts: kubeVirtServiceAccounts,
+					InstancetypeAdmitter:    instancetypeWebhooks.NewAdmitterStub(),
 				}
-				return adm.Admit(request)
+				return adm.Admit(context.Background(), request)
 			},
 			fuzzFuncs: fuzzFuncs(withSyntaxErrors),
 		},
@@ -77,10 +116,11 @@ func FuzzAdmitter(f *testing.F) {
 			objType: &v1.VirtualMachine{},
 			admit: func(config *virtconfig.ClusterConfig, request *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 				adm := &admitters.VMsAdmitter{
-					ClusterConfig:       config,
-					InstancetypeMethods: testutils.NewMockInstancetypeMethods(),
+					ClusterConfig:           config,
+					KubeVirtServiceAccounts: kubeVirtServiceAccounts,
+					InstancetypeAdmitter:    instancetypeWebhooks.NewAdmitterStub(),
 				}
-				return adm.Admit(request)
+				return adm.Admit(context.Background(), request)
 			},
 			fuzzFuncs: fuzzFuncs(),
 		},
@@ -108,9 +148,9 @@ func FuzzAdmitter(f *testing.F) {
 				newObj := reflect.New(reflect.TypeOf(tc.objType))
 				obj := newObj.Interface()
 
-				gofuzz.NewWithSeed(seed).NilChance(0.1).NumElements(0, 15).Funcs(
+				randfill.NewWithSeed(seed).NilChance(0.1).NumElements(0, 15).Funcs(
 					tc.fuzzFuncs...,
-				).Fuzz(obj)
+				).Fill(obj)
 				request := toAdmissionReview(obj, tc.gvk)
 				config := fuzzKubeVirtConfig(seed)
 				startTime := time.Now()
@@ -158,36 +198,33 @@ func toAdmissionReview(obj interface{}, gvr metav1.GroupVersionResource) *admiss
 
 func fuzzKubeVirtConfig(seed int64) *virtconfig.ClusterConfig {
 	kv := &v1.KubeVirt{}
-	gofuzz.NewWithSeed(seed).Funcs(
-		func(dc *v1.DeveloperConfiguration, c gofuzz.Continue) {
-			c.FuzzNoCustom(dc)
+	randfill.NewWithSeed(seed).Funcs(
+		func(dc *v1.DeveloperConfiguration, c randfill.Continue) {
+			c.FillNoCustom(dc)
 			featureGates := []string{
-				virtconfig.ExpandDisksGate,
-				virtconfig.CPUManager,
-				virtconfig.NUMAFeatureGate,
-				virtconfig.IgnitionGate,
-				deprecation.LiveMigrationGate,
-				deprecation.SRIOVLiveMigrationGate,
-				deprecation.CPUNodeDiscoveryGate,
-				virtconfig.HypervStrictCheckGate,
-				virtconfig.SidecarGate,
-				virtconfig.GPUGate,
-				virtconfig.HostDevicesGate,
-				virtconfig.SnapshotGate,
-				virtconfig.VMExportGate,
-				virtconfig.HotplugVolumesGate,
-				virtconfig.HostDiskGate,
-				virtconfig.VirtIOFSGate,
-				deprecation.MacvtapGate,
-				deprecation.PasstGate,
-				virtconfig.DownwardMetricsFeatureGate,
-				deprecation.NonRoot,
-				virtconfig.Root,
-				virtconfig.ClusterProfiler,
-				virtconfig.WorkloadEncryptionSEV,
-				virtconfig.DockerSELinuxMCSWorkaround,
-				deprecation.PSA,
-				virtconfig.VSOCKGate,
+				featuregate.ExpandDisksGate,
+				featuregate.CPUManager,
+				featuregate.NUMAFeatureGate,
+				featuregate.IgnitionGate,
+				featuregate.LiveMigrationGate,
+				featuregate.SRIOVLiveMigrationGate,
+				featuregate.CPUNodeDiscoveryGate,
+				featuregate.HypervStrictCheckGate,
+				featuregate.SidecarGate,
+				featuregate.HostDevicesGate,
+				featuregate.SnapshotGate,
+				featuregate.VMExportGate,
+				featuregate.HotplugVolumesGate,
+				featuregate.HostDiskGate,
+				featuregate.MacvtapGate,
+				featuregate.PasstGate,
+				featuregate.DownwardMetricsFeatureGate,
+				featuregate.NonRoot,
+				featuregate.Root,
+				featuregate.WorkloadEncryptionSEV,
+				featuregate.DockerSELinuxMCSWorkaround,
+				featuregate.PSA,
+				featuregate.VSOCKGate,
 			}
 
 			idxs := c.Perm(c.Int() % len(featureGates))
@@ -195,7 +232,7 @@ func fuzzKubeVirtConfig(seed int64) *virtconfig.ClusterConfig {
 				dc.FeatureGates = append(dc.FeatureGates, featureGates[idx])
 			}
 		},
-	).Fuzz(kv)
+	).Fill(kv)
 	config, _, _ := testutils.NewFakeClusterConfigUsingKV(kv)
 	return config
 }
@@ -209,51 +246,51 @@ func fuzzFuncs(options ...fuzzOption) []interface{} {
 	}
 
 	enumFuzzers := []interface{}{
-		func(e *metav1.FieldsV1, c gofuzz.Continue) {},
-		func(objectmeta *metav1.ObjectMeta, c gofuzz.Continue) {
-			c.FuzzNoCustom(objectmeta)
+		func(e *metav1.FieldsV1, c randfill.Continue) {},
+		func(objectmeta *metav1.ObjectMeta, c randfill.Continue) {
+			c.FillNoCustom(objectmeta)
 			objectmeta.DeletionGracePeriodSeconds = nil
 			objectmeta.Generation = 0
 			objectmeta.ManagedFields = nil
 		},
-		func(obj *corev1.URIScheme, c gofuzz.Continue) {
+		func(obj *corev1.URIScheme, c randfill.Continue) {
 			pickType(addSyntaxErrors, obj, []corev1.URIScheme{corev1.URISchemeHTTP, corev1.URISchemeHTTPS}, c)
 		},
-		func(obj *corev1.TaintEffect, c gofuzz.Continue) {
+		func(obj *corev1.TaintEffect, c randfill.Continue) {
 			pickType(addSyntaxErrors, obj, []corev1.TaintEffect{corev1.TaintEffectNoExecute, corev1.TaintEffectNoSchedule, corev1.TaintEffectPreferNoSchedule}, c)
 		},
-		func(obj *corev1.NodeInclusionPolicy, c gofuzz.Continue) {
+		func(obj *corev1.NodeInclusionPolicy, c randfill.Continue) {
 			pickType(addSyntaxErrors, obj, []corev1.NodeInclusionPolicy{corev1.NodeInclusionPolicyHonor, corev1.NodeInclusionPolicyIgnore}, c)
 		},
-		func(obj *corev1.UnsatisfiableConstraintAction, c gofuzz.Continue) {
+		func(obj *corev1.UnsatisfiableConstraintAction, c randfill.Continue) {
 			pickType(addSyntaxErrors, obj, []corev1.UnsatisfiableConstraintAction{corev1.DoNotSchedule, corev1.ScheduleAnyway}, c)
 		},
-		func(obj *corev1.PullPolicy, c gofuzz.Continue) {
+		func(obj *corev1.PullPolicy, c randfill.Continue) {
 			pickType(addSyntaxErrors, obj, []corev1.PullPolicy{corev1.PullAlways, corev1.PullNever, corev1.PullIfNotPresent}, c)
 		},
-		func(obj *corev1.NodeSelectorOperator, c gofuzz.Continue) {
+		func(obj *corev1.NodeSelectorOperator, c randfill.Continue) {
 			pickType(addSyntaxErrors, obj, []corev1.NodeSelectorOperator{corev1.NodeSelectorOpDoesNotExist, corev1.NodeSelectorOpExists, corev1.NodeSelectorOpGt, corev1.NodeSelectorOpIn, corev1.NodeSelectorOpLt, corev1.NodeSelectorOpNotIn}, c)
 		},
-		func(obj *corev1.TolerationOperator, c gofuzz.Continue) {
+		func(obj *corev1.TolerationOperator, c randfill.Continue) {
 			pickType(addSyntaxErrors, obj, []corev1.TolerationOperator{corev1.TolerationOpExists, corev1.TolerationOpEqual}, c)
 		},
-		func(obj *corev1.PodQOSClass, c gofuzz.Continue) {
+		func(obj *corev1.PodQOSClass, c randfill.Continue) {
 			pickType(addSyntaxErrors, obj, []corev1.PodQOSClass{corev1.PodQOSBestEffort, corev1.PodQOSGuaranteed, corev1.PodQOSBurstable}, c)
 		},
-		func(obj *corev1.PersistentVolumeMode, c gofuzz.Continue) {
+		func(obj *corev1.PersistentVolumeMode, c randfill.Continue) {
 			pickType(addSyntaxErrors, obj, []corev1.PersistentVolumeMode{corev1.PersistentVolumeBlock, corev1.PersistentVolumeFilesystem}, c)
 		},
-		func(obj *corev1.DNSPolicy, c gofuzz.Continue) {
+		func(obj *corev1.DNSPolicy, c randfill.Continue) {
 			pickType(addSyntaxErrors, obj, []corev1.DNSPolicy{corev1.DNSClusterFirst, corev1.DNSClusterFirstWithHostNet, corev1.DNSDefault, corev1.DNSNone}, c)
 		},
-		func(obj *corev1.TypedObjectReference, c gofuzz.Continue) {
-			c.FuzzNoCustom(obj)
-			str := c.RandString()
+		func(obj *corev1.TypedObjectReference, c randfill.Continue) {
+			c.FillNoCustom(obj)
+			str := c.String(0)
 			obj.APIGroup = &str
 		},
-		func(obj *corev1.TypedLocalObjectReference, c gofuzz.Continue) {
-			c.FuzzNoCustom(obj)
-			str := c.RandString()
+		func(obj *corev1.TypedLocalObjectReference, c randfill.Continue) {
+			c.FillNoCustom(obj)
+			str := c.String(0)
 			obj.APIGroup = &str
 		},
 	}
@@ -261,22 +298,22 @@ func fuzzFuncs(options ...fuzzOption) []interface{} {
 	typeFuzzers := []interface{}{}
 	if !addSyntaxErrors {
 		typeFuzzers = []interface{}{
-			func(obj *int, c gofuzz.Continue) {
+			func(obj *int, c randfill.Continue) {
 				*obj = c.Intn(100000)
 			},
-			func(obj *uint, c gofuzz.Continue) {
+			func(obj *uint, c randfill.Continue) {
 				*obj = uint(c.Intn(100000))
 			},
-			func(obj *int32, c gofuzz.Continue) {
+			func(obj *int32, c randfill.Continue) {
 				*obj = int32(c.Intn(100000))
 			},
-			func(obj *int64, c gofuzz.Continue) {
+			func(obj *int64, c randfill.Continue) {
 				*obj = int64(c.Intn(100000))
 			},
-			func(obj *uint64, c gofuzz.Continue) {
+			func(obj *uint64, c randfill.Continue) {
 				*obj = uint64(c.Intn(100000))
 			},
-			func(obj *uint32, c gofuzz.Continue) {
+			func(obj *uint32, c randfill.Continue) {
 				*obj = uint32(c.Intn(100000))
 			},
 		}
@@ -285,7 +322,7 @@ func fuzzFuncs(options ...fuzzOption) []interface{} {
 	return append(enumFuzzers, typeFuzzers...)
 }
 
-func pickType(withSyntaxError bool, target interface{}, arr interface{}, c gofuzz.Continue) {
+func pickType(withSyntaxError bool, target interface{}, arr interface{}, c randfill.Continue) {
 	arrPtr := reflect.ValueOf(arr)
 	targetPtr := reflect.ValueOf(target)
 

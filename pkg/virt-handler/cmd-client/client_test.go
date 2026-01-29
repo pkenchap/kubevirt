@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2020 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -25,9 +25,9 @@ import (
 	"os"
 	"path/filepath"
 
-	gomock "github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	gomock "go.uber.org/mock/gomock"
 
 	"google.golang.org/grpc"
 	"k8s.io/apimachinery/pkg/types"
@@ -41,39 +41,39 @@ import (
 
 var _ = Describe("Virt remote commands", func() {
 
-	var err error
-	var shareDir string
-	var socketsDir string
-	var podsDir string
-	var vmi *v1.VirtualMachineInstance
-	var podSocketFile string
+	var (
+		shareDir      string
+		podsDir       string
+		vmi           *v1.VirtualMachineInstance
+		podSocketFile string
+	)
 
 	host := "myhost"
 	podUID := "poduid123"
 
 	BeforeEach(func() {
 		vmi = api.NewMinimalVMI("testvmi")
-		vmi.UID = types.UID("1234")
+		vmi.UID = "1234"
 		vmi.Status = v1.VirtualMachineInstanceStatus{
 			ActivePods: map[types.UID]string{
 				types.UID(podUID): host,
+				types.UID("NA"):   host,
 			},
 		}
 
+		var err error
 		shareDir, err = os.MkdirTemp("", "kubevirt-share")
 		Expect(err).ToNot(HaveOccurred())
 
 		podsDir, err = os.MkdirTemp("", "pods")
 		Expect(err).ToNot(HaveOccurred())
 
-		socketsDir = filepath.Join(shareDir, "sockets")
-		os.Mkdir(socketsDir, 0755)
-
-		SetLegacyBaseDir(shareDir)
+		SetBaseDir(shareDir)
 		SetPodsBaseDir(podsDir)
 
 		podSocketFile = SocketFilePathOnHost(podUID)
 
+		// Create a new socket
 		os.MkdirAll(filepath.Dir(podSocketFile), 0755)
 		f, err := os.Create(podSocketFile)
 		Expect(err).ToNot(HaveOccurred())
@@ -88,84 +88,60 @@ var _ = Describe("Virt remote commands", func() {
 
 	Context("client", func() {
 		It("socket from UID", func() {
-			sock, err := FindSocketOnHost(vmi)
+			sock, err := FindSocket(vmi)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(sock).To(Equal(podSocketFile))
 
 			sock = SocketOnGuest()
 			Expect(sock).To(Equal(filepath.Join(shareDir, "sockets", StandardLauncherSocketFileName)))
-
-			// falls back to returning a legacy socket name if it exists
-			// This is for backwards compatibility
-			f, err := os.Create(filepath.Join(socketsDir, "1234_sock"))
-			Expect(err).ToNot(HaveOccurred())
-			f.Close()
-			sock, err = FindSocketOnHost(vmi)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(sock).To(Equal(filepath.Join(shareDir, "sockets", "1234_sock")))
-		})
-
-		It("Listing all sockets", func() {
-			// the new socket is already created in the Before function
-
-			// create a legacy socket to ensure we find both new and legacy sockets
-			f, err := os.Create(filepath.Join(socketsDir, "1234_sock"))
-			Expect(err).ToNot(HaveOccurred())
-			f.Close()
-
-			// listing all sockets should detect both the new and legacy sockets
-			sockets, err := ListAllSockets()
-			Expect(err).ToNot(HaveOccurred())
-			Expect(sockets).To(HaveLen(2))
 		})
 
 		It("Detect unresponsive socket", func() {
-			sock, err := FindSocketOnHost(vmi)
+			sock, err := FindSocket(vmi)
 			Expect(err).ToNot(HaveOccurred())
+
+			Expect(IsSocketUnresponsive(sock)).To(BeFalse())
 
 			os.RemoveAll(sock)
 
 			// unresponsive is true when no socket file exists
-			unresponsive := IsSocketUnresponsive(sock)
-			Expect(unresponsive).To(BeTrue())
+			Expect(IsSocketUnresponsive(sock)).To(BeTrue())
 
 			// unresponsive is false when socket file exists
 			os.Mkdir(filepath.Dir(sock), 0755)
 			f, err := os.Create(sock)
 			Expect(err).ToNot(HaveOccurred())
 			f.Close()
-			unresponsive = IsSocketUnresponsive(sock)
-			Expect(unresponsive).To(BeFalse())
+			Expect(IsSocketUnresponsive(sock)).To(BeFalse())
 
 			// unresponsive is true when marked as unresponsive
 			MarkSocketUnresponsive(sock)
-			unresponsive = IsSocketUnresponsive(sock)
-			Expect(unresponsive).To(BeTrue())
+			Expect(IsSocketUnresponsive(sock)).To(BeTrue())
+
+			// Next invocation should not produce error
+			Expect(MarkSocketUnresponsive(sock)).To(Succeed())
 		})
 
-		It("Determine legacy sockets vs new socket paths", func() {
-			legacy := IsLegacySocket("/some/path/something_sock")
-			Expect(legacy).To(BeTrue())
+		It("socket dir from UID and file path provider func", func() {
+			path, err := FindPodDirOnHost(vmi, SocketFilePathOnHost)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(path).To(Equal(podSocketFile))
+		})
 
-			legacy = IsLegacySocket(filepath.Join("/some/path", StandardLauncherSocketFileName))
-			Expect(legacy).To(BeFalse())
-
-			monEnabled := SocketMonitoringEnabled("/some/path/something_sock")
-			Expect(monEnabled).To(BeFalse())
-
-			monEnabled = SocketMonitoringEnabled(filepath.Join("/some/path", StandardLauncherSocketFileName))
-			Expect(monEnabled).To(BeTrue())
+		It("negative test socket dir not found", func() {
+			_, err := FindPodDirOnHost(vmi, func(string) string { return "no-such-dir" })
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("no-such-dir"))
 		})
 
 		Context("exec", func() {
 			var (
-				ctrl          *gomock.Controller
 				mockCmdClient *cmdv1.MockCmdClient
 				client        LauncherClient
 			)
 
 			BeforeEach(func() {
-				ctrl = gomock.NewController(GinkgoT())
+				ctrl := gomock.NewController(GinkgoT())
 				mockCmdClient = cmdv1.NewMockCmdClient(ctrl)
 				client = newV1Client(mockCmdClient, nil)
 			})

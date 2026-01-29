@@ -1,3 +1,22 @@
+/*
+ * This file is part of the KubeVirt project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * Copyright The KubeVirt Authors.
+ *
+ */
+
 package heartbeat
 
 import (
@@ -10,12 +29,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
-	utilwait "k8s.io/apimachinery/pkg/util/wait"
 	k8scli "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/util/retry"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
 
+	virtwait "kubevirt.io/kubevirt/pkg/apimachinery/wait"
 	virtutil "kubevirt.io/kubevirt/pkg/util"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	device_manager "kubevirt.io/kubevirt/pkg/virt-handler/device-manager"
@@ -34,13 +54,15 @@ type HeartBeat struct {
 }
 
 func NewHeartBeat(clientset k8scli.CoreV1Interface, deviceManager device_manager.DeviceControllerInterface, clusterConfig *virtconfig.ClusterConfig, host string) *HeartBeat {
+	const cpuManagerOS3Path = virtutil.HostRootMount + "var/lib/origin/openshift.local.volumes/cpu_manager_state"
+	const cpuManagerPath = virtutil.KubeletRoot + "/cpu_manager_state"
 	return &HeartBeat{
 		clientset:               clientset,
 		deviceManagerController: deviceManager,
 		clusterConfig:           clusterConfig,
 		host:                    host,
 		// This is a temporary workaround until k8s bug #66525 is resolved
-		cpuManagerPaths:           []string{virtutil.CPUManagerPath, virtutil.CPUManagerOS3Path},
+		cpuManagerPaths:           []string{cpuManagerPath, cpuManagerOS3Path},
 		devicePluginPollIntervall: 1 * time.Second,
 		devicePluginWaitTimeout:   10 * time.Second,
 	}
@@ -51,8 +73,7 @@ func (h *HeartBeat) Run(heartBeatInterval time.Duration, stopCh chan struct{}) (
 	go func() {
 		h.heartBeat(heartBeatInterval, stopCh)
 		//ensure that the node is getting marked as unschedulable when removed
-		labelNodeDone := h.labelNodeUnschedulable()
-		<-labelNodeDone
+		h.labelNodeUnschedulable()
 		close(done)
 	}()
 	return done
@@ -75,38 +96,38 @@ func (h *HeartBeat) heartBeat(heartBeatInterval time.Duration, stopCh chan struc
 	wait.JitterUntil(h.do, heartBeatInterval, 1.2, true, stopCh)
 }
 
-func (h *HeartBeat) labelNodeUnschedulable() (done chan struct{}) {
-	done = make(chan struct{})
-	go func() {
+func (h *HeartBeat) labelNodeUnschedulable() {
+	err := retry.OnError(retry.DefaultBackoff, func(err error) bool { return err != nil }, func() error {
 		now, err := json.Marshal(metav1.Now())
 		if err != nil {
 			log.DefaultLogger().Reason(err).Errorf("Can't determine date")
-			return
+			return err
 		}
-		var data []byte
-		cpuManagerEnabled := false
-		if h.clusterConfig.CPUManagerEnabled() {
-			cpuManagerEnabled = h.isCPUManagerEnabled(h.cpuManagerPaths)
-		}
-		data = []byte(fmt.Sprintf(`{"metadata": { "labels": {"%s": "%s", "%s": "%t"}, "annotations": {"%s": %s}}}`,
+
+		cpuManagerEnabled := h.clusterConfig.CPUManagerEnabled() && h.isCPUManagerEnabled(h.cpuManagerPaths)
+		data := []byte(fmt.Sprintf(`{"metadata": { "labels": {"%s": "%s", "%s": "%t", "%s": "%t"}, "annotations": {"%s": %s}}}`,
 			v1.NodeSchedulable, "false",
+			v1.DeprecatedCPUManager, cpuManagerEnabled,
 			v1.CPUManager, cpuManagerEnabled,
 			v1.VirtHandlerHeartbeat, string(now),
 		))
 		_, err = h.clientset.Nodes().Patch(context.Background(), h.host, types.StrategicMergePatchType, data, metav1.PatchOptions{})
 		if err != nil {
 			log.DefaultLogger().Reason(err).Errorf("Can't patch node %s", h.host)
-			return
+			return err
 		}
-		close(done)
-	}()
-	return done
+		return nil
+	})
+
+	if err != nil {
+		log.Log.Warningf("Failed to set node %s unschedulable", h.host)
+	}
 }
 
 // waitForDevicePlugins gives the device plugins additional time to successfully connect to the kubelet.
 // If the connection can not be established it just delays the heartbeat start for devicePluginWaitTimeout.
 func (h *HeartBeat) waitForDevicePlugins(stopCh chan struct{}) {
-	_ = utilwait.PollImmediate(h.devicePluginPollIntervall, h.devicePluginWaitTimeout, func() (done bool, err error) {
+	_ = virtwait.PollImmediately(h.devicePluginPollIntervall, h.devicePluginWaitTimeout, func(_ context.Context) (done bool, err error) {
 		select {
 		case <-stopCh:
 			return true, nil
@@ -136,19 +157,11 @@ func (h *HeartBeat) do() {
 		cpuManagerEnabled = h.isCPUManagerEnabled(h.cpuManagerPaths)
 	}
 
-	node, err := h.clientset.Nodes().Get(context.Background(), h.host, metav1.GetOptions{})
-	if err != nil {
-		log.DefaultLogger().Reason(err).Errorf("Can't get node %s", h.host)
-		return
-	}
-	ksmEnabled, ksmEnabledByUs := handleKSM(node, h.clusterConfig)
-
-	data = []byte(fmt.Sprintf(`{"metadata": { "labels": {"%s": "%s", "%s": "%t", "%s": "%t"}, "annotations": {"%s": %s, "%s": "%t"}}}`,
+	data = []byte(fmt.Sprintf(`{"metadata": { "labels": {"%s": "%s", "%s": "%t", "%s": "%t"}, "annotations": {"%s": %s}}}`,
 		v1.NodeSchedulable, kubevirtSchedulable,
+		v1.DeprecatedCPUManager, cpuManagerEnabled,
 		v1.CPUManager, cpuManagerEnabled,
-		v1.KSMEnabledLabel, ksmEnabled,
 		v1.VirtHandlerHeartbeat, string(now),
-		v1.KSMHandlerManagedAnnotation, ksmEnabledByUs,
 	))
 	_, err = h.clientset.Nodes().Patch(context.Background(), h.host, types.StrategicMergePatchType, data, metav1.PatchOptions{})
 	if err != nil {

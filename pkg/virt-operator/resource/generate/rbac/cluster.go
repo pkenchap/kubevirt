@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2018 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -23,6 +23,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"kubevirt.io/api/backup"
 	"kubevirt.io/api/clone"
 	"kubevirt.io/api/export"
 	"kubevirt.io/api/pool"
@@ -50,20 +51,24 @@ const (
 	apiVMIMigrations      = "virtualmachineinstancemigrations"
 	apiVMSnapshots        = "virtualmachinesnapshots"
 	apiVMSnapshotContents = "virtualmachinesnapshotcontents"
+	apiVMBackups          = "virtualmachinebackups"
+	apiVMBackupTrackers   = "virtualmachinebackuptrackers"
 	apiVMRestores         = "virtualmachinerestores"
 	apiVMExports          = "virtualmachineexports"
 	apiVMClones           = "virtualmachineclones"
 	apiVMPools            = "virtualmachinepools"
 
-	apiVMExpandSpec   = "virtualmachines/expand-spec"
-	apiVMPortForward  = "virtualmachines/portforward"
-	apiVMStart        = "virtualmachines/start"
-	apiVMStop         = "virtualmachines/stop"
-	apiVMRestart      = "virtualmachines/restart"
-	apiVMAddVolume    = "virtualmachines/addvolume"
-	apiVMRemoveVolume = "virtualmachines/removevolume"
-	apiVMMigrate      = "virtualmachines/migrate"
-	apiVMMemoryDump   = "virtualmachines/memorydump"
+	apiVMExpandSpec     = "virtualmachines/expand-spec"
+	apiVMPortForward    = "virtualmachines/portforward"
+	apiVMStart          = "virtualmachines/start"
+	apiVMStop           = "virtualmachines/stop"
+	apiVMRestart        = "virtualmachines/restart"
+	apiVMAddVolume      = "virtualmachines/addvolume"
+	apiVMRemoveVolume   = "virtualmachines/removevolume"
+	apiVMMigrate        = "virtualmachines/migrate"
+	apiVMMemoryDump     = "virtualmachines/memorydump"
+	apiVMObjectGraph    = "virtualmachines/objectgraph"
+	apiVMEvacuateCancel = "virtualmachines/evacuate/cancel"
 
 	apiVMInstancesConsole                   = "virtualmachineinstances/console"
 	apiVMInstancesVNC                       = "virtualmachineinstances/vnc"
@@ -76,6 +81,7 @@ const (
 	apiVMInstancesFreeze                    = "virtualmachineinstances/freeze"
 	apiVMInstancesUnfreeze                  = "virtualmachineinstances/unfreeze"
 	apiVMInstancesSoftReboot                = "virtualmachineinstances/softreboot"
+	apiVMInstancesReset                     = "virtualmachineinstances/reset"
 	apiVMInstancesGuestOSInfo               = "virtualmachineinstances/guestosinfo"
 	apiVMInstancesFileSysList               = "virtualmachineinstances/filesystemlist"
 	apiVMInstancesUserList                  = "virtualmachineinstances/userlist"
@@ -83,6 +89,9 @@ const (
 	apiVMInstancesSEVQueryLaunchMeasurement = "virtualmachineinstances/sev/querylaunchmeasurement"
 	apiVMInstancesSEVSetupSession           = "virtualmachineinstances/sev/setupsession"
 	apiVMInstancesSEVInjectLaunchSecret     = "virtualmachineinstances/sev/injectlaunchsecret"
+	apiVMInstancesUSBRedir                  = "virtualmachineinstances/usbredir"
+	apiVMInstancesObjectGraph               = "virtualmachineinstances/objectgraph"
+	apiVMInstancesEvacuateCancel            = "virtualmachineinstances/evacuate/cancel"
 )
 
 func GetAllCluster() []runtime.Object {
@@ -94,6 +103,7 @@ func GetAllCluster() []runtime.Object {
 		newViewClusterRole(),
 		newInstancetypeViewClusterRole(),
 		newInstancetypeViewClusterRoleBinding(),
+		newMigrateClusterRole(),
 	}
 }
 
@@ -199,6 +209,9 @@ func newAdminClusterRole() *rbacv1.ClusterRole {
 					apiVMInstancesUserList,
 					apiVMInstancesSEVFetchCertChain,
 					apiVMInstancesSEVQueryLaunchMeasurement,
+					apiVMInstancesUSBRedir,
+					apiVMObjectGraph,
+					apiVMInstancesObjectGraph,
 				},
 				Verbs: []string{
 					"get",
@@ -216,8 +229,10 @@ func newAdminClusterRole() *rbacv1.ClusterRole {
 					apiVMInstancesFreeze,
 					apiVMInstancesUnfreeze,
 					apiVMInstancesSoftReboot,
+					apiVMInstancesReset,
 					apiVMInstancesSEVSetupSession,
 					apiVMInstancesSEVInjectLaunchSecret,
+					apiVMInstancesEvacuateCancel,
 				},
 				Verbs: []string{
 					"update",
@@ -245,8 +260,8 @@ func newAdminClusterRole() *rbacv1.ClusterRole {
 					apiVMRestart,
 					apiVMAddVolume,
 					apiVMRemoveVolume,
-					apiVMMigrate,
 					apiVMMemoryDump,
+					apiVMEvacuateCancel,
 				},
 				Verbs: []string{
 					"update",
@@ -272,10 +287,20 @@ func newAdminClusterRole() *rbacv1.ClusterRole {
 					apiVMInstances,
 					apiVMIPresets,
 					apiVMIReplicasets,
-					apiVMIMigrations,
 				},
 				Verbs: []string{
 					"get", "delete", "create", "update", "patch", "list", "watch", "deletecollection",
+				},
+			},
+			{
+				APIGroups: []string{
+					GroupName,
+				},
+				Resources: []string{
+					apiVMIMigrations,
+				},
+				Verbs: []string{
+					"get", "list", "watch",
 				},
 			},
 			{
@@ -286,6 +311,18 @@ func newAdminClusterRole() *rbacv1.ClusterRole {
 					apiVMSnapshots,
 					apiVMSnapshotContents,
 					apiVMRestores,
+				},
+				Verbs: []string{
+					"get", "delete", "create", "update", "patch", "list", "watch", "deletecollection",
+				},
+			},
+			{
+				APIGroups: []string{
+					backup.GroupName,
+				},
+				Resources: []string{
+					apiVMBackups,
+					apiVMBackupTrackers,
 				},
 				Verbs: []string{
 					"get", "delete", "create", "update", "patch", "list", "watch", "deletecollection",
@@ -381,6 +418,9 @@ func newEditClusterRole() *rbacv1.ClusterRole {
 					apiVMInstancesUserList,
 					apiVMInstancesSEVFetchCertChain,
 					apiVMInstancesSEVQueryLaunchMeasurement,
+					apiVMInstancesUSBRedir,
+					apiVMObjectGraph,
+					apiVMInstancesObjectGraph,
 				},
 				Verbs: []string{
 					"get",
@@ -398,8 +438,10 @@ func newEditClusterRole() *rbacv1.ClusterRole {
 					apiVMInstancesFreeze,
 					apiVMInstancesUnfreeze,
 					apiVMInstancesSoftReboot,
+					apiVMInstancesReset,
 					apiVMInstancesSEVSetupSession,
 					apiVMInstancesSEVInjectLaunchSecret,
+					apiVMInstancesEvacuateCancel,
 				},
 				Verbs: []string{
 					"update",
@@ -427,8 +469,8 @@ func newEditClusterRole() *rbacv1.ClusterRole {
 					apiVMRestart,
 					apiVMAddVolume,
 					apiVMRemoveVolume,
-					apiVMMigrate,
 					apiVMMemoryDump,
+					apiVMEvacuateCancel,
 				},
 				Verbs: []string{
 					"update",
@@ -454,10 +496,20 @@ func newEditClusterRole() *rbacv1.ClusterRole {
 					apiVMInstances,
 					apiVMIPresets,
 					apiVMIReplicasets,
-					apiVMIMigrations,
 				},
 				Verbs: []string{
 					"get", "delete", "create", "update", "patch", "list", "watch",
+				},
+			},
+			{
+				APIGroups: []string{
+					GroupName,
+				},
+				Resources: []string{
+					apiVMIMigrations,
+				},
+				Verbs: []string{
+					"get", "list", "watch",
 				},
 			},
 			{
@@ -468,6 +520,18 @@ func newEditClusterRole() *rbacv1.ClusterRole {
 					apiVMSnapshots,
 					apiVMSnapshotContents,
 					apiVMRestores,
+				},
+				Verbs: []string{
+					"get", "delete", "create", "update", "patch", "list", "watch",
+				},
+			},
+			{
+				APIGroups: []string{
+					backup.GroupName,
+				},
+				Resources: []string{
+					apiVMBackups,
+					apiVMBackupTrackers,
 				},
 				Verbs: []string{
 					"get", "delete", "create", "update", "patch", "list", "watch",
@@ -546,6 +610,45 @@ func newEditClusterRole() *rbacv1.ClusterRole {
 	}
 }
 
+func newMigrateClusterRole() *rbacv1.ClusterRole {
+	return &rbacv1.ClusterRole{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: VersionNamev1,
+			Kind:       "ClusterRole",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "kubevirt.io:migrate",
+			Labels: map[string]string{
+				virtv1.AppLabel: "",
+			},
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{
+					virtv1.SubresourceGroupName,
+				},
+				Resources: []string{
+					apiVMMigrate,
+				},
+				Verbs: []string{
+					"update",
+				},
+			},
+			{
+				APIGroups: []string{
+					GroupName,
+				},
+				Resources: []string{
+					apiVMIMigrations,
+				},
+				Verbs: []string{
+					"get", "delete", "create", "update", "patch", "list", "watch", "deletecollection",
+				},
+			},
+		},
+	}
+}
+
 func newViewClusterRole() *rbacv1.ClusterRole {
 	return &rbacv1.ClusterRole{
 		TypeMeta: metav1.TypeMeta{
@@ -582,6 +685,8 @@ func newViewClusterRole() *rbacv1.ClusterRole {
 					apiVMInstancesUserList,
 					apiVMInstancesSEVFetchCertChain,
 					apiVMInstancesSEVQueryLaunchMeasurement,
+					apiVMObjectGraph,
+					apiVMInstancesObjectGraph,
 				},
 				Verbs: []string{
 					"get",
@@ -621,6 +726,18 @@ func newViewClusterRole() *rbacv1.ClusterRole {
 					apiVMSnapshots,
 					apiVMSnapshotContents,
 					apiVMRestores,
+				},
+				Verbs: []string{
+					"get", "list", "watch",
+				},
+			},
+			{
+				APIGroups: []string{
+					backup.GroupName,
+				},
+				Resources: []string{
+					apiVMBackups,
+					apiVMBackupTrackers,
 				},
 				Verbs: []string{
 					"get", "list", "watch",

@@ -1,4 +1,5 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_binary", "go_library")
+load("//staging/src/kubevirt.io/client-go/version:def.bzl", "version_x_defs")
 
 go_library(
     name = "go_default_library",
@@ -10,8 +11,6 @@ go_library(
         "//vendor/k8s.io/client-go/plugin/pkg/client/auth:go_default_library",
     ],
 )
-
-load("//vendor/kubevirt.io/client-go/version:def.bzl", "version_x_defs")
 
 go_binary(
     name = "virtctl",
@@ -51,6 +50,15 @@ go_binary(
     name = "virtctl-arm64",
     embed = [":go_default_library"],
     goarch = "arm64",
+    goos = "linux",
+    visibility = ["//visibility:public"],
+    x_defs = version_x_defs(),
+)
+
+go_binary(
+    name = "virtctl-s390x",
+    embed = [":go_default_library"],
+    goarch = "s390x",
     goos = "linux",
     visibility = ["//visibility:public"],
     x_defs = version_x_defs(),

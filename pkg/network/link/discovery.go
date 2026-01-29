@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2023 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -36,8 +36,8 @@ import (
 // If link not found, it will try to get the link using the pod interface's ordinal name (net1, net2,...)
 // based on the subject network position in the given networks slice.
 // If no link is found, a nil link will be returned.
-func DiscoverByNetwork(handler driver.NetworkHandler, networks []v1.Network, subjectNetwork v1.Network) (netlink.Link, error) {
-	ifaceNames, err := networkInterfaceNames(networks, subjectNetwork)
+func DiscoverByNetwork(handler driver.NetworkHandler, networks []v1.Network, subjectNetwork v1.Network, ifaceStatuses []v1.VirtualMachineInstanceNetworkInterface) (netlink.Link, error) {
+	ifaceNames, err := networkInterfaceNames(networks, subjectNetwork, ifaceStatuses)
 	if err != nil {
 		return nil, err
 	}
@@ -45,8 +45,8 @@ func DiscoverByNetwork(handler driver.NetworkHandler, networks []v1.Network, sub
 	return linkByNames(handler, ifaceNames)
 }
 
-func networkInterfaceNames(networks []v1.Network, subjectNetwork v1.Network) ([]string, error) {
-	ifaceName := namescheme.HashedPodInterfaceName(subjectNetwork)
+func networkInterfaceNames(networks []v1.Network, subjectNetwork v1.Network, ifaceStatuses []v1.VirtualMachineInstanceNetworkInterface) ([]string, error) {
+	ifaceName := namescheme.HashedPodInterfaceName(subjectNetwork, ifaceStatuses)
 	ordinalIfaceName := namescheme.OrdinalPodInterfaceName(subjectNetwork.Name, networks)
 	if ordinalIfaceName == "" {
 		return nil, fmt.Errorf("could not find the pod interface ordinal name for network [%s]", subjectNetwork.Name)
@@ -70,5 +70,5 @@ func linkByNames(handler driver.NetworkHandler, names []string) (netlink.Link, e
 	if len(errs) == 0 {
 		return nil, nil
 	}
-	return nil, fmt.Errorf(strings.Join(errs, ", "))
+	return nil, fmt.Errorf("%s", strings.Join(errs, ", "))
 }

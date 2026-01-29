@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2023 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -24,9 +24,10 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"k8s.io/client-go/tools/clientcmd"
+
 	v1 "kubevirt.io/api/core/v1"
 
+	"kubevirt.io/kubevirt/pkg/virtctl/clientconfig"
 	"kubevirt.io/kubevirt/pkg/virtctl/templates"
 )
 
@@ -39,16 +40,14 @@ var (
 	startPaused bool
 )
 
-func NewStartCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
+func NewStartCommand() *cobra.Command {
+	c := Command{command: COMMAND_START}
 	cmd := &cobra.Command{
 		Use:     "start (VM)",
 		Short:   "Start a virtual machine.",
 		Example: usage(COMMAND_START),
-		Args:    templates.ExactArgs("start", 1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			c := Command{command: COMMAND_START, clientConfig: clientConfig}
-			return c.startRun(args)
-		},
+		Args:    cobra.ExactArgs(1),
+		RunE:    c.startRun,
 	}
 	cmd.Flags().BoolVar(&startPaused, pausedArg, false, "--paused=false: If set to true, start virtual machine in paused state")
 	cmd.Flags().BoolVar(&dryRun, dryRunArg, false, dryRunCommandUsage)
@@ -56,10 +55,10 @@ func NewStartCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
 	return cmd
 }
 
-func (o *Command) startRun(args []string) error {
+func (o *Command) startRun(cmd *cobra.Command, args []string) error {
 	vmiName := args[0]
 
-	virtClient, namespace, err := GetNamespaceAndClient(o.clientConfig)
+	virtClient, namespace, _, err := clientconfig.ClientAndNamespaceFromContext(cmd.Context())
 	if err != nil {
 		return err
 	}

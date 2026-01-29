@@ -20,6 +20,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	goflag "flag"
 	"fmt"
 	"os"
@@ -29,16 +31,18 @@ import (
 	"syscall"
 	"time"
 
+	"kubevirt.io/kubevirt/pkg/virt-launcher/premigration-hook-server/cpuhook"
+
 	"github.com/spf13/pflag"
 	"k8s.io/apimachinery/pkg/types"
 	"libvirt.org/go/libvirt"
 
-	utilwait "k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
 
+	virtwait "kubevirt.io/kubevirt/pkg/apimachinery/wait"
 	cloudinit "kubevirt.io/kubevirt/pkg/cloud-init"
 	"kubevirt.io/kubevirt/pkg/config"
 	containerdisk "kubevirt.io/kubevirt/pkg/container-disk"
@@ -48,10 +52,13 @@ import (
 	hotplugdisk "kubevirt.io/kubevirt/pkg/hotplug-disk"
 	"kubevirt.io/kubevirt/pkg/ignition"
 	putil "kubevirt.io/kubevirt/pkg/util"
+	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
 	virtlauncher "kubevirt.io/kubevirt/pkg/virt-launcher"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/metadata"
 	notifyclient "kubevirt.io/kubevirt/pkg/virt-launcher/notify-client"
+	premigrationhookserver "kubevirt.io/kubevirt/pkg/virt-launcher/premigration-hook-server"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/standalone"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap"
 	agentpoller "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/agent-poller"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
@@ -89,7 +96,7 @@ func startCmdServer(socketPath string,
 	// PollImmediate breaks the poll loop when bool or err are returned OR if timeout occurs.
 	//
 	// Timing out causes an error to be returned
-	err = utilwait.PollImmediate(1*time.Second, 15*time.Second, func() (bool, error) {
+	err = virtwait.PollImmediately(1*time.Second, 15*time.Second, func(_ context.Context) (bool, error) {
 		client, err := cmdclient.NewClient(socketPath)
 		if err != nil {
 			return false, nil
@@ -345,7 +352,10 @@ func main() {
 	gracePeriodSeconds := pflag.Int("grace-period-seconds", 30, "Grace period to observe before sending SIGTERM to vmi process")
 	allowEmulation := pflag.Bool("allow-emulation", false, "Allow use of software emulation as fallback")
 	runWithNonRoot := pflag.Bool("run-as-nonroot", false, "Run virtqemud with the 'virt' user")
+	imageVolumeEnabled := pflag.Bool("image-volume", false, "Generated with ImageVolume instead of containerDisk") //remove this once ImageVolume is GAed
+	libvirtHooksServerAndClientEnabled := pflag.Bool("libvirt-hook-server-and-client", false, "Enable pre-migration hooks on the target virt-launcher pod")
 	hookSidecars := pflag.Uint("hook-sidecars", 0, "Number of requested hook sidecars, virt-launcher will wait for all of them to become available")
+	diskMemoryLimitBytes := pflag.Int64("disk-memory-limit", virtconfig.DefaultDiskVerificationMemoryLimitBytes, "Memory limit for disk verification")
 	ovmfPath := pflag.String("ovmf-path", "/usr/share/OVMF", "The directory that contains the EFI roms (like OVMF_CODE.fd)")
 	qemuAgentSysInterval := pflag.Duration("qemu-agent-sys-interval", 120*time.Second, "Interval between consecutive qemu agent calls for sys commands")
 	qemuAgentFileInterval := pflag.Duration("qemu-agent-file-interval", 300*time.Second, "Interval between consecutive qemu agent calls for file command")
@@ -354,9 +364,6 @@ func main() {
 	qemuAgentFSFreezeStatusInterval := pflag.Duration("qemu-fsfreeze-status-interval", 5*time.Second, "Interval between consecutive qemu agent calls for fsfreeze status command")
 	simulateCrash := pflag.Bool("simulate-crash", false, "Causes virt-launcher to immediately crash. This is used by functional tests to simulate crash loop scenarios.")
 	libvirtLogFilters := pflag.String("libvirt-log-filters", "", "Set custom log filters for libvirt")
-
-	// set new default verbosity, was set to 0 by glog
-	goflag.Set("v", "2")
 
 	pflag.CommandLine.AddGoFlag(goflag.CommandLine.Lookup("v"))
 	pflag.Parse()
@@ -410,7 +417,7 @@ func main() {
 		panic(err)
 	}
 
-	l.StartVirtquemud(stopChan)
+	l.StartVirtqemud(stopChan)
 	// only single domain should be present
 	domainName := api.VMINamespaceKeyFunc(vmi)
 
@@ -426,16 +433,25 @@ func main() {
 
 	metadataCache := metadata.NewCache()
 
-	domainManager, err := virtwrap.NewLibvirtDomainManager(domainConn, *virtShareDir, *ephemeralDiskDir, &agentStore, *ovmfPath, ephemeralDiskCreator, metadataCache)
+	signalStopChan := make(chan struct{})
+	preMigrationHookServer := premigrationhookserver.NewPreMigrationHookServer(stopChan, cpuhook.CPUDedicatedHook)
+	domainManager, err := virtwrap.NewLibvirtDomainManager(domainConn, *virtShareDir, *ephemeralDiskDir, &agentStore, *ovmfPath, ephemeralDiskCreator, metadataCache, signalStopChan, *diskMemoryLimitBytes, util.GetPodCPUSet, *imageVolumeEnabled, *libvirtHooksServerAndClientEnabled, preMigrationHookServer)
 	if err != nil {
 		panic(err)
+	}
+	if *libvirtHooksServerAndClientEnabled {
+		// TODO: replaceQemuHookWithCustomClient This code should be removed once the LibvirtHooksServerAndClient feature is GA.
+		// Instead of overriding the script at runtime, we can include the custom binary in the launcher image at build time.
+		if err := replaceQemuHookWithCustomClient(); err != nil {
+			panic(err)
+		}
 	}
 
 	// Start the virt-launcher command service.
 	// Clients can use this service to tell virt-launcher
 	// to start/stop virtual machines
 	options := cmdserver.NewServerOptions(*allowEmulation)
-	cmdclient.SetLegacyBaseDir(*virtShareDir)
+	cmdclient.SetBaseDir(*virtShareDir)
 	cmdServerDone := startCmdServer(cmdclient.UninitializedSocketOnGuest(), domainManager, stopChan, options)
 
 	gracefulShutdownCallback := func() {
@@ -467,7 +483,6 @@ func main() {
 		syscall.SIGQUIT,
 	)
 
-	signalStopChan := make(chan struct{})
 	go func() {
 		s := <-c
 		log.Log.Infof("Received signal %s", s.String())
@@ -479,6 +494,7 @@ func main() {
 	// managing virtual machines.
 	markReady()
 
+	standalone.HandleStandaloneMode(domainManager)
 	domain := waitForDomainUUID(*qemuTimeout, events, signalStopChan, domainManager)
 	if domain != nil {
 		var pidDir string
@@ -508,6 +524,35 @@ func main() {
 
 	close(stopChan)
 	<-cmdServerDone
+	<-preMigrationHookServer.Done()
 
 	log.Log.Info("Exiting...")
+}
+
+const (
+	// libvirtQemuHookPath is the path where libvirt expects the qemu hook script
+	libvirtQemuHookPath = "/etc/libvirt/hooks/qemu"
+	// libvirtHookClientPath is the Go binary that replaces the shell script
+	libvirtHookClientPath = "/usr/bin/libvirt-hook-client"
+)
+
+// replaceQemuHookWithCustomClient replaces the default qemu hook shell script
+// with the Go binary that can communicate with the pre-migration hook server.
+func replaceQemuHookWithCustomClient() error {
+	// Check if the Go binary exists
+	if _, err := os.Stat(libvirtHookClientPath); err != nil {
+		return fmt.Errorf("libvirt hook client binary not found at %s: %w", libvirtHookClientPath, err)
+	}
+
+	// Remove the existing hook script
+	if err := os.Remove(libvirtQemuHookPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("failed to remove existing qemu hook: %w", err)
+	}
+
+	// Create a symlink from the qemu hook path to the Go binary
+	if err := os.Symlink(libvirtHookClientPath, libvirtQemuHookPath); err != nil {
+		return fmt.Errorf("failed to create symlink for qemu hook: %w", err)
+	}
+
+	return nil
 }

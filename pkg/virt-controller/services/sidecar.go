@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2023 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -28,7 +28,7 @@ import (
 type SidecarCreatorFunc func(*v1.VirtualMachineInstance, *v1.KubeVirtConfiguration) (hooks.HookSidecarList, error)
 
 func WithSidecarCreator(sidecarCreator SidecarCreatorFunc) templateServiceOption {
-	return func(t *templateService) {
+	return func(t *TemplateService) {
 		t.sidecarCreators = append(t.sidecarCreators, sidecarCreator)
 	}
 }

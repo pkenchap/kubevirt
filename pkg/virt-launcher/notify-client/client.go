@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"kubevirt.io/kubevirt/pkg/virt-launcher/metadata"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/storage"
 
 	"google.golang.org/grpc"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -16,14 +18,13 @@ import (
 	k8sv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/json"
-	utilwait "k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/reference"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
 
-	diskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
+	virtwait "kubevirt.io/kubevirt/pkg/apimachinery/wait"
 	com "kubevirt.io/kubevirt/pkg/handler-launcher-com"
 	"kubevirt.io/kubevirt/pkg/handler-launcher-com/notify/info"
 	notifyv1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/notify/v1"
@@ -48,30 +49,34 @@ var (
 )
 
 type Notifier struct {
-	v1client         notifyv1.NotifyClient
-	conn             *grpc.ClientConn
-	connLock         sync.Mutex
-	pipeSocketPath   string
-	legacySocketPath string
+	v1client       notifyv1.NotifyClient
+	conn           *grpc.ClientConn
+	connLock       sync.Mutex
+	pipeSocketPath string
 
 	intervalTimeout time.Duration
 	sendTimeout     time.Duration
 	totalTimeout    time.Duration
+
+	firstAdd    *sync.Once
+	firstDelete *sync.Once
 }
 
 type libvirtEvent struct {
-	Domain     string
-	Event      *libvirt.DomainEventLifecycle
-	AgentEvent *libvirt.DomainEventAgentLifecycle
+	Domain            string
+	Event             *libvirt.DomainEventLifecycle
+	AgentEvent        *libvirt.DomainEventAgentLifecycle
+	JobCompletedEvent *libvirt.DomainEventJobCompleted
 }
 
 func NewNotifier(virtShareDir string) *Notifier {
 	return &Notifier{
-		pipeSocketPath:   filepath.Join(virtShareDir, "domain-notify-pipe.sock"),
-		legacySocketPath: filepath.Join(virtShareDir, "domain-notify.sock"),
-		intervalTimeout:  defaultIntervalTimeout,
-		sendTimeout:      defaultSendTimeout,
-		totalTimeout:     defaultTotalTimeout,
+		pipeSocketPath:  filepath.Join(virtShareDir, "domain-notify-pipe.sock"),
+		intervalTimeout: defaultIntervalTimeout,
+		sendTimeout:     defaultSendTimeout,
+		totalTimeout:    defaultTotalTimeout,
+		firstAdd:        &sync.Once{},
+		firstDelete:     &sync.Once{},
 	}
 }
 
@@ -122,15 +127,6 @@ func (n *Notifier) SetCustomTimeouts(interval, send, total time.Duration) {
 }
 
 func (n *Notifier) detectSocketPath() string {
-
-	// use the legacy domain socket if it exists. This would
-	// occur if the vmi was started with a hostPath shared mount
-	// using our old method for virt-handler to virt-launcher communication
-	exists, _ := diskutils.FileExists(n.legacySocketPath)
-	if exists {
-		return n.legacySocketPath
-	}
-
 	// default to using the new pipe socket
 	return n.pipeSocketPath
 }
@@ -200,7 +196,7 @@ func (n *Notifier) SendDomainEvent(event watch.Event) error {
 	}
 
 	var response *notifyv1.Response
-	err = utilwait.PollImmediate(n.intervalTimeout, n.totalTimeout, func() (done bool, err error) {
+	err = virtwait.PollImmediately(n.intervalTimeout, n.totalTimeout, func(ctx context.Context) (done bool, err error) {
 		n.connLock.Lock()
 		defer n.connLock.Unlock()
 
@@ -210,10 +206,9 @@ func (n *Notifier) SendDomainEvent(event watch.Event) error {
 			return false, nil
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), n.sendTimeout)
+		ctx, cancel := context.WithTimeout(ctx, n.sendTimeout)
 		defer cancel()
 		response, err = n.v1client.HandleDomainEvent(ctx, &request)
-
 		if err != nil {
 			log.Log.Reason(err).Errorf("Failed to send domain notify event. closing connection.")
 			n._close()
@@ -229,17 +224,58 @@ func (n *Notifier) SendDomainEvent(event watch.Event) error {
 		return err
 	} else if response.Success != true {
 		msg := fmt.Sprintf("failed to notify domain event: %s", response.Message)
-		return fmt.Errorf(msg)
+		return fmt.Errorf("%s", msg)
 	}
 
 	return nil
+}
+
+func (n *Notifier) updateEvents(event watch.Event, domain *api.Domain, events chan watch.Event) {
+	if event.Type == watch.Added {
+		n.firstAdd.Do(func() { events <- event })
+	} else if event.Type == watch.Modified && domain.ObjectMeta.DeletionTimestamp != nil {
+		n.firstDelete.Do(func() { events <- event })
+	}
 }
 
 func newWatchEventError(err error) watch.Event {
 	return watch.Event{Type: watch.Error, Object: &metav1.Status{Status: metav1.StatusFailure, Message: err.Error()}}
 }
 
-func eventCallback(c cli.Connection, domain *api.Domain, libvirtEvent libvirtEvent, client *Notifier, events chan watch.Event,
+type eventCaller struct {
+	domainStatus             api.LifeCycle
+	domainStatusChangeReason api.StateChangeReason
+}
+
+func (e *eventCaller) printStatus(status *api.DomainStatus) {
+	v := 2
+	if status.Status == e.domainStatus && status.Reason == e.domainStatusChangeReason {
+		// Status hasn't changed so log only in higher verbosity.
+		v = 3
+	}
+	log.Log.V(v).Infof("kubevirt domain status: %v(%v) reason: %v(%v)", status.Status, e.domainStatus, status.Reason, e.domainStatusChangeReason)
+}
+
+func (e *eventCaller) updateStatus(status *api.DomainStatus) {
+	e.domainStatus = status.Status
+	e.domainStatusChangeReason = status.Reason
+}
+
+type eventNotifier struct {
+	client *Notifier
+	domain *api.Domain
+	events chan watch.Event
+}
+
+func (e eventNotifier) SendEvent(event watch.Event) error {
+	return e.client.SendDomainEvent(event)
+}
+
+func (e eventNotifier) UpdateEvents(event watch.Event) {
+	e.client.updateEvents(event, e.domain, e.events)
+}
+
+func (e *eventCaller) eventCallback(c cli.Connection, domain *api.Domain, libvirtEvent libvirtEvent, client *Notifier, events chan watch.Event,
 	interfaceStatus []api.InterfaceStatus, osInfo *api.GuestOSInfo, vmi *v1.VirtualMachineInstance, fsFreezeStatus *api.FSFreeze,
 	metadataCache *metadata.Cache) {
 
@@ -252,12 +288,6 @@ func eventCallback(c cli.Connection, domain *api.Domain, libvirtEvent libvirtEve
 		domain.SetState(api.NoState, api.ReasonNonExistent)
 	} else {
 		defer d.Free()
-
-		// Remember current status before it will be changed.
-		var (
-			prevStatus = domain.Status.Status
-			prevReason = domain.Status.Reason
-		)
 
 		// No matter which event, try to fetch the domain xml
 		// and the state. If we get a IsNotFound error, that
@@ -290,12 +320,8 @@ func eventCallback(c cli.Connection, domain *api.Domain, libvirtEvent libvirtEve
 			domain.Spec = *spec
 		}
 
-		if domain.Status.Status == prevStatus && domain.Status.Reason == prevReason {
-			// Status hasn't changed so log only in higher verbosity.
-			log.Log.V(3).Infof("kubevirt domain status: %v(%v):%v(%v)", domain.Status.Status, status, domain.Status.Reason, reason)
-		} else {
-			log.Log.Infof("kubevirt domain status: %v(%v):%v(%v)", domain.Status.Status, status, domain.Status.Reason, reason)
-		}
+		e.printStatus(&domain.Status)
+		e.updateStatus(&domain.Status)
 	}
 
 	switch domain.Status.Reason {
@@ -304,7 +330,7 @@ func eventCallback(c cli.Connection, domain *api.Domain, libvirtEvent libvirtEve
 		domain.ObjectMeta.DeletionTimestamp = &now
 		watchEvent := watch.Event{Type: watch.Modified, Object: domain}
 		client.SendDomainEvent(watchEvent)
-		updateEvents(watchEvent, domain, events)
+		client.updateEvents(watchEvent, domain, events)
 	case api.ReasonPausedIOError:
 		domainDisksWithErrors, err := d.GetDiskErrors(0)
 		if err != nil {
@@ -327,19 +353,14 @@ func eventCallback(c cli.Connection, domain *api.Domain, libvirtEvent libvirtEve
 			}
 			event := watch.Event{Type: watch.Modified, Object: domain}
 			client.SendDomainEvent(event)
-			updateEvents(event, domain, events)
+			client.updateEvents(event, domain, events)
 		}
 	default:
-		if libvirtEvent.Event != nil {
-			if libvirtEvent.Event.Event == libvirt.DOMAIN_EVENT_DEFINED && libvirt.DomainEventDefinedDetailType(libvirtEvent.Event.Detail) == libvirt.DOMAIN_EVENT_DEFINED_ADDED {
-				event := watch.Event{Type: watch.Added, Object: domain}
-				client.SendDomainEvent(event)
-				updateEvents(event, domain, events)
-			} else if libvirtEvent.Event.Event == libvirt.DOMAIN_EVENT_STARTED && libvirt.DomainEventStartedDetailType(libvirtEvent.Event.Detail) == libvirt.DOMAIN_EVENT_STARTED_MIGRATED {
-				event := watch.Event{Type: watch.Added, Object: domain}
-				client.SendDomainEvent(event)
-				updateEvents(event, domain, events)
-			}
+		switch {
+		case libvirtEvent.JobCompletedEvent != nil:
+			processJobCompletedEvent(client, domain, d, libvirtEvent.JobCompletedEvent, metadataCache, events)
+		case libvirtEvent.Event != nil:
+			processLifecycleEvent(client, domain, libvirtEvent.Event, metadataCache, events, c, vmi)
 		}
 		if interfaceStatus != nil {
 			domain.Status.Interfaces = interfaceStatus
@@ -355,23 +376,6 @@ func eventCallback(c cli.Connection, domain *api.Domain, libvirtEvent libvirtEve
 		err := client.SendDomainEvent(watch.Event{Type: watch.Modified, Object: domain})
 		if err != nil {
 			log.Log.Reason(err).Error("Could not send domain notify event.")
-		}
-	}
-}
-
-var updateEvents = updateEventsClosure()
-
-func updateEventsClosure() func(event watch.Event, domain *api.Domain, events chan watch.Event) {
-	firstAddEvent := true
-	firstDeleteEvent := true
-
-	return func(event watch.Event, domain *api.Domain, events chan watch.Event) {
-		if event.Type == watch.Added && firstAddEvent {
-			firstAddEvent = false
-			events <- event
-		} else if event.Type == watch.Modified && domain.ObjectMeta.DeletionTimestamp != nil && firstDeleteEvent {
-			firstDeleteEvent = false
-			events <- event
 		}
 	}
 }
@@ -415,27 +419,23 @@ func (n *Notifier) StartDomainNotifier(
 		var interfaceStatuses []api.InterfaceStatus
 		var guestOsInfo *api.GuestOSInfo
 		var fsFreezeStatus *api.FSFreeze
+		var eventCaller eventCaller
+
 		for {
 			select {
 			case event := <-eventChan:
 				metadataCache.ResetNotification()
 				domainCache = util.NewDomainFromName(event.Domain, vmi.UID)
-				eventCallback(domainConn, domainCache, event, n, deleteNotificationSent, interfaceStatuses, guestOsInfo, vmi, fsFreezeStatus, metadataCache)
+				eventCaller.eventCallback(domainConn, domainCache, event, n, deleteNotificationSent, interfaceStatuses, guestOsInfo, vmi, fsFreezeStatus, metadataCache)
 				log.Log.Infof("Domain name event: %v", domainCache.Spec.Name)
-				if event.AgentEvent != nil {
-					if event.AgentEvent.State == libvirt.CONNECT_DOMAIN_EVENT_AGENT_LIFECYCLE_STATE_CONNECTED {
-						agentPoller.Start()
-					} else if event.AgentEvent.State == libvirt.CONNECT_DOMAIN_EVENT_AGENT_LIFECYCLE_STATE_DISCONNECTED {
-						agentPoller.Stop()
-					}
-				}
+				agentPoller.UpdateFromEvent(event.Event, event.AgentEvent)
 			case agentUpdate := <-agentStore.AgentUpdated:
 				metadataCache.ResetNotification()
 				interfaceStatuses = agentUpdate.DomainInfo.Interfaces
 				guestOsInfo = agentUpdate.DomainInfo.OSInfo
 				fsFreezeStatus = agentUpdate.DomainInfo.FSFreezeStatus
 
-				eventCallback(domainConn, domainCache, libvirtEvent{}, n, deleteNotificationSent,
+				eventCaller.eventCallback(domainConn, domainCache, libvirtEvent{}, n, deleteNotificationSent,
 					interfaceStatuses, guestOsInfo, vmi, fsFreezeStatus, metadataCache)
 			case <-reconnectChan:
 				n.SendDomainEvent(newWatchEventError(fmt.Errorf("Libvirt reconnect, domain %s", domainName)))
@@ -448,7 +448,7 @@ func (n *Notifier) StartDomainNotifier(
 						util.DomainFromNamespaceName(domainCache.ObjectMeta.Namespace, domainCache.ObjectMeta.Name),
 						vmi.UID,
 					)
-					eventCallback(
+					eventCaller.eventCallback(
 						domainConn,
 						domainCache,
 						libvirtEvent{},
@@ -519,6 +519,18 @@ func (n *Notifier) StartDomainNotifier(
 			log.Log.Infof(libvirtEventChannelFull)
 		}
 	}
+	domainEventJobCompletedCallback := func(c *libvirt.Connect, d *libvirt.Domain, event *libvirt.DomainEventJobCompleted) {
+		log.Log.Infof("Domain Job Completed event type %v received. Job operation: %v, succeeded: %t", event.Info.Type, event.Info.Operation, event.Info.JobSuccess)
+		name, err := d.GetName()
+		if err != nil {
+			log.Log.Reason(err).Info(cantDetermineLibvirtDomainName)
+		}
+		select {
+		case eventChan <- libvirtEvent{JobCompletedEvent: event, Domain: name}:
+		default:
+			log.Log.Infof(libvirtEventChannelFull)
+		}
+	}
 
 	err := domainConn.DomainEventLifecycleRegister(domainEventLifecycleCallback)
 	if err != nil {
@@ -539,6 +551,11 @@ func (n *Notifier) StartDomainNotifier(
 	err = domainConn.DomainEventMemoryDeviceSizeChangeRegister(domainEventMemoryDeviceSizeChange)
 	if err != nil {
 		log.Log.Reason(err).Errorf("failed to register memory device size change event callback with libvirt")
+		return err
+	}
+	err = domainConn.DomainEventJobCompletedRegister(domainEventJobCompletedCallback)
+	if err != nil {
+		log.Log.Reason(err).Errorf("failed to register event job completed callback with libvirt")
 		return err
 	}
 
@@ -587,7 +604,7 @@ func (n *Notifier) SendK8sEvent(vmi *v1.VirtualMachineInstance, severity string,
 	}
 
 	var response *notifyv1.Response
-	err = utilwait.PollImmediate(n.intervalTimeout, n.totalTimeout, func() (done bool, err error) {
+	err = virtwait.PollImmediately(n.intervalTimeout, n.totalTimeout, func(ctx context.Context) (done bool, err error) {
 		n.connLock.Lock()
 		defer n.connLock.Unlock()
 
@@ -597,10 +614,9 @@ func (n *Notifier) SendK8sEvent(vmi *v1.VirtualMachineInstance, severity string,
 			return false, nil
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), n.sendTimeout)
+		ctx, cancel := context.WithTimeout(ctx, n.sendTimeout)
 		defer cancel()
 		response, err = n.v1client.HandleK8SEvent(ctx, &request)
-
 		if err != nil {
 			log.Log.Reason(err).Errorf("Failed to send k8s notify event. closing connection.")
 			n._close()
@@ -614,7 +630,7 @@ func (n *Notifier) SendK8sEvent(vmi *v1.VirtualMachineInstance, severity string,
 		return err
 	} else if response.Success != true {
 		msg := fmt.Sprintf("failed to notify k8s event: %s", response.Message)
-		return fmt.Errorf(msg)
+		return fmt.Errorf("%s", msg)
 	}
 
 	return nil
@@ -632,4 +648,48 @@ func (n *Notifier) Close() {
 	defer n.connLock.Unlock()
 	n._close()
 
+}
+
+func processJobCompletedEvent(client *Notifier, domain *api.Domain, d cli.VirDomain, jobCompletedEvent *libvirt.DomainEventJobCompleted, metadataCache *metadata.Cache, events chan watch.Event) {
+	if jobCompletedEvent.Info.Operation != libvirt.DOMAIN_JOB_OPERATION_BACKUP {
+		log.Log.V(3).Infof("Recieved a job completion event for operation %v", jobCompletedEvent.Info.Operation)
+
+		return
+	}
+
+	storage.HandleBackupJobCompletedEvent(d, jobCompletedEvent, metadataCache)
+	if value, exists := metadataCache.Backup.Load(); exists {
+		domain.Spec.Metadata.KubeVirt.Backup = &value
+	}
+	event := watch.Event{Type: watch.Added, Object: domain}
+	client.SendDomainEvent(event)
+	client.updateEvents(event, domain, events)
+}
+
+func processLifecycleEvent(client *Notifier, domain *api.Domain, lifecycleEvent *libvirt.DomainEventLifecycle, metadataCache *metadata.Cache, events chan watch.Event, c cli.Connection, vmi *v1.VirtualMachineInstance) {
+	if lifecycleEvent.Event == libvirt.DOMAIN_EVENT_DEFINED &&
+		libvirt.DomainEventDefinedDetailType(lifecycleEvent.Detail) == libvirt.DOMAIN_EVENT_DEFINED_ADDED {
+		event := watch.Event{Type: watch.Added, Object: domain}
+		client.SendDomainEvent(event)
+		client.updateEvents(event, domain, events)
+	} else if lifecycleEvent.Event == libvirt.DOMAIN_EVENT_STARTED &&
+		libvirt.DomainEventStartedDetailType(lifecycleEvent.Detail) == libvirt.DOMAIN_EVENT_STARTED_MIGRATED {
+		event := watch.Event{Type: watch.Added, Object: domain}
+		client.SendDomainEvent(event)
+		client.updateEvents(event, domain, events)
+	} else if (lifecycleEvent.Event == libvirt.DOMAIN_EVENT_RESUMED && libvirt.DomainEventResumedDetailType(lifecycleEvent.Detail) == libvirt.DOMAIN_EVENT_RESUMED_MIGRATED) ||
+		(lifecycleEvent.Event == libvirt.DOMAIN_EVENT_SUSPENDED && libvirt.DomainEventSuspendedDetailType(lifecycleEvent.Detail) == libvirt.DOMAIN_EVENT_SUSPENDED_PAUSED) {
+		// This is a libvirt event that only the target can see, and it means that the migration has completed
+		// we just set the EndTimestamp here so that the source can finalize the migration.
+		// Usually this is performed by the source launcher/handler. However, in case of upgrade, this is not
+		// guaranteed as the cluster will have an updated virt-handler together with outdated launchers, this
+		// makes sure that migrations actually finish in those cases.
+		notifier := eventNotifier{
+			client: client,
+			domain: domain,
+			events: events,
+		}
+		monitor := virtwrap.NewTargetMigrationMonitor(c, events, vmi, domain, metadataCache, notifier)
+		monitor.StartMonitor()
+	}
 }

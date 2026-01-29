@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2021 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -25,37 +25,35 @@ import (
 	"net/http"
 	"time"
 
-	"kubevirt.io/kubevirt/tests/libmigration"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"kubevirt.io/kubevirt/tests/decorators"
-
 	promv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
-
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1 "kubevirt.io/api/core/v1"
+
 	"kubevirt.io/client-go/kubecli"
 
-	"kubevirt.io/kubevirt/tests"
+	"kubevirt.io/kubevirt/pkg/libvmi"
+	"kubevirt.io/kubevirt/tests/decorators"
 	"kubevirt.io/kubevirt/tests/flags"
-	"kubevirt.io/kubevirt/tests/framework/checks"
 	"kubevirt.io/kubevirt/tests/framework/kubevirt"
-	"kubevirt.io/kubevirt/tests/libvmi"
+	"kubevirt.io/kubevirt/tests/libmigration"
+	"kubevirt.io/kubevirt/tests/libmonitoring"
+	"kubevirt.io/kubevirt/tests/libnet"
+	"kubevirt.io/kubevirt/tests/libnode"
+	"kubevirt.io/kubevirt/tests/libvmifact"
+	"kubevirt.io/kubevirt/tests/libvmops"
 	"kubevirt.io/kubevirt/tests/libwait"
 	"kubevirt.io/kubevirt/tests/testsuite"
-	"kubevirt.io/kubevirt/tests/util"
 )
 
-var _ = Describe("[Serial][sig-monitoring]Monitoring", Serial, decorators.SigMonitoring, func() {
+var _ = Describe("[sig-monitoring]Monitoring", Serial, decorators.SigMonitoring, func() {
 	var err error
 	var virtClient kubecli.KubevirtClient
 	var prometheusRule *promv1.PrometheusRule
 
 	BeforeEach(func() {
 		virtClient = kubevirt.Client()
-		checks.SkipIfPrometheusRuleIsNotEnabled(virtClient)
 	})
 
 	Context("Kubevirt alert rules", func() {
@@ -87,15 +85,14 @@ var _ = Describe("[Serial][sig-monitoring]Monitoring", Serial, decorators.SigMon
 	})
 
 	Context("Migration Alerts", decorators.SigComputeMigrations, func() {
-		It("KubeVirtVMIExcessiveMigrations should be triggered when a VMI has been migrated more than 12 times during the last 24 hours", func() {
+		PIt("KubeVirtVMIExcessiveMigrations should be triggered when a VMI has been migrated more than 12 times during the last 24 hours", func() {
 			By("Starting the VirtualMachineInstance")
-			opts := append(libvmi.WithMasqueradeNetworking(), libvmi.WithResourceMemory("2Mi"))
-			vmi := libvmi.New(opts...)
-			vmi = tests.RunVMIAndExpectLaunch(vmi, 240)
+			vmi := libvmi.New(libnet.WithMasqueradeNetworking(), libvmi.WithMemoryRequest("2Mi"))
+			vmi = libvmops.RunVMIAndExpectLaunch(vmi, libvmops.StartupTimeoutSecondsHuge)
 
 			By("Migrating the VMI 13 times")
 			for i := 0; i < 13; i++ {
-				migration := tests.NewRandomMigration(vmi.Name, vmi.Namespace)
+				migration := libmigration.New(vmi.Name, vmi.Namespace)
 				migration = libmigration.RunMigrationAndExpectToCompleteWithDefaultTimeout(virtClient, migration)
 
 				// check VMI, confirm migration state
@@ -103,11 +100,11 @@ var _ = Describe("[Serial][sig-monitoring]Monitoring", Serial, decorators.SigMon
 			}
 
 			By("Verifying KubeVirtVMIExcessiveMigration alert exists")
-			verifyAlertExist(virtClient, "KubeVirtVMIExcessiveMigrations")
+			libmonitoring.VerifyAlertExist(virtClient, "KubeVirtVMIExcessiveMigrations")
 
 			// delete VMI
 			By("Deleting the VMI")
-			Expect(virtClient.VirtualMachineInstance(vmi.Namespace).Delete(context.Background(), vmi.Name, &metav1.DeleteOptions{})).To(Succeed())
+			Expect(virtClient.VirtualMachineInstance(vmi.Namespace).Delete(context.Background(), vmi.Name, metav1.DeleteOptions{})).To(Succeed())
 
 			By("Waiting for VMI to disappear")
 			libwait.WaitForVirtualMachineToDisappearWithTimeout(vmi, 240)
@@ -115,81 +112,41 @@ var _ = Describe("[Serial][sig-monitoring]Monitoring", Serial, decorators.SigMon
 	})
 
 	Context("System Alerts", func() {
-		disableVirtHandler := func() *v1.KubeVirt {
-			originalKv := util.GetCurrentKv(virtClient)
-			kv, err := virtClient.KubeVirt(originalKv.Namespace).Get(originalKv.Name, &metav1.GetOptions{})
-			Expect(err).ToNot(HaveOccurred())
-			kv.Spec.CustomizeComponents = v1.CustomizeComponents{
-				Patches: []v1.CustomizeComponentsPatch{
-					{
-						ResourceName: virtHandler.deploymentName,
-						ResourceType: "DaemonSet",
-						Patch:        `{"spec":{"template":{"spec":{"nodeSelector":{"kubernetes.io/hostname":"does-not-exist"}}}}}`,
-						Type:         v1.StrategicMergePatchType,
-					},
-				},
+		It("KubeVirtNoAvailableNodesToRunVMs should be triggered when there are no available nodes in the cluster to run VMs", func() {
+			By("Getting all schedulable nodes")
+			nodes := libnode.GetAllSchedulableNodes(virtClient)
+
+			DeferCleanup(func() {
+				By("Restoring kubevirt.io/schedulable label to all nodes")
+				for _, node := range nodes.Items {
+					libnode.SetNodeSchedulable(node.Name, virtClient)
+				}
+			})
+
+			By("Setting all nodes to unschedulable")
+			for _, node := range nodes.Items {
+				libnode.SetNodeUnschedulable(node.Name, virtClient)
 			}
 
-			Eventually(func() error {
-				kv, err = virtClient.KubeVirt(originalKv.Namespace).Update(kv)
-				return err
-			}, 30*time.Second, 1*time.Second).ShouldNot(HaveOccurred())
-
-			Eventually(func() string {
-				vh, err := virtClient.AppsV1().DaemonSets(originalKv.Namespace).Get(context.Background(), virtHandler.deploymentName, metav1.GetOptions{})
-				Expect(err).ToNot(HaveOccurred())
-				return vh.Spec.Template.Spec.NodeSelector["kubernetes.io/hostname"]
-			}, 90*time.Second, 5*time.Second).Should(Equal("does-not-exist"))
-
-			Eventually(func() int {
-				vh, err := virtClient.AppsV1().DaemonSets(originalKv.Namespace).Get(context.Background(), virtHandler.deploymentName, metav1.GetOptions{})
-				Expect(err).ToNot(HaveOccurred())
-				return int(vh.Status.NumberAvailable + vh.Status.NumberUnavailable)
-			}, 90*time.Second, 5*time.Second).Should(Equal(0))
-
-			return kv
-		}
-
-		restoreVirtHandler := func(kv *v1.KubeVirt) {
-			originalKv := util.GetCurrentKv(virtClient)
-			kv, err := virtClient.KubeVirt(originalKv.Namespace).Get(originalKv.Name, &metav1.GetOptions{})
-			Expect(err).ToNot(HaveOccurred())
-
-			kv.Spec.CustomizeComponents = v1.CustomizeComponents{}
-
-			Eventually(func() error {
-				kv, err = virtClient.KubeVirt(originalKv.Namespace).Update(kv)
-				return err
-			}, 30*time.Second, 1*time.Second).ShouldNot(HaveOccurred())
-		}
-
-		It("KubeVirtNoAvailableNodesToRunVMs should be triggered when there are no available nodes in the cluster to run VMs", func() {
-			By("Scaling down virt-handler")
-			kv := disableVirtHandler()
-
-			By("Verifying KubeVirtNoAvailableNodesToRunVMs alert exists if emulation is disabled")
-			verifyAlertExistWithCustomTime(virtClient, "KubeVirtNoAvailableNodesToRunVMs", 10*time.Minute)
-
-			By("Restoring virt-handler")
-			restoreVirtHandler(kv)
-			waitUntilAlertDoesNotExist(virtClient, "KubeVirtNoAvailableNodesToRunVMs")
+			By("Waiting for alert to appear")
+			libmonitoring.VerifyAlertExistWithCustomTime(virtClient, "KubeVirtNoAvailableNodesToRunVMs", 10*time.Minute)
 		})
 	})
 
-	Context("Deprecation Alerts", decorators.SigComputeMigrations, func() {
+	Context("Deprecation Alerts", decorators.SigMonitoring, func() {
 		It("KubeVirtDeprecatedAPIRequested should be triggered when a deprecated API is requested", func() {
 			By("Creating a VMI with deprecated API version")
-			vmi := libvmi.NewCirros()
+			vmi := libvmifact.NewCirros()
 			vmi.APIVersion = "v1alpha3"
 			vmi.Namespace = testsuite.GetTestNamespace(vmi)
-			vmi, err := virtClient.VirtualMachineInstance(vmi.Namespace).Create(context.Background(), vmi)
+			vmi, err := virtClient.VirtualMachineInstance(vmi.Namespace).Create(context.Background(), vmi, metav1.CreateOptions{})
 			Expect(err).ToNot(HaveOccurred())
 
 			By("Verifying the alert exists")
-			verifyAlertExist(virtClient, "KubeVirtDeprecatedAPIRequested")
+			libmonitoring.VerifyAlertExist(virtClient, "KubeVirtDeprecatedAPIRequested")
 
 			By("Verifying the alert disappears")
-			waitUntilAlertDoesNotExistWithCustomTime(virtClient, 15*time.Minute, "KubeVirtDeprecatedAPIRequested")
+			libmonitoring.WaitUntilAlertDoesNotExistWithCustomTime(virtClient, 15*time.Minute, "KubeVirtDeprecatedAPIRequested")
 		})
 	})
 
@@ -200,8 +157,8 @@ func checkRequiredAnnotations(rule promv1.Rule) {
 		"%s summary is missing or empty", rule.Alert)
 	ExpectWithOffset(1, rule.Annotations).To(HaveKey("runbook_url"),
 		"%s runbook_url is missing", rule.Alert)
-	ExpectWithOffset(1, rule.Annotations).To(HaveKeyWithValue("runbook_url", HaveSuffix(rule.Alert)),
-		"%s runbook_url is not equal to alert name", rule.Alert)
+	ExpectWithOffset(1, rule.Annotations).To(HaveKeyWithValue("runbook_url", ContainSubstring(rule.Alert)),
+		"%s runbook_url doesn't include alert name", rule.Alert)
 
 	resp, err := http.Head(rule.Annotations["runbook_url"])
 	ExpectWithOffset(1, err).ToNot(HaveOccurred(), fmt.Sprintf("%s runbook is not available", rule.Alert))

@@ -2,9 +2,11 @@ package services
 
 import (
 	"strconv"
+	"strings"
 
 	k8sv1 "k8s.io/api/core/v1"
-	"k8s.io/utils/pointer"
+
+	"kubevirt.io/kubevirt/pkg/pointer"
 
 	v1 "kubevirt.io/api/core/v1"
 
@@ -19,19 +21,20 @@ const (
 )
 
 type ContainerSpecRenderer struct {
-	imgPullPolicy   k8sv1.PullPolicy
-	isPrivileged    bool
-	launcherImg     string
-	name            string
-	userID          int64
-	volumeDevices   []k8sv1.VolumeDevice
-	volumeMounts    []k8sv1.VolumeMount
-	resources       k8sv1.ResourceRequirements
-	liveninessProbe *k8sv1.Probe
-	readinessProbe  *k8sv1.Probe
-	ports           []k8sv1.ContainerPort
-	capabilities    *k8sv1.Capabilities
-	args            []string
+	imgPullPolicy     k8sv1.PullPolicy
+	launcherImg       string
+	name              string
+	userID            int64
+	volumeDevices     []k8sv1.VolumeDevice
+	volumeMounts      []k8sv1.VolumeMount
+	sharedFilesystems []string
+	resources         k8sv1.ResourceRequirements
+	liveninessProbe   *k8sv1.Probe
+	readinessProbe    *k8sv1.Probe
+	ports             []k8sv1.ContainerPort
+	capabilities      *k8sv1.Capabilities
+	args              []string
+	extraEnvVars      []k8sv1.EnvVar
 }
 
 type Option func(*ContainerSpecRenderer)
@@ -50,38 +53,45 @@ func NewContainerSpecRenderer(containerName string, launcherImg string, imgPullP
 
 func (csr *ContainerSpecRenderer) Render(cmd []string) k8sv1.Container {
 	return k8sv1.Container{
-		Name:            csr.name,
-		Image:           csr.launcherImg,
-		ImagePullPolicy: csr.imgPullPolicy,
-		SecurityContext: securityContext(csr.userID, csr.isPrivileged, csr.capabilities),
-		Command:         cmd,
-		VolumeDevices:   csr.volumeDevices,
-		VolumeMounts:    csr.volumeMounts,
-		Resources:       csr.resources,
-		Ports:           csr.ports,
-		Env:             csr.envVars(),
-		LivenessProbe:   csr.liveninessProbe,
-		ReadinessProbe:  csr.readinessProbe,
-		Args:            csr.args,
+		Name:                     csr.name,
+		Image:                    csr.launcherImg,
+		ImagePullPolicy:          csr.imgPullPolicy,
+		SecurityContext:          securityContext(csr.userID, csr.capabilities),
+		Command:                  cmd,
+		VolumeDevices:            csr.volumeDevices,
+		VolumeMounts:             csr.volumeMounts,
+		Resources:                csr.resources,
+		Ports:                    csr.ports,
+		Env:                      csr.envVars(),
+		LivenessProbe:            csr.liveninessProbe,
+		ReadinessProbe:           csr.readinessProbe,
+		Args:                     csr.args,
+		TerminationMessagePolicy: k8sv1.TerminationMessageFallbackToLogsOnError,
 	}
 }
 
 func (csr *ContainerSpecRenderer) envVars() []k8sv1.EnvVar {
-	if csr.userID == 0 {
-		return nil
+	var env []k8sv1.EnvVar
+
+	if csr.userID != 0 {
+		env = append(env, xdgEnvironmentVariables()...)
 	}
-	return xdgEnvironmentVariables()
+
+	if len(csr.sharedFilesystems) != 0 {
+		env = append(env, k8sv1.EnvVar{
+			Name:  ENV_VAR_SHARED_FILESYSTEM_PATHS,
+			Value: strings.Join(csr.sharedFilesystems, ":"),
+		})
+	}
+
+	env = append(env, csr.extraEnvVars...)
+
+	return env
 }
 
 func WithNonRoot(userID int64) Option {
 	return func(renderer *ContainerSpecRenderer) {
 		renderer.userID = userID
-	}
-}
-
-func WithPrivileged() Option {
-	return func(renderer *ContainerSpecRenderer) {
-		renderer.isPrivileged = true
 	}
 }
 
@@ -129,6 +139,12 @@ func WithVolumeMounts(mounts ...k8sv1.VolumeMount) Option {
 	}
 }
 
+func WithSharedFilesystems(paths ...string) Option {
+	return func(renderer *ContainerSpecRenderer) {
+		renderer.sharedFilesystems = paths
+	}
+}
+
 func WithResourceRequirements(resources k8sv1.ResourceRequirements) Option {
 	return func(renderer *ContainerSpecRenderer) {
 		renderer.resources = resources
@@ -163,6 +179,12 @@ func WithReadinessProbe(vmi *v1.VirtualMachineInstance) Option {
 	}
 }
 
+func WithExtraEnvVars(envVars []k8sv1.EnvVar) Option {
+	return func(renderer *ContainerSpecRenderer) {
+		renderer.extraEnvVars = append(renderer.extraEnvVars, envVars...)
+	}
+}
+
 func xdgEnvironmentVariables() []k8sv1.EnvVar {
 	const varRun = "/var/run"
 	return []k8sv1.EnvVar{
@@ -181,18 +203,17 @@ func xdgEnvironmentVariables() []k8sv1.EnvVar {
 	}
 }
 
-func securityContext(userId int64, privileged bool, requiredCapabilities *k8sv1.Capabilities) *k8sv1.SecurityContext {
+func securityContext(userId int64, requiredCapabilities *k8sv1.Capabilities) *k8sv1.SecurityContext {
 	isNonRoot := userId != 0
 	context := &k8sv1.SecurityContext{
 		RunAsUser:    &userId,
 		RunAsNonRoot: &isNonRoot,
-		Privileged:   &privileged,
 		Capabilities: requiredCapabilities,
 	}
 
 	if isNonRoot {
 		context.RunAsGroup = &userId
-		context.AllowPrivilegeEscalation = pointer.Bool(false)
+		context.AllowPrivilegeEscalation = pointer.P(false)
 	}
 
 	return context
@@ -242,7 +263,7 @@ func wrapExecProbeWithVirtProbe(vmi *v1.VirtualMachineInstance, probe *k8sv1.Pro
 	}
 
 	originalCommand := probe.ProbeHandler.Exec.Command
-	if len(originalCommand) < 1 {
+	if len(originalCommand) < 1 || originalCommand[0] == "virt-probe" {
 		return
 	}
 

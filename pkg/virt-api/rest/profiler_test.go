@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2018 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -30,7 +30,6 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/emicklei/go-restful/v3"
@@ -39,8 +38,6 @@ import (
 	"github.com/onsi/gomega/ghttp"
 	"github.com/onsi/gomega/types"
 
-	"kubevirt.io/kubevirt/pkg/util/status"
-
 	k8sv1 "k8s.io/api/core/v1"
 	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -48,7 +45,6 @@ import (
 	"kubevirt.io/client-go/kubecli"
 
 	"kubevirt.io/kubevirt/pkg/testutils"
-	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 )
 
 var _ = Describe("Cluster Profiler Subresources", func() {
@@ -76,7 +72,7 @@ var _ = Describe("Cluster Profiler Subresources", func() {
 		},
 	}
 
-	config, _, kvInformer := testutils.NewFakeClusterConfigUsingKV(kv)
+	config, _, kvStore := testutils.NewFakeClusterConfigUsingKV(kv)
 
 	app := SubresourceAPIApp{}
 	BeforeEach(func() {
@@ -89,8 +85,6 @@ var _ = Describe("Cluster Profiler Subresources", func() {
 		flag.Set("kubeconfig", "")
 		flag.Set("master", server.URL())
 		app.virtCli, _ = kubecli.GetKubevirtClientFromFlags(server.URL(), "")
-		app.statusUpdater = status.NewVMStatusUpdater(app.virtCli)
-		app.credentialsLock = &sync.Mutex{}
 		app.handlerTLSConfiguration = &tls.Config{InsecureSkipVerify: true}
 		app.clusterConfig = config
 		app.profilerComponentPort = backendPort
@@ -99,13 +93,14 @@ var _ = Describe("Cluster Profiler Subresources", func() {
 		recorder = httptest.NewRecorder()
 		response = restful.NewResponse(recorder)
 	})
-	enableFeatureGate := func(featureGate string) {
+
+	enableClusterProfiler := func() {
 		kvConfig := kv.DeepCopy()
-		kvConfig.Spec.Configuration.DeveloperConfiguration.FeatureGates = []string{featureGate}
-		testutils.UpdateFakeKubeVirtClusterConfig(kvInformer, kvConfig)
+		kvConfig.Spec.Configuration.DeveloperConfiguration.ClusterProfiler = true
+		testutils.UpdateFakeKubeVirtClusterConfig(kvStore, kvConfig)
 	}
-	disableFeatureGates := func() {
-		testutils.UpdateFakeKubeVirtClusterConfig(kvInformer, kv)
+	disableClusterProfiler := func() {
+		testutils.UpdateFakeKubeVirtClusterConfig(kvStore, kv)
 	}
 
 	expectPodList := func() {
@@ -158,7 +153,7 @@ var _ = Describe("Cluster Profiler Subresources", func() {
 				),
 			)
 
-			enableFeatureGate(virtconfig.ClusterProfiler)
+			enableClusterProfiler()
 			expectPodList()
 			fn(request, response)
 			Expect(recorder.Code).To(Equal(http.StatusOK))
@@ -184,7 +179,7 @@ var _ = Describe("Cluster Profiler Subresources", func() {
 				),
 			)
 
-			enableFeatureGate(virtconfig.ClusterProfiler)
+			enableClusterProfiler()
 			expectPodList()
 			fn(request, response)
 			Expect(recorder.Code).To(Equal(http.StatusOK))
@@ -230,7 +225,7 @@ var _ = Describe("Cluster Profiler Subresources", func() {
 
 	AfterEach(func() {
 		server.Close()
-		disableFeatureGates()
+		disableClusterProfiler()
 		backend.Close()
 	})
 })

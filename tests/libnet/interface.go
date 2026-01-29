@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2023 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -37,6 +37,28 @@ func InterfaceExists(vmi *v1.VirtualMachineInstance, interfaceName string) error
 	return nil
 }
 
+func AddIPAddress(vmi *v1.VirtualMachineInstance, interfaceName, interfaceAddress string) error {
+	const addrAddTimeout = time.Second * 5
+	setStaticIPCmd := fmt.Sprintf("ip addr add %s dev %s\n", interfaceAddress, interfaceName)
+
+	if err := console.RunCommand(vmi, setStaticIPCmd, addrAddTimeout); err != nil {
+		return fmt.Errorf("could not configure address %s for interface %s on VMI %s: %w", interfaceAddress, interfaceName, vmi.Name, err)
+	}
+
+	return nil
+}
+
+func SetInterfaceUp(vmi *v1.VirtualMachineInstance, interfaceName string) error {
+	const ifaceUpTimeout = time.Second * 5
+	setUpCmd := fmt.Sprintf("ip link set %s up\n", interfaceName)
+
+	if err := console.RunCommand(vmi, setUpCmd, ifaceUpTimeout); err != nil {
+		return fmt.Errorf("could not set interface %s up on VMI %s: %w", interfaceName, vmi.Name, err)
+	}
+
+	return nil
+}
+
 func LookupNetworkByName(networks []v1.Network, name string) *v1.Network {
 	for i, net := range networks {
 		if net.Name == name {
@@ -45,4 +67,25 @@ func LookupNetworkByName(networks []v1.Network, name string) *v1.Network {
 	}
 
 	return nil
+}
+
+func NewLinkStateAssersionCmd(mac string, desiredLinkState v1.InterfaceState) string {
+	const (
+		linkStateUPRegex   = "'state[[:space:]]+UP'"
+		linkStateDOWNRegex = "'NO-CARRIER.+state[[:space:]]+DOWN'"
+		ipLinkTemplate     = "ip -one link | grep %s | grep -E %s\n"
+	)
+
+	var linkStateRegex string
+
+	switch desiredLinkState {
+	case v1.InterfaceStateLinkUp:
+		linkStateRegex = linkStateUPRegex
+	case v1.InterfaceStateLinkDown:
+		linkStateRegex = linkStateDOWNRegex
+	case v1.InterfaceStateAbsent:
+		// noop
+	}
+
+	return fmt.Sprintf(ipLinkTemplate, mac, linkStateRegex)
 }

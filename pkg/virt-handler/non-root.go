@@ -1,3 +1,22 @@
+/*
+ * This file is part of the KubeVirt project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * Copyright The KubeVirt Authors.
+ *
+ */
+
 package virthandler
 
 import (
@@ -5,8 +24,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 
 	k8sv1 "k8s.io/api/core/v1"
 
@@ -14,8 +31,8 @@ import (
 
 	diskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
 	hostdisk "kubevirt.io/kubevirt/pkg/host-disk"
-	"kubevirt.io/kubevirt/pkg/network/domainspec"
-	"kubevirt.io/kubevirt/pkg/network/namescheme"
+	neterrors "kubevirt.io/kubevirt/pkg/network/errors"
+	netvmispec "kubevirt.io/kubevirt/pkg/network/vmispec"
 	"kubevirt.io/kubevirt/pkg/safepath"
 	"kubevirt.io/kubevirt/pkg/storage/types"
 	"kubevirt.io/kubevirt/pkg/virt-handler/isolation"
@@ -100,105 +117,14 @@ func changeOwnershipOfHostDisks(vmiWithAllPVCs *v1.VirtualMachineInstance, res i
 	return nil
 }
 
-func (d *VirtualMachineController) prepareStorage(vmi *v1.VirtualMachineInstance, res isolation.IsolationResult) error {
+func (c *BaseController) prepareStorage(vmi *v1.VirtualMachineInstance, res isolation.IsolationResult) error {
 	if err := changeOwnershipOfBlockDevices(vmi, res); err != nil {
 		return err
 	}
 	return changeOwnershipOfHostDisks(vmi, res)
 }
 
-func getTapDevices(vmi *v1.VirtualMachineInstance, networkBindings map[string]v1.InterfaceBindingPlugin) (map[string]string, error) {
-	tapNetworks := map[string]struct{}{}
-	domainAttachmentByInterfaceName := domainspec.DomainAttachmentByInterfaceName(vmi.Spec.Domain.Devices.Interfaces, networkBindings)
-	for _, inf := range vmi.Spec.Domain.Devices.Interfaces {
-		if domainAttachmentByInterfaceName[inf.Name] == string(v1.Tap) {
-			tapNetworks[inf.Name] = struct{}{}
-		}
-	}
-
-	networkNameScheme := namescheme.CreateHashedNetworkNameScheme(vmi.Spec.Networks)
-	tapDevices := map[string]string{}
-	for _, net := range vmi.Spec.Networks {
-		_, isTapNetwork := tapNetworks[net.Name]
-		if podInterfaceName, exists := networkNameScheme[net.Name]; isTapNetwork && exists {
-			tapDevices[net.Name] = podInterfaceName
-		} else if isTapNetwork && !exists {
-			return nil, fmt.Errorf("network %q not found in naming scheme: this should never happen", net.Name)
-		}
-	}
-	return tapDevices, nil
-}
-
-func (d *VirtualMachineController) prepareTap(vmi *v1.VirtualMachineInstance, res isolation.IsolationResult) error {
-	networkToTapDeviceNames, err := getTapDevices(vmi, d.clusterConfig.GetNetworkBindings())
-	if err != nil {
-		return err
-	}
-	for networkName, tapName := range networkToTapDeviceNames {
-		path, err := FindInterfaceIndexPath(res, tapName, networkName, vmi.Spec.Networks)
-		if err != nil {
-			return err
-		}
-		index, err := func(path *safepath.Path) (int, error) {
-			df, err := safepath.OpenAtNoFollow(path)
-			if err != nil {
-				return 0, err
-			}
-			defer df.Close()
-			b, err := os.ReadFile(df.SafePath())
-			if err != nil {
-				return 0, fmt.Errorf("Failed to read if index, %v", err)
-			}
-
-			return strconv.Atoi(strings.TrimSpace(string(b)))
-		}(path)
-		if err != nil {
-			return err
-		}
-
-		pathToTap, err := isolation.SafeJoin(res, "dev", fmt.Sprintf("tap%d", index))
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return nil
-			}
-			return err
-		}
-
-		if err := diskutils.DefaultOwnershipManager.SetFileOwnership(pathToTap); err != nil {
-			return err
-		}
-	}
-	return nil
-
-}
-
-// FindInterfaceIndexPath return the ifindex path of the given interface name (e.g.: enp0f1p2 -> /sys/class/net/enp0f1p2/ifindex).
-// If path not found it will try to find the path using ordinal interface name based on its position in the given
-// networks slice (e.g.: net1 -> /sys/class/net/net1/ifindex).
-func FindInterfaceIndexPath(res isolation.IsolationResult, podIfaceName string, networkName string, networks []v1.Network) (*safepath.Path, error) {
-	var errs []string
-	path, err := isolation.SafeJoin(res, "sys", "class", "net", podIfaceName, "ifindex")
-	if err == nil {
-		return path, nil
-	}
-	errs = append(errs, err.Error())
-
-	// fall back to ordinal pod interface names
-	ordinalPodIfaceName := namescheme.OrdinalPodInterfaceName(networkName, networks)
-	if ordinalPodIfaceName == "" {
-		errs = append(errs, fmt.Sprintf("failed to find network %q pod interface name", networkName))
-	} else {
-		path, err := isolation.SafeJoin(res, "sys", "class", "net", ordinalPodIfaceName, "ifindex")
-		if err == nil {
-			return path, nil
-		}
-		errs = append(errs, err.Error())
-	}
-
-	return nil, fmt.Errorf(strings.Join(errs, ", "))
-}
-
-func (*VirtualMachineController) prepareVFIO(vmi *v1.VirtualMachineInstance, res isolation.IsolationResult) error {
+func (*BaseController) prepareVFIO(res isolation.IsolationResult) error {
 	vfioBasePath, err := isolation.SafeJoin(res, "dev", "vfio")
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -240,18 +166,39 @@ func (*VirtualMachineController) prepareVFIO(vmi *v1.VirtualMachineInstance, res
 	return nil
 }
 
-func (d *VirtualMachineController) nonRootSetup(origVMI, vmi *v1.VirtualMachineInstance) error {
-	res, err := d.podIsolationDetector.Detect(origVMI)
+func (c *BaseController) prepareNetwork(vmi *v1.VirtualMachineInstance, res isolation.IsolationResult) error {
+	rootMount, err := res.MountRoot()
 	if err != nil {
 		return err
 	}
-	if err := d.prepareStorage(origVMI, res); err != nil {
+
+	if netvmispec.RequiresVirtioNetDevice(vmi, c.clusterConfig.AllowEmulation()) {
+		if err := c.claimDeviceOwnership(rootMount, "vhost-net"); err != nil {
+			return neterrors.CreateCriticalNetworkError(fmt.Errorf("failed to set up vhost-net device, %s", err))
+		}
+	}
+
+	if netvmispec.RequiresTunDevice(vmi) {
+		if err := c.claimDeviceOwnership(rootMount, "/net/tun"); err != nil {
+			return neterrors.CreateCriticalNetworkError(fmt.Errorf("failed to set up tun device, %s", err))
+		}
+	}
+
+	return nil
+}
+
+func (c *BaseController) nonRootSetup(vmi *v1.VirtualMachineInstance) error {
+	res, err := c.podIsolationDetector.Detect(vmi)
+	if err != nil {
 		return err
 	}
-	if err := d.prepareTap(origVMI, res); err != nil {
+	if err := c.prepareStorage(vmi, res); err != nil {
 		return err
 	}
-	if err := d.prepareVFIO(origVMI, res); err != nil {
+	if err := c.prepareVFIO(res); err != nil {
+		return err
+	}
+	if err := c.prepareNetwork(vmi, res); err != nil {
 		return err
 	}
 	return nil

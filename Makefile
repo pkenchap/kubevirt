@@ -1,7 +1,14 @@
 export GO15VENDOREXPERIMENT := 1
 
+ifeq (${CI}, true)
+  # If we're running under a test lane, enable timestamps and disable progress output
+  TIMESTAMP=1
+  ifeq (,$(wildcard ci.bazelrc))
+    $(shell echo 'build --noshow_progress' > ci.bazelrc)
+  endif
+endif
+
 ifeq (${TIMESTAMP}, 1)
-  $(info "Timestamp is enabled")
   SHELL = ./hack/timestamps.sh
 endif
 
@@ -19,9 +26,6 @@ bazel-build-functests:
 	hack/dockerized "hack/bazel-fmt.sh && hack/bazel-build-functests.sh"
 
 build-functests: bazel-build-functests
-
-bazel-build-image-bundle:
-	hack/dockerized "export BUILD_ARCH=${BUILD_ARCH} && hack/bazel-fmt.sh && DOCKER_PREFIX=${DOCKER_PREFIX} DOCKER_TAG=${DOCKER_TAG} IMAGE_PREFIX=${IMAGE_PREFIX} hack/multi-arch.sh build-image-bundle"
 
 bazel-build-verify: bazel-build
 	./hack/dockerized "hack/bazel-fmt.sh"
@@ -49,7 +53,8 @@ generate:
 	hack/dockerized "DOCKER_PREFIX=${DOCKER_PREFIX} DOCKER_TAG=${DOCKER_TAG} IMAGE_PULL_POLICY=${IMAGE_PULL_POLICY} VERBOSITY=${VERBOSITY} ./hack/generate.sh"
 	SYNC_VENDOR=true hack/dockerized "./hack/bazel-generate.sh && hack/bazel-fmt.sh"
 	hack/dockerized hack/sync-kubevirtci.sh
-	hack/dockerized hack/sync-common-instancetypes.sh
+	hack/dockerized hack/common-instancetypes/sync.sh
+	./hack/update-generated-api-testdata.sh
 
 generate-verify: generate
 	./hack/verify-generate.sh
@@ -62,7 +67,7 @@ client-python:
 	hack/dockerized "DOCKER_TAG=${DOCKER_TAG} ./hack/gen-client-python/generate.sh"
 
 go-build:
-	hack/dockerized "export KUBEVIRT_NO_BAZEL=true && KUBEVIRT_VERSION=${KUBEVIRT_VERSION} KUBEVIRT_GO_BUILD_TAGS=${KUBEVIRT_GO_BUILD_TAGS} KUBEVIRT_RELEASE=${KUBEVIRT_RELEASE} ./hack/build-go.sh install ${WHAT}" && ./hack/build-copy-artifacts.sh ${WHAT}
+	KUBEVIRT_NO_BAZEL=true hack/dockerized "export KUBEVIRT_VERSION=${KUBEVIRT_VERSION} && KUBEVIRT_GO_BUILD_TAGS=${KUBEVIRT_GO_BUILD_TAGS} KUBEVIRT_RELEASE=${KUBEVIRT_RELEASE} ./hack/build-go.sh install ${WHAT}" && ./hack/build-copy-artifacts.sh ${WHAT}
 
 go-build-functests:
 	hack/dockerized "export KUBEVIRT_NO_BAZEL=true && KUBEVIRT_GO_BUILD_TAGS=${KUBEVIRT_GO_BUILD_TAGS} ./hack/go-build-functests.sh"
@@ -76,8 +81,11 @@ coverage:
 goveralls:
 	SYNC_OUT=false hack/dockerized "COVERALLS_TOKEN_FILE=${COVERALLS_TOKEN_FILE} COVERALLS_TOKEN=${COVERALLS_TOKEN} CI_NAME=prow CI_BRANCH=${PULL_BASE_REF} CI_PR_NUMBER=${PULL_NUMBER} GIT_ID=${PULL_PULL_SHA} PROW_JOB_ID=${PROW_JOB_ID} ./hack/bazel-goveralls.sh"
 
+coverage-report:
+	hack/dockerized "CI=${CI} WHAT=${WHAT} ./hack/bazel-coverage-report.sh"
+
 go-test: go-build
-	SYNC_OUT=false hack/dockerized "export KUBEVIRT_NO_BAZEL=true && KUBEVIRT_GO_BUILD_TAGS=${KUBEVIRT_GO_BUILD_TAGS} ./hack/build-go.sh test ${WHAT}"
+	SYNC_OUT=false KUBEVIRT_NO_BAZEL=true hack/dockerized "export KUBEVIRT_GO_BUILD_TAGS=${KUBEVIRT_GO_BUILD_TAGS} && ./hack/build-go.sh test ${WHAT}"
 
 test: bazel-test
 
@@ -100,10 +108,13 @@ functest-image-push: functest-image-build
 	hack/func-tests-image.sh push
 
 conformance:
-	hack/dockerized "export KUBEVIRT_PROVIDER=${KUBEVIRT_PROVIDER} SKIP_OUTSIDE_CONN_TESTS=${SKIP_OUTSIDE_CONN_TESTS} RUN_ON_ARM64_INFRA=${RUN_ON_ARM64_INFRA} KUBEVIRT_E2E_FOCUS=${KUBEVIRT_E2E_FOCUS} DOCKER_PREFIX=${DOCKER_PREFIX} DOCKER_TAG=${DOCKER_TAG} && hack/conformance.sh"
+	hack/dockerized "export KUBEVIRT_PROVIDER=${KUBEVIRT_PROVIDER} SKIP_OUTSIDE_CONN_TESTS=${SKIP_OUTSIDE_CONN_TESTS} RUN_ON_ARM64_INFRA=${RUN_ON_ARM64_INFRA} SKIP_BLOCK_STORAGE_TESTS=${SKIP_BLOCK_STORAGE_TESTS} SKIP_SNAPSHOT_STORAGE_TESTS=${SKIP_SNAPSHOT_STORAGE_TESTS} KUBEVIRT_E2E_FOCUS=${KUBEVIRT_E2E_FOCUS} DOCKER_PREFIX=${DOCKER_PREFIX} DOCKER_TAG=${DOCKER_TAG} && hack/conformance.sh"
 
 perftest: build-functests
 	hack/perftests.sh
+
+kwok-perftest: build-functests
+	hack/kwok-perftests.sh
 
 realtime-perftest: build-functests
 	hack/realtime-perftests.sh
@@ -117,18 +128,14 @@ distclean: clean
 	hack/dockerized "rm -rf vendor/ && rm -f go.sum && GO111MODULE=on go clean -modcache"
 	rm -rf vendor/
 
-cluster-patch:
-	hack/dockerized "export BUILD_ARCH=${BUILD_ARCH} && hack/bazel-fmt.sh && DOCKER_PREFIX=${DOCKER_PREFIX} DOCKER_TAG=${DOCKER_TAG} DOCKER_TAG_ALT=${DOCKER_TAG_ALT} IMAGE_PREFIX=${IMAGE_PREFIX} IMAGE_PREFIX_ALT=${IMAGE_PREFIX_ALT} KUBEVIRT_PROVIDER=${KUBEVIRT_PROVIDER} PUSH_TARGETS='virt-api virt-controller virt-handler virt-launcher' ./hack/bazel-push-images.sh"
-	hack/cluster-patch.sh
-
 deps-update-patch:
-	SYNC_VENDOR=true hack/dockerized " ./hack/dep-update.sh -- -u=patch && ./hack/dep-prune.sh && ./hack/bazel-generate.sh"
+	SYNC_VENDOR=true hack/dockerized " ./hack/dep-update.sh -- -u=patch && ./hack/bazel-generate.sh"
 
 deps-update:
-	SYNC_VENDOR=true hack/dockerized " ./hack/dep-update.sh && ./hack/dep-prune.sh && ./hack/bazel-generate.sh"
+	SYNC_VENDOR=true hack/dockerized " ./hack/dep-update.sh && ./hack/bazel-generate.sh"
 
 deps-sync:
-	SYNC_VENDOR=true hack/dockerized " ./hack/dep-update.sh --sync-only && ./hack/dep-prune.sh && ./hack/bazel-generate.sh"
+	SYNC_VENDOR=true hack/dockerized " ./hack/dep-update.sh --sync-only && ./hack/bazel-generate.sh"
 
 rpm-deps:
 	SYNC_VENDOR=true hack/dockerized "CUSTOM_REPO=${CUSTOM_REPO} SINGLE_ARCH=${SINGLE_ARCH} BASESYSTEM=${BASESYSTEM} LIBVIRT_VERSION=${LIBVIRT_VERSION} QEMU_VERSION=${QEMU_VERSION} SEABIOS_VERSION=${SEABIOS_VERSION} EDK2_VERSION=${EDK2_VERSION} LIBGUESTFS_VERSION=${LIBGUESTFS_VERSION} GUESTFSTOOLS_VERSION=${GUESTFSTOOLS_VERSION} PASST_VERSION=${PASST_VERSION} VIRTIOFSD_VERSION=${VIRTIOFSD_VERSION} SWTPM_VERSION=${SWTPM_VERSION} ./hack/rpm-deps.sh"
@@ -152,7 +159,7 @@ cluster-up:
 	./hack/cluster-up.sh
 
 cluster-down:
-	./cluster-up/down.sh
+	./kubevirtci/cluster-up/down.sh
 
 cluster-build:
 	./hack/cluster-build.sh
@@ -206,22 +213,21 @@ format:
 fmt: format
 
 lint:
-	if [ $$(wc -l < tests/utils.go) -gt 2027 ]; then echo >&2 "do not make tests/utils longer"; exit 1; fi
-
-	hack/dockerized "golangci-lint run --timeout 20m --verbose \
-	  pkg/instancetype/... \
-	  pkg/network/namescheme/... \
-	  pkg/network/domainspec/... \
-	  pkg/network/sriov/... \
-	  tests/console/... \
-	  tests/libnet/... \
-	  tests/libvmi/... \
-	"
+	hack/dockerized "hack/lint-test-cleanup-label.sh"
+	hack/dockerized "hack/golangci-lint.sh"
+	hack/dockerized "monitoringlinter ./pkg/..."
+	hack/dockerized "hack/license-header-check.sh"
 
 lint-metrics:
 	hack/dockerized "./hack/prom-metric-linter/metrics_collector.sh > metrics.json"
 	./hack/prom-metric-linter/metric_name_linter.sh --operator-name="kubevirt" --sub-operator-name="kubevirt" --metrics-file=metrics.json
 	rm metrics.json
+
+gofumpt:
+	./hack/dockerized "hack/gofumpt.sh"
+
+update-generated-api-testdata:
+	./hack/update-generated-api-testdata.sh
 
 .PHONY: \
 	build-verify \
@@ -231,7 +237,6 @@ lint-metrics:
 	go-all \
 	bazel-generate \
 	bazel-build \
-	bazel-build-image-bundle \
 	bazel-build-images \
 	bazel-push-images \
 	bazel-test \
@@ -259,5 +264,6 @@ lint-metrics:
 	format \
 	fmt \
 	lint \
-	lint-metrics\
+	lint-metrics \
+	update-generated-api-testdata \
 	$(NULL)

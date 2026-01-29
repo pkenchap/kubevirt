@@ -13,22 +13,21 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2023 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
 package virtiofs
 
 import (
+	"context"
 	"fmt"
 
-	"kubevirt.io/client-go/kubecli"
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"kubevirt.io/kubevirt/tests/decorators"
 	"kubevirt.io/kubevirt/tests/framework/kubevirt"
-
-	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
-	"kubevirt.io/kubevirt/tests/framework/checks"
+	"kubevirt.io/kubevirt/tests/libvmops"
 
 	expect "github.com/google/goexpect"
 	"github.com/google/uuid"
@@ -39,19 +38,16 @@ import (
 	"kubevirt.io/kubevirt/tests/testsuite"
 
 	"kubevirt.io/kubevirt/pkg/config"
-	"kubevirt.io/kubevirt/tests"
+	"kubevirt.io/kubevirt/pkg/libvmi"
 	"kubevirt.io/kubevirt/tests/console"
-	"kubevirt.io/kubevirt/tests/libvmi"
+	"kubevirt.io/kubevirt/tests/decorators"
+	"kubevirt.io/kubevirt/tests/libconfigmap"
+	"kubevirt.io/kubevirt/tests/libpod"
+	"kubevirt.io/kubevirt/tests/libsecret"
+	"kubevirt.io/kubevirt/tests/libvmifact"
 )
 
-var _ = Describe("[sig-compute] vitiofs config volumes", decorators.SigCompute, func() {
-	var virtClient kubecli.KubevirtClient
-
-	BeforeEach(func() {
-		virtClient = kubevirt.Client()
-		checks.SkipTestIfNoFeatureGate(virtconfig.VirtIOFSGate)
-	})
-
+var _ = Describe("[sig-compute] vitiofs config volumes", decorators.SigCompute, decorators.VirtioFS, func() {
 	Context("With a single ConfigMap volume", func() {
 		var (
 			configMapName string
@@ -68,25 +64,28 @@ var _ = Describe("[sig-compute] vitiofs config volumes", decorators.SigCompute, 
 				"option2": "value2",
 				"option3": "value3",
 			}
-			tests.CreateConfigMap(configMapName, testsuite.GetTestNamespace(nil), data)
+			cm := libconfigmap.New(configMapName, data)
+			cm, err := kubevirt.Client().CoreV1().ConfigMaps(testsuite.GetTestNamespace(cm)).Create(context.Background(), cm, metav1.CreateOptions{})
+			Expect(err).ToNot(HaveOccurred())
 		})
 
 		It("Should be the mounted virtiofs layout the same for a pod and vmi", func() {
 			expectedOutput := "value1value2value3"
 
 			By("Running VMI")
-			vmi := libvmi.NewFedora(
+			vmi := libvmifact.NewFedora(
 				libvmi.WithConfigMapFs(configMapName, configMapName),
 			)
-			vmi = tests.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 300)
+			vmi = libvmops.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 300)
 
 			By("Logging into the VMI")
 			Expect(console.LoginToFedora(vmi)).To(Succeed())
 
 			By("Checking if ConfigMap has been attached to the pod")
-			vmiPod := tests.GetRunningPodByVirtualMachineInstance(vmi, testsuite.GetTestNamespace(vmi))
+			vmiPod, err := libpod.GetPodByVirtualMachineInstance(vmi, vmi.Namespace)
+			Expect(err).ToNot(HaveOccurred())
+
 			podOutput, err := exec.ExecuteCommandOnPod(
-				virtClient,
 				vmiPod,
 				fmt.Sprintf("virtiofs-%s", configMapName),
 				[]string{"cat",
@@ -101,7 +100,7 @@ var _ = Describe("[sig-compute] vitiofs config volumes", decorators.SigCompute, 
 			By("Checking mounted ConfigMap")
 			Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 				&expect.BSnd{S: fmt.Sprintf("mount -t virtiofs %s /mnt \n", configMapName)},
-				&expect.BExp{R: console.PromptExpression},
+				&expect.BExp{R: ""},
 				&expect.BSnd{S: "echo $?\n"},
 				&expect.BExp{R: console.RetValue("0")},
 				&expect.BSnd{S: "cat /mnt/option1 /mnt/option2 /mnt/option3\n"},
@@ -121,29 +120,30 @@ var _ = Describe("[sig-compute] vitiofs config volumes", decorators.SigCompute, 
 			secretName = "secret-" + uuid.NewString()[:6]
 			secretPath = config.GetSecretSourcePath(secretName)
 
-			data := map[string]string{
-				"user":     "admin",
-				"password": "redhat",
+			secret := libsecret.New(secretName, libsecret.DataString{"user": "admin", "password": "redhat"})
+			secret, err := kubevirt.Client().CoreV1().Secrets(testsuite.GetTestNamespace(nil)).Create(context.Background(), secret, metav1.CreateOptions{})
+			if !errors.IsAlreadyExists(err) {
+				Expect(err).ToNot(HaveOccurred())
 			}
-			tests.CreateSecret(secretName, testsuite.GetTestNamespace(nil), data)
 		})
 
 		It("Should be the mounted virtiofs layout the same for a pod and vmi", func() {
 			expectedOutput := "adminredhat"
 
 			By("Running VMI")
-			vmi := libvmi.NewFedora(
+			vmi := libvmifact.NewFedora(
 				libvmi.WithSecretFs(secretName, secretName),
 			)
-			vmi = tests.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 300)
+			vmi = libvmops.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 300)
 
 			By("Logging into the VMI")
 			Expect(console.LoginToFedora(vmi)).To(Succeed())
 
 			By("Checking if Secret has been attached to the pod")
-			vmiPod := tests.GetRunningPodByVirtualMachineInstance(vmi, testsuite.GetTestNamespace(vmi))
+			vmiPod, err := libpod.GetPodByVirtualMachineInstance(vmi, vmi.Namespace)
+			Expect(err).ToNot(HaveOccurred())
+
 			podOutput, err := exec.ExecuteCommandOnPod(
-				virtClient,
 				vmiPod,
 				fmt.Sprintf("virtiofs-%s", secretName),
 				[]string{"cat",
@@ -157,7 +157,7 @@ var _ = Describe("[sig-compute] vitiofs config volumes", decorators.SigCompute, 
 			By("Checking mounted Secret")
 			Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 				&expect.BSnd{S: fmt.Sprintf("mount -t virtiofs %s /mnt \n", secretName)},
-				&expect.BExp{R: console.PromptExpression},
+				&expect.BExp{R: ""},
 				&expect.BSnd{S: "echo $?\n"},
 				&expect.BExp{R: console.RetValue("0")},
 				&expect.BSnd{S: "cat /mnt/user /mnt/password\n"},
@@ -174,18 +174,19 @@ var _ = Describe("[sig-compute] vitiofs config volumes", decorators.SigCompute, 
 			serviceAccountVolumeName := "default-disk"
 
 			By("Running VMI")
-			vmi := libvmi.NewFedora(
+			vmi := libvmifact.NewFedora(
 				libvmi.WithServiceAccountFs("default", serviceAccountVolumeName),
 			)
-			vmi = tests.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 300)
+			vmi = libvmops.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 300)
 
 			By("Logging into the VMI")
 			Expect(console.LoginToFedora(vmi)).To(Succeed())
 
 			By("Checking if ServiceAccount has been attached to the pod")
-			vmiPod := tests.GetRunningPodByVirtualMachineInstance(vmi, testsuite.GetTestNamespace(vmi))
+			vmiPod, err := libpod.GetPodByVirtualMachineInstance(vmi, vmi.Namespace)
+			Expect(err).ToNot(HaveOccurred())
+
 			namespace, err := exec.ExecuteCommandOnPod(
-				virtClient,
 				vmiPod,
 				fmt.Sprintf("virtiofs-%s", serviceAccountVolumeName),
 				[]string{"cat",
@@ -196,7 +197,6 @@ var _ = Describe("[sig-compute] vitiofs config volumes", decorators.SigCompute, 
 			Expect(namespace).To(Equal(testsuite.GetTestNamespace(vmi)))
 
 			token, err := exec.ExecuteCommandOnPod(
-				virtClient,
 				vmiPod,
 				fmt.Sprintf("virtiofs-%s", serviceAccountVolumeName),
 				[]string{"tail", "-c", "20",
@@ -209,7 +209,7 @@ var _ = Describe("[sig-compute] vitiofs config volumes", decorators.SigCompute, 
 			Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 				// mount iso ConfigMap image
 				&expect.BSnd{S: fmt.Sprintf("mount -t virtiofs %s /mnt \n", serviceAccountVolumeName)},
-				&expect.BExp{R: console.PromptExpression},
+				&expect.BExp{R: ""},
 				&expect.BSnd{S: "echo $?\n"},
 				&expect.BExp{R: console.RetValue("0")},
 				&expect.BSnd{S: "cat /mnt/namespace\n"},
@@ -232,19 +232,20 @@ var _ = Describe("[sig-compute] vitiofs config volumes", decorators.SigCompute, 
 		It("Should be the namespace and token the same for a pod and vmi with virtiofs", func() {
 
 			By("Running VMI")
-			vmi := libvmi.NewFedora(
+			vmi := libvmifact.NewFedora(
 				libvmi.WithLabel(testLabelKey, testLabelVal),
 				libvmi.WithDownwardAPIFs(downwardAPIName),
 			)
-			vmi = tests.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 300)
+			vmi = libvmops.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 300)
 
 			By("Logging into the VMI")
 			Expect(console.LoginToFedora(vmi)).To(Succeed())
 
 			By("Checking if DownwardAPI has been attached to the pod")
-			vmiPod := tests.GetRunningPodByVirtualMachineInstance(vmi, testsuite.GetTestNamespace(vmi))
+			vmiPod, err := libpod.GetPodByVirtualMachineInstance(vmi, vmi.Namespace)
+			Expect(err).ToNot(HaveOccurred())
+
 			podOutput, err := exec.ExecuteCommandOnPod(
-				virtClient,
 				vmiPod,
 				fmt.Sprintf("virtiofs-%s", downwardAPIName),
 				[]string{"grep", testLabelKey,
@@ -257,7 +258,7 @@ var _ = Describe("[sig-compute] vitiofs config volumes", decorators.SigCompute, 
 			By("Checking mounted DownwardAPI")
 			Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 				&expect.BSnd{S: fmt.Sprintf("mount -t virtiofs %s /mnt \n", downwardAPIName)},
-				&expect.BExp{R: console.PromptExpression},
+				&expect.BExp{R: ""},
 				&expect.BSnd{S: "echo $?\n"},
 				&expect.BExp{R: console.RetValue("0")},
 				&expect.BSnd{S: "grep --color=never " + testLabelKey + " /mnt/labels\n"},

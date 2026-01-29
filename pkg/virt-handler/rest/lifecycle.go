@@ -13,9 +13,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2019 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
+
 package rest
 
 import (
@@ -30,6 +31,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 
+	backupv1 "kubevirt.io/api/backup/v1alpha1"
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
 
@@ -38,20 +40,21 @@ import (
 
 const (
 	failedRetrieveVMI      = "Failed to retrieve VMI"
+	failedFreezeVMI        = "Failed to freeze VMI"
 	failedDetectCmdClient  = "Failed to detect cmd client"
 	failedConnectCmdClient = "Failed to connect cmd client"
 )
 
 type LifecycleHandler struct {
 	recorder     record.EventRecorder
-	vmiInformer  cache.SharedIndexInformer
+	vmiStore     cache.Store
 	virtShareDir string
 }
 
-func NewLifecycleHandler(recorder record.EventRecorder, vmiInformer cache.SharedIndexInformer, virtShareDir string) *LifecycleHandler {
+func NewLifecycleHandler(recorder record.EventRecorder, vmiStore cache.Store, virtShareDir string) *LifecycleHandler {
 	return &LifecycleHandler{
 		recorder:     recorder,
-		vmiInformer:  vmiInformer,
+		vmiStore:     vmiStore,
 		virtShareDir: virtShareDir,
 	}
 }
@@ -61,6 +64,7 @@ func (lh *LifecycleHandler) PauseHandler(request *restful.Request, response *res
 	if err != nil {
 		return
 	}
+	defer client.Close()
 
 	err = client.PauseVirtualMachine(vmi)
 	if err != nil {
@@ -69,6 +73,7 @@ func (lh *LifecycleHandler) PauseHandler(request *restful.Request, response *res
 		return
 	}
 
+	lh.recorder.Eventf(vmi, k8sv1.EventTypeNormal, "Paused", "VirtualMachineInstance paused")
 	response.WriteHeader(http.StatusAccepted)
 }
 
@@ -77,6 +82,7 @@ func (lh *LifecycleHandler) UnpauseHandler(request *restful.Request, response *r
 	if err != nil {
 		return
 	}
+	defer client.Close()
 
 	err = client.UnpauseVirtualMachine(vmi)
 	if err != nil {
@@ -85,6 +91,7 @@ func (lh *LifecycleHandler) UnpauseHandler(request *restful.Request, response *r
 		return
 	}
 
+	lh.recorder.Eventf(vmi, k8sv1.EventTypeNormal, "Unpaused", "VirtualMachineInstance unpaused")
 	response.WriteHeader(http.StatusAccepted)
 }
 
@@ -93,6 +100,7 @@ func (lh *LifecycleHandler) FreezeHandler(request *restful.Request, response *re
 	if err != nil {
 		return
 	}
+	defer client.Close()
 
 	unfreezeTimeout := &v1.FreezeUnfreezeTimeout{}
 	if request.Request.Body == nil {
@@ -121,8 +129,9 @@ func (lh *LifecycleHandler) FreezeHandler(request *restful.Request, response *re
 	unfreezeTimeoutSeconds := int32(unfreezeTimeout.UnfreezeTimeout.Seconds())
 	err = client.FreezeVirtualMachine(vmi, unfreezeTimeoutSeconds)
 	if err != nil {
-		log.Log.Object(vmi).Reason(err).Error("Failed to freeze VMI")
+		log.Log.Object(vmi).Reason(err).Error(failedFreezeVMI)
 		response.WriteError(http.StatusBadRequest, err)
+		lh.recorder.Eventf(vmi, k8sv1.EventTypeWarning, "FreezeError", "%s: %s", failedFreezeVMI, err.Error())
 		return
 	}
 
@@ -134,6 +143,7 @@ func (lh *LifecycleHandler) UnfreezeHandler(request *restful.Request, response *
 	if err != nil {
 		return
 	}
+	defer client.Close()
 
 	err = client.UnfreezeVirtualMachine(vmi)
 	if err != nil {
@@ -145,11 +155,30 @@ func (lh *LifecycleHandler) UnfreezeHandler(request *restful.Request, response *
 	response.WriteHeader(http.StatusAccepted)
 }
 
+func (lh *LifecycleHandler) ResetHandler(request *restful.Request, response *restful.Response) {
+	vmi, client, err := lh.getVMILauncherClient(request, response)
+	if err != nil {
+		return
+	}
+	defer client.Close()
+
+	err = client.ResetVirtualMachine(vmi)
+	if err != nil {
+		log.Log.Object(vmi).Reason(err).Error("Failed to reset VMI")
+		response.WriteError(http.StatusInternalServerError, err)
+		return
+	}
+
+	lh.recorder.Eventf(vmi, k8sv1.EventTypeNormal, "Reset", "VirtualMachineInstance reset")
+	response.WriteHeader(http.StatusAccepted)
+}
+
 func (lh *LifecycleHandler) SoftRebootHandler(request *restful.Request, response *restful.Response) {
 	vmi, client, err := lh.getVMILauncherClient(request, response)
 	if err != nil {
 		return
 	}
+	defer client.Close()
 
 	err = client.SoftRebootVirtualMachine(vmi)
 	if err != nil {
@@ -168,6 +197,7 @@ func (lh *LifecycleHandler) GetGuestInfo(request *restful.Request, response *res
 	if err != nil {
 		return
 	}
+	defer client.Close()
 
 	log.Log.Object(vmi).Infof("Retreiving guestinfo from %s", vmi.Name)
 
@@ -187,6 +217,7 @@ func (lh *LifecycleHandler) GetUsers(request *restful.Request, response *restful
 	if err != nil {
 		return
 	}
+	defer client.Close()
 
 	log.Log.Object(vmi).Infof("Retreiving userlist from %s", vmi.Name)
 
@@ -205,6 +236,7 @@ func (lh *LifecycleHandler) GetFilesystems(request *restful.Request, response *r
 	if err != nil {
 		return
 	}
+	defer client.Close()
 
 	log.Log.Object(vmi).Infof("Retreiving filesystem list from %s", vmi.Name)
 
@@ -219,14 +251,14 @@ func (lh *LifecycleHandler) GetFilesystems(request *restful.Request, response *r
 }
 
 func (lh *LifecycleHandler) getVMILauncherClient(request *restful.Request, response *restful.Response) (*v1.VirtualMachineInstance, cmdclient.LauncherClient, error) {
-	vmi, code, err := getVMI(request, lh.vmiInformer)
+	vmi, code, err := getVMI(request, lh.vmiStore)
 	if err != nil {
 		log.Log.Object(vmi).Reason(err).Error(failedRetrieveVMI)
 		response.WriteError(code, err)
 		return nil, nil, err
 	}
 
-	sockFile, err := cmdclient.FindSocketOnHost(vmi)
+	sockFile, err := cmdclient.FindSocket(vmi)
 	if err != nil {
 		log.Log.Object(vmi).Reason(err).Error(failedDetectCmdClient)
 		response.WriteError(http.StatusInternalServerError, err)
@@ -247,6 +279,7 @@ func (lh *LifecycleHandler) SEVFetchCertChainHandler(request *restful.Request, r
 	if err != nil {
 		return
 	}
+	defer client.Close()
 
 	log.Log.Object(vmi).Infof("Retrieving SEV platform info")
 
@@ -265,6 +298,7 @@ func (lh *LifecycleHandler) SEVQueryLaunchMeasurementHandler(request *restful.Re
 	if err != nil {
 		return
 	}
+	defer client.Close()
 
 	log.Log.Object(vmi).Infof("Retreiving SEV launch measurement")
 
@@ -283,6 +317,7 @@ func (lh *LifecycleHandler) SEVInjectLaunchSecretHandler(request *restful.Reques
 	if err != nil {
 		return
 	}
+	defer client.Close()
 
 	if request.Request.Body == nil {
 		log.Log.Object(vmi).Reason(err).Error("Request with no body: SEV secret parameters are required")
@@ -306,6 +341,40 @@ func (lh *LifecycleHandler) SEVInjectLaunchSecretHandler(request *restful.Reques
 	if err := client.InjectLaunchSecret(vmi, opts); err != nil {
 		log.Log.Object(vmi).Reason(err).Error("Failed to inject SEV launch secret")
 		response.WriteError(http.StatusInternalServerError, err)
+		return
+	}
+
+	response.WriteHeader(http.StatusAccepted)
+}
+
+func (lh *LifecycleHandler) BackupHandler(request *restful.Request, response *restful.Response) {
+	vmi, client, err := lh.getVMILauncherClient(request, response)
+	if err != nil {
+		return
+	}
+
+	if request.Request.Body == nil {
+		log.Log.Object(vmi).Reason(err).Error("Request with no body: Backup parameters are required")
+		response.WriteError(http.StatusBadRequest, fmt.Errorf("failed to retrieve Backup parameters from request"))
+		return
+	}
+
+	opts := &backupv1.BackupOptions{}
+	err = yaml.NewYAMLOrJSONDecoder(request.Request.Body, 1024).Decode(opts)
+	switch err {
+	case io.EOF, nil:
+		break
+	default:
+		log.Log.Object(vmi).Reason(err).Error("Failed to decode Backup parameters")
+		response.WriteError(http.StatusBadRequest, err)
+		return
+	}
+
+	err = client.VirtualMachineBackup(vmi, opts)
+	if err != nil {
+		log.Log.Object(vmi).Reason(err).Error("Failed backing up VM")
+		response.WriteError(http.StatusBadRequest, err)
+		lh.recorder.Eventf(vmi, k8sv1.EventTypeWarning, "BackupError", "%s: %s", "Failed backing up VM", err.Error())
 		return
 	}
 

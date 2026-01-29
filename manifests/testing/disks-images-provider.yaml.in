@@ -24,6 +24,9 @@ spec:
         - name: target
           image: {{.DockerPrefix}}/disks-images-provider:{{.DockerTag}}
           imagePullPolicy: Always
+          env:
+          - name: NUM_TEST_IMAGE_REPLICAS
+            value: {{.TestImageReplicas}}
           lifecycle:
             preStop:
               exec:
@@ -38,6 +41,7 @@ spec:
             mountPropagation: Bidirectional
           securityContext:
             privileged: true
+            readOnlyRootFilesystem: false
           readinessProbe:
             exec:
               command:

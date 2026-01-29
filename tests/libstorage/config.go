@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2019 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -44,6 +44,10 @@ type KubeVirtTestsConfiguration struct {
 	StorageRWOBlock string `json:"storageRWOBlock"`
 	// StorageClass supporting snapshot
 	StorageSnapshot string `json:"storageSnapshot"`
+	// StorageVMState is the storage class for backend PVCs (TPM/EFI)
+	StorageVMState string `json:"storageVMState"`
+	// StorageClass supporting CSI
+	StorageClassCSI string `json:"storageClassCSI"`
 }
 
 const kubevirtIoTest = "kubevirt.io/test"

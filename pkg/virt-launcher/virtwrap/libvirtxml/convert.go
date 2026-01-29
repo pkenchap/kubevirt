@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2023 The KubeVirt Authors
+ * Copyright 2023 The KubeVirt Authors.
  *
  */
 
@@ -213,6 +213,31 @@ func setDomainFeatureState(fs *api.FeatureState) *libvirtxml.DomainFeatureState 
 	}
 }
 
+func ConvertKubeVirtFeatureToDomainFeatureHyperVTLBFlush(tlbFlush *api.TLBFlush) *libvirtxml.DomainFeatureHyperVTLBFlush {
+	if tlbFlush == nil {
+		return nil
+	}
+
+	result := &libvirtxml.DomainFeatureHyperVTLBFlush{
+		DomainFeatureState: libvirtxml.DomainFeatureState{
+			State: tlbFlush.State,
+		},
+	}
+
+	if tlbFlush.Direct != nil {
+		result.Direct = &libvirtxml.DomainFeatureState{
+			State: tlbFlush.Direct.State,
+		}
+	}
+	if tlbFlush.Extended != nil {
+		result.Extended = &libvirtxml.DomainFeatureState{
+			State: tlbFlush.Extended.State,
+		}
+	}
+
+	return result
+}
+
 func ConvertKubeVirtFeatureSpinlocksToDomainFeatureHyperVSpinlocks(s *api.FeatureSpinlocks) *libvirtxml.DomainFeatureHyperVSpinlocks {
 	if s == nil {
 		return nil
@@ -262,7 +287,7 @@ func ConvertKubeVirtFeatureHypervToDomainFeatureHyperV(hv *api.FeatureHyperv) *l
 		VendorId:        ConvertKubeVirtFeatureVendorIDToDomainFeatureHyperVVendorId(hv.VendorID),
 		Frequencies:     setDomainFeatureState(hv.Frequencies),
 		ReEnlightenment: setDomainFeatureState(hv.Reenlightenment),
-		TLBFlush:        setDomainFeatureState(hv.TLBFlush),
+		TLBFlush:        ConvertKubeVirtFeatureToDomainFeatureHyperVTLBFlush(hv.TLBFlush),
 		IPI:             setDomainFeatureState(hv.IPI),
 		EVMCS:           setDomainFeatureState(hv.EVMCS),
 	}
@@ -300,6 +325,7 @@ func ConvertKubeVirtFeaturesToDomainFeatureList(features *api.Features) *libvirt
 	f.PMU = setDomainFeatureState(features.PMU)
 	f.HyperV = ConvertKubeVirtFeatureHypervToDomainFeatureHyperV(features.Hyperv)
 	f.KVM = ConverKubeVirtFeatureKVMToDomainFeatureKVM(features.KVM)
+	f.VMPort = setDomainFeatureState(features.VMPort)
 	return f
 
 }

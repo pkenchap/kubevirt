@@ -9,7 +9,7 @@ import (
 	"kubevirt.io/client-go/api"
 
 	"kubevirt.io/kubevirt/pkg/testutils"
-	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
+	"kubevirt.io/kubevirt/pkg/virt-config/featuregate"
 )
 
 var _ = Describe("virtiofs container", func() {
@@ -29,10 +29,10 @@ var _ = Describe("virtiofs container", func() {
 			DefaultArchitecture: "amd64",
 		},
 	}
-	config, _, kvInformer := testutils.NewFakeClusterConfigUsingKV(kv)
+	config, _, kvStore := testutils.NewFakeClusterConfigUsingKV(kv)
 
 	enableFeatureGate := func(featureGate string) {
-		testutils.UpdateFakeKubeVirtClusterConfig(kvInformer, &v1.KubeVirt{
+		testutils.UpdateFakeKubeVirtClusterConfig(kvStore, &v1.KubeVirt{
 			Spec: v1.KubeVirtSpec{
 				Configuration: v1.KubeVirtConfiguration{
 					DeveloperConfiguration: &v1.DeveloperConfiguration{
@@ -44,18 +44,18 @@ var _ = Describe("virtiofs container", func() {
 	}
 
 	disableFeatureGates := func() {
-		testutils.UpdateFakeKubeVirtClusterConfig(kvInformer, kv)
+		testutils.UpdateFakeKubeVirtClusterConfig(kvStore, kv)
 	}
+
+	BeforeEach(func() {
+		enableFeatureGate(featuregate.VirtIOFSStorageVolumeGate)
+	})
 
 	AfterEach(func() {
 		disableFeatureGates()
 	})
 
-	DescribeTable("virtiofs privileged container", func(shouldEnableFeatureGate bool) {
-		if shouldEnableFeatureGate {
-			enableFeatureGate(virtconfig.VirtIOFSGate)
-		}
-
+	It("should create unprivileged containers only", func() {
 		vmi := api.NewMinimalVMI("testvm")
 
 		vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
@@ -85,23 +85,11 @@ var _ = Describe("virtiofs container", func() {
 		container := generateVirtioFSContainers(vmi, "virtiofs-container", config)
 		Expect(container).To(HaveLen(2))
 
-		if shouldEnableFeatureGate {
-			// PV
-			Expect(container[0].SecurityContext.RunAsNonRoot).To(HaveValue(BeFalse()))
-			Expect(container[0].SecurityContext.AllowPrivilegeEscalation).To(HaveValue(BeTrue()))
-			// Secret
-			Expect(container[1].SecurityContext.RunAsNonRoot).To(HaveValue(BeTrue()))
-			Expect(container[1].SecurityContext.AllowPrivilegeEscalation).To(HaveValue(BeFalse()))
-		} else {
-			// PV
-			Expect(container[0].SecurityContext.RunAsNonRoot).To(HaveValue(BeTrue()))
-			Expect(container[0].SecurityContext.AllowPrivilegeEscalation).To(HaveValue(BeFalse()))
-			// Secret
-			Expect(container[1].SecurityContext.RunAsNonRoot).To(HaveValue(BeTrue()))
-			Expect(container[1].SecurityContext.AllowPrivilegeEscalation).To(HaveValue(BeFalse()))
-		}
-	},
-		Entry("Should create unprivileged containers only", false),
-		Entry("Should create an unprivileged container and a privileged one", true),
-	)
+		// PV
+		Expect(container[0].SecurityContext.RunAsNonRoot).To(HaveValue(BeTrue()))
+		Expect(container[0].SecurityContext.AllowPrivilegeEscalation).To(HaveValue(BeFalse()))
+		// Secret
+		Expect(container[1].SecurityContext.RunAsNonRoot).To(HaveValue(BeTrue()))
+		Expect(container[1].SecurityContext.AllowPrivilegeEscalation).To(HaveValue(BeFalse()))
+	})
 })

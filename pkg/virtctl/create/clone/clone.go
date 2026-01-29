@@ -13,25 +13,26 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2023 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
 package clone
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
 	"github.com/spf13/cobra"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
-	"k8s.io/client-go/tools/clientcmd"
-	clonev1alpha1 "kubevirt.io/api/clone/v1alpha1"
+	clone "kubevirt.io/api/clone/v1beta1"
 	"kubevirt.io/client-go/kubecli"
 	"sigs.k8s.io/yaml"
 
 	"kubevirt.io/kubevirt/pkg/pointer"
+	"kubevirt.io/kubevirt/pkg/virtctl/clientconfig"
 )
 
 const (
@@ -66,45 +67,51 @@ type createClone struct {
 	templateAnnotationFilters []string
 	newMacAddresses           []string
 	newSmbiosSerial           string
-
-	clientConfig clientcmd.ClientConfig
 }
 
-type cloneSpec clonev1alpha1.VirtualMachineCloneSpec
-type optionFn func(*createClone, *cloneSpec) error
+type (
+	cloneSpec clone.VirtualMachineCloneSpec
+	optionFn  func(*createClone, *cloneSpec) error
+)
 
 var optFns = map[string]optionFn{
 	NewMacAddressesFlag: withNewMacAddresses,
 }
 
-func NewCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
-	c := createClone{
-		clientConfig: clientConfig,
-	}
-
+func NewCommand() *cobra.Command {
+	c := createClone{}
 	cmd := &cobra.Command{
 		Use:     Clone,
 		Short:   "Create a clone object manifest",
 		Example: c.usage(),
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			return c.run(cmd)
-		},
+		RunE:    c.run,
 	}
 
 	const emptyValue = ""
 	const supportsMultipleFlags = "Can be provided multiple times."
 
-	cmd.Flags().StringVar(&c.name, NameFlag, emptyValue, "Specify the name of the clone. If not specified, name would be randomized.")
-	cmd.Flags().StringVar(&c.sourceName, SourceNameFlag, emptyValue, "Specify the clone's source name.")
-	cmd.Flags().StringVar(&c.targetName, TargetNameFlag, emptyValue, "Specify the clone's target name.")
-	cmd.Flags().StringVar(&c.sourceType, SourceTypeFlag, emptyValue, "Specify the clone's source type. Default type is VM. Supported types: "+supportedSourceTypes)
-	cmd.Flags().StringVar(&c.targetType, TargetTypeFlag, emptyValue, "Specify the clone's target type. Default type is VM. Supported types: "+supportedTargetTypes)
-	cmd.Flags().StringArrayVar(&c.labelFilters, LabelFilterFlag, nil, "Specify clone's label filters. "+supportsMultipleFlags)
-	cmd.Flags().StringArrayVar(&c.annotationFilters, AnnotationFilterFlag, nil, "Specify clone's annotation filters. "+supportsMultipleFlags)
-	cmd.Flags().StringArrayVar(&c.templateLabelFilters, TemplateLabelFilterFlag, nil, "Specify clone's template label filters. "+supportsMultipleFlags)
-	cmd.Flags().StringArrayVar(&c.templateAnnotationFilters, TemplateAnnotationFilterFlag, nil, "Specify clone's template annotation filters. "+supportsMultipleFlags)
-	cmd.Flags().StringArrayVar(&c.newMacAddresses, NewMacAddressesFlag, nil, "Specify clone's new mac addresses. For example: 'interfaceName0:newAddress0'")
-	cmd.Flags().StringVar(&c.newSmbiosSerial, NewSMBiosSerialFlag, emptyValue, "Specify the clone's new smbios serial")
+	cmd.Flags().StringVar(&c.name, NameFlag, emptyValue,
+		"Specify the name of the clone. If not specified, name would be randomized.")
+	cmd.Flags().StringVar(&c.sourceName, SourceNameFlag, emptyValue,
+		"Specify the clone's source name.")
+	cmd.Flags().StringVar(&c.targetName, TargetNameFlag, emptyValue,
+		"Specify the clone's target name.")
+	cmd.Flags().StringVar(&c.sourceType, SourceTypeFlag, emptyValue,
+		"Specify the clone's source type. Default type is VM. Supported types: "+supportedSourceTypes)
+	cmd.Flags().StringVar(&c.targetType, TargetTypeFlag, emptyValue,
+		"Specify the clone's target type. Default type is VM. Supported types: "+supportedTargetTypes)
+	cmd.Flags().StringArrayVar(&c.labelFilters, LabelFilterFlag, nil,
+		"Specify clone's label filters. "+supportsMultipleFlags)
+	cmd.Flags().StringArrayVar(&c.annotationFilters, AnnotationFilterFlag, nil,
+		"Specify clone's annotation filters. "+supportsMultipleFlags)
+	cmd.Flags().StringArrayVar(&c.templateLabelFilters, TemplateLabelFilterFlag, nil,
+		"Specify clone's template label filters. "+supportsMultipleFlags)
+	cmd.Flags().StringArrayVar(&c.templateAnnotationFilters, TemplateAnnotationFilterFlag, nil,
+		"Specify clone's template annotation filters. "+supportsMultipleFlags)
+	cmd.Flags().StringArrayVar(&c.newMacAddresses, NewMacAddressesFlag, nil,
+		"Specify clone's new mac addresses. For example: 'interfaceName0:newAddress0'")
+	cmd.Flags().StringVar(&c.newSmbiosSerial, NewSMBiosSerialFlag, emptyValue,
+		"Specify the clone's new smbios serial")
 
 	if err := cmd.MarkFlagRequired(SourceNameFlag); err != nil {
 		panic(err)
@@ -114,9 +121,10 @@ func NewCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
 }
 
 func withNewMacAddresses(c *createClone, cloneSpec *cloneSpec) error {
+	const expectedMacParts = 2
 	for _, param := range c.newMacAddresses {
 		splitParam := strings.Split(param, ":")
-		if len(splitParam) != 2 {
+		if len(splitParam) != expectedMacParts {
 			return fmt.Errorf("newMacAddress parameter %s is invalid: exactly one ':' is expected. For example: 'interface0:address0'", param)
 		}
 
@@ -179,10 +187,10 @@ func (c *createClone) usage() string {
   {{ProgramName}} create clone --source-name sourceVM | kubectl create -f -`
 }
 
-func (c *createClone) newClone() (*clonev1alpha1.VirtualMachineClone, error) {
-	clone := kubecli.NewMinimalClone(c.name)
+func (c *createClone) newClone() (*clone.VirtualMachineClone, error) {
+	vmClone := kubecli.NewMinimalClone(c.name)
 	if c.namespace != "" {
-		clone.Namespace = c.namespace
+		vmClone.Namespace = c.namespace
 	}
 
 	source, err := c.typeToTypedLocalObjectReference(c.sourceType, c.sourceName, true)
@@ -195,25 +203,25 @@ func (c *createClone) newClone() (*clonev1alpha1.VirtualMachineClone, error) {
 		return nil, err
 	}
 
-	clone.Spec = clonev1alpha1.VirtualMachineCloneSpec{
+	vmClone.Spec = clone.VirtualMachineCloneSpec{
 		Source:            source,
 		Target:            target,
 		AnnotationFilters: c.annotationFilters,
 		LabelFilters:      c.labelFilters,
-		Template: clonev1alpha1.VirtualMachineCloneTemplateFilters{
+		Template: clone.VirtualMachineCloneTemplateFilters{
 			AnnotationFilters: c.templateAnnotationFilters,
 			LabelFilters:      c.templateLabelFilters,
 		},
 	}
 
 	if c.newSmbiosSerial != "" {
-		clone.Spec.NewSMBiosSerial = pointer.P(c.newSmbiosSerial)
+		vmClone.Spec.NewSMBiosSerial = pointer.P(c.newSmbiosSerial)
 	}
 
-	return clone, nil
+	return vmClone, nil
 }
 
-func (c *createClone) applyFlags(cmd *cobra.Command, spec *clonev1alpha1.VirtualMachineCloneSpec) error {
+func (c *createClone) applyFlags(cmd *cobra.Command, spec *clone.VirtualMachineCloneSpec) error {
 	for flag := range optFns {
 		if cmd.Flags().Changed(flag) {
 			if err := optFns[flag](c, (*cloneSpec)(spec)); err != nil {
@@ -225,8 +233,9 @@ func (c *createClone) applyFlags(cmd *cobra.Command, spec *clonev1alpha1.Virtual
 	return nil
 }
 
-func (c *createClone) run(cmd *cobra.Command) error {
-	if err := c.setDefaults(); err != nil {
+func (c *createClone) run(cmd *cobra.Command, _ []string) error {
+	const cloneRandomSuffixLength = 5
+	if err := c.setDefaults(cmd.Context()); err != nil {
 		return err
 	}
 
@@ -235,21 +244,21 @@ func (c *createClone) run(cmd *cobra.Command) error {
 		return err
 	}
 
-	clone, err := c.newClone()
+	vmClone, err := c.newClone()
 	if err != nil {
 		return err
 	}
 
-	err = c.applyFlags(cmd, &clone.Spec)
+	err = c.applyFlags(cmd, &vmClone.Spec)
 	if err != nil {
 		return err
 	}
 
-	if clone.Name == "" {
-		clone.Name = "clone-" + rand.String(5)
+	if vmClone.Name == "" {
+		vmClone.Name = "clone-" + rand.String(cloneRandomSuffixLength)
 	}
 
-	cloneBytes, err := yaml.Marshal(clone)
+	cloneBytes, err := yaml.Marshal(vmClone)
 	if err != nil {
 		return err
 	}
@@ -258,7 +267,13 @@ func (c *createClone) run(cmd *cobra.Command) error {
 	return nil
 }
 
-func (c *createClone) typeToTypedLocalObjectReference(sourceOrTargetType, sourceOrTargetName string, isSource bool) (*v1.TypedLocalObjectReference, error) {
+func (c *createClone) typeToTypedLocalObjectReference(sourceOrTargetType, sourceOrTargetName string,
+	isSource bool,
+) (*v1.TypedLocalObjectReference, error) {
+	const (
+		virtualMachineKind         = "VirtualMachine"
+		virtualMachineSnapshotKind = "VirtualMachineSnapshot"
+	)
 	var kind, apiGroup string
 
 	generateErr := func() error {
@@ -277,15 +292,15 @@ func (c *createClone) typeToTypedLocalObjectReference(sourceOrTargetType, source
 	}
 
 	switch sourceOrTargetType {
-	case "vm", "VM", "VirtualMachine", "virtualmachine":
-		kind = "VirtualMachine"
+	case "vm", "VM", virtualMachineKind, "virtualmachine":
+		kind = virtualMachineKind
 		apiGroup = "kubevirt.io"
-	case "snapshot", "VirtualMachineSnapshot", "vmsnapshot", "VMSnapshot":
+	case "snapshot", virtualMachineSnapshotKind, "vmsnapshot", "VMSnapshot":
 		if !isSource {
 			return nil, generateErr()
 		}
 
-		kind = "VirtualMachineSnapshot"
+		kind = virtualMachineSnapshotKind
 		apiGroup = "snapshot.kubevirt.io"
 	default:
 		return nil, generateErr()
@@ -298,8 +313,9 @@ func (c *createClone) typeToTypedLocalObjectReference(sourceOrTargetType, source
 	}, nil
 }
 
-func (c *createClone) setDefaults() error {
-	namespace, overridden, err := c.clientConfig.Namespace()
+func (c *createClone) setDefaults(ctx context.Context) error {
+	_, namespace, overridden, err := clientconfig.ClientAndNamespaceFromContext(ctx)
+	const cloneRandomSuffixLength = 5
 	if err != nil {
 		return err
 	}
@@ -308,7 +324,7 @@ func (c *createClone) setDefaults() error {
 	}
 
 	if c.name == "" {
-		c.name = "clone-" + rand.String(5)
+		c.name = "clone-" + rand.String(cloneRandomSuffixLength)
 	}
 
 	const defaultType = "vm"

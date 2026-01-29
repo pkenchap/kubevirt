@@ -2,6 +2,7 @@ package services
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 
 	k8sv1 "k8s.io/api/core/v1"
@@ -11,13 +12,20 @@ import (
 )
 
 type NodeSelectorRenderer struct {
-	cpuFeatureLabels []string
-	cpuModelLabel    string
-	hasDedicatedCPU  bool
-	hyperv           bool
-	podNodeSelectors map[string]string
-	tscFrequency     *int64
-	vmiFeatures      *v1.Features
+	cpuFeatureLabels       []string
+	cpuModelLabel          string
+	machineTypeLabel       string
+	hasDedicatedCPU        bool
+	hyperv                 bool
+	podNodeSelectors       map[string]string
+	tscFrequency           *int64
+	vmiFeatures            *v1.Features
+	realtimeEnabled        bool
+	sevEnabled             bool
+	sevESEnabled           bool
+	SecureExecutionEnabled bool
+	sevSNPEnabled          bool
+	tdxEnabled             bool
 }
 
 type NodeSelectorRendererOption func(renderer *NodeSelectorRenderer)
@@ -33,8 +41,8 @@ func NewNodeSelectorRenderer(
 		podNodeSelectors[k8sv1.LabelArchStable] = strings.ToLower(architecture)
 	}
 
-	copySelectors(clusterWideConfNodeSelectors, podNodeSelectors)
-	copySelectors(vmiNodeSelectors, podNodeSelectors)
+	maps.Copy(podNodeSelectors, clusterWideConfNodeSelectors)
+	maps.Copy(podNodeSelectors, vmiNodeSelectors)
 
 	nodeSelectorRenderer := &NodeSelectorRenderer{podNodeSelectors: podNodeSelectors}
 	for _, opt := range opts {
@@ -48,17 +56,40 @@ func (nsr *NodeSelectorRenderer) Render() map[string]string {
 		nsr.enableSelectorLabel(v1.CPUManager)
 	}
 	if nsr.hyperv {
-		copySelectors(hypervNodeSelectors(nsr.vmiFeatures), nsr.podNodeSelectors)
+		maps.Copy(nsr.podNodeSelectors, hypervNodeSelectors(nsr.vmiFeatures))
 	}
 	if nsr.cpuModelLabel != "" && nsr.cpuModelLabel != cpuModelLabel(v1.CPUModeHostModel) && nsr.cpuModelLabel != cpuModelLabel(v1.CPUModeHostPassthrough) {
 		nsr.enableSelectorLabel(nsr.cpuModelLabel)
 	}
+
+	if nsr.machineTypeLabel != "" {
+		nsr.enableSelectorLabel(nsr.machineTypeLabel)
+	}
+
 	for _, cpuFeatureLabel := range nsr.cpuFeatureLabels {
 		nsr.enableSelectorLabel(cpuFeatureLabel)
 	}
 
 	if nsr.isManualTSCFrequencyRequired() {
 		nsr.enableSelectorLabel(topology.ToTSCSchedulableLabel(*nsr.tscFrequency))
+	}
+	if nsr.realtimeEnabled {
+		nsr.enableSelectorLabel(v1.RealtimeLabel)
+	}
+	if nsr.sevEnabled {
+		nsr.enableSelectorLabel(v1.SEVLabel)
+	}
+	if nsr.sevESEnabled {
+		nsr.enableSelectorLabel(v1.SEVESLabel)
+	}
+	if nsr.sevSNPEnabled {
+		nsr.enableSelectorLabel(v1.SEVSNPLabel)
+	}
+	if nsr.SecureExecutionEnabled {
+		nsr.enableSelectorLabel(v1.SecureExecutionLabel)
+	}
+	if nsr.tdxEnabled {
+		nsr.enableSelectorLabel(v1.TDXLabel)
 	}
 
 	return nsr.podNodeSelectors
@@ -72,15 +103,43 @@ func (nsr *NodeSelectorRenderer) isManualTSCFrequencyRequired() bool {
 	return nsr.tscFrequency != nil
 }
 
-func WithDedicatedCPU() NodeSelectorRendererOption {
+func WithRealtime() NodeSelectorRendererOption {
 	return func(renderer *NodeSelectorRenderer) {
-		renderer.hasDedicatedCPU = true
+		renderer.realtimeEnabled = true
+	}
+}
+func WithSEVSelector() NodeSelectorRendererOption {
+	return func(renderer *NodeSelectorRenderer) {
+		renderer.sevEnabled = true
+	}
+}
+func WithSEVESSelector() NodeSelectorRendererOption {
+	return func(renderer *NodeSelectorRenderer) {
+		renderer.sevESEnabled = true
 	}
 }
 
-func copySelectors(src map[string]string, dst map[string]string) {
-	for k, v := range src {
-		dst[k] = v
+func WithSEVSNPSelector() NodeSelectorRendererOption {
+	return func(renderer *NodeSelectorRenderer) {
+		renderer.sevSNPEnabled = true
+	}
+}
+
+func WithSecureExecutionSelector() NodeSelectorRendererOption {
+	return func(renderer *NodeSelectorRenderer) {
+		renderer.SecureExecutionEnabled = true
+	}
+}
+
+func WithTDXSelector() NodeSelectorRendererOption {
+	return func(renderer *NodeSelectorRenderer) {
+		renderer.tdxEnabled = true
+	}
+}
+
+func WithDedicatedCPU() NodeSelectorRendererOption {
+	return func(renderer *NodeSelectorRenderer) {
+		renderer.hasDedicatedCPU = true
 	}
 }
 
@@ -95,6 +154,13 @@ func WithModelAndFeatureLabels(modelLabel string, cpuFeatureLabels ...string) No
 	return func(renderer *NodeSelectorRenderer) {
 		renderer.cpuFeatureLabels = cpuFeatureLabels
 		renderer.cpuModelLabel = modelLabel
+	}
+}
+
+func WithMachineType(machineType string) NodeSelectorRendererOption {
+	return func(renderer *NodeSelectorRenderer) {
+		machineTypeLabelKey := v1.SupportedMachineTypeLabel + machineType
+		renderer.machineTypeLabel = machineTypeLabelKey
 	}
 }
 
@@ -114,7 +180,7 @@ func CPUModelLabelFromCPUModel(vmi *v1.VirtualMachineInstance) (label string, er
 }
 
 func cpuModelLabel(cpuModel string) string {
-	return NFD_CPU_MODEL_PREFIX + cpuModel
+	return v1.CPUModelLabel + cpuModel
 }
 
 func CPUFeatureLabelsFromCPUFeatures(vmi *v1.VirtualMachineInstance) []string {
@@ -122,7 +188,7 @@ func CPUFeatureLabelsFromCPUFeatures(vmi *v1.VirtualMachineInstance) []string {
 	if vmi.Spec.Domain.CPU != nil && vmi.Spec.Domain.CPU.Features != nil {
 		for _, feature := range vmi.Spec.Domain.CPU.Features {
 			if feature.Policy == "" || feature.Policy == "require" {
-				labels = append(labels, NFD_CPU_FEATURE_PREFIX+feature.Name)
+				labels = append(labels, v1.CPUFeatureLabel+feature.Name)
 			}
 		}
 	}
@@ -137,7 +203,7 @@ func hypervNodeSelectors(vmiFeatures *v1.Features) map[string]string {
 
 	for _, hv := range makeHVFeatureLabelTable(vmiFeatures) {
 		if isFeatureStateEnabled(hv.Feature) {
-			nodeSelectors[NFD_KVM_INFO_PREFIX+hv.Label] = "true"
+			nodeSelectors[v1.HypervLabel+hv.Label] = "true"
 		}
 	}
 
@@ -176,6 +242,13 @@ func makeHVFeatureLabelTable(vmiFeatures *v1.Features) []hvFeatureLabel {
 		syNICTimer.Enabled = hyperv.SyNICTimer.Enabled
 	}
 
+	var tlbFlushFeatureState *v1.FeatureState
+	if hyperv.TLBFlush != nil {
+		tlbFlushFeatureState = &v1.FeatureState{
+			Enabled: hyperv.TLBFlush.Enabled,
+		}
+	}
+
 	return []hvFeatureLabel{
 		{
 			Feature: hyperv.VPIndex,
@@ -208,7 +281,7 @@ func makeHVFeatureLabelTable(vmiFeatures *v1.Features) []hvFeatureLabel {
 			Label:   "reenlightenment",
 		},
 		{
-			Feature: hyperv.TLBFlush,
+			Feature: tlbFlushFeatureState,
 			Label:   "tlbflush",
 		},
 		{

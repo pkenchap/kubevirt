@@ -1,3 +1,22 @@
+/*
+ * This file is part of the KubeVirt project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * Copyright The KubeVirt Authors.
+ *
+ */
+
 package rest
 
 import (
@@ -8,12 +27,10 @@ import (
 	"github.com/emicklei/go-restful/v3"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/validation/field"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
 
-	"kubevirt.io/kubevirt/pkg/instancetype"
 	"kubevirt.io/kubevirt/pkg/virt-api/definitions"
 )
 
@@ -63,7 +80,7 @@ func (app *SubresourceAPIApp) ExpandSpecRequestHandler(request *restful.Request,
 	}
 	vm.Namespace = request.PathParameter("namespace")
 
-	expandSpecResponse(vm, app.instancetypeMethods, func(err error) *errors.StatusError {
+	app.expandSpecResponse(vm, func(err error) *errors.StatusError {
 		return errors.NewBadRequest(err.Error())
 	}, response)
 }
@@ -78,41 +95,17 @@ func (app *SubresourceAPIApp) ExpandSpecVMRequestHandler(request *restful.Reques
 		return
 	}
 
-	expandSpecResponse(vm, app.instancetypeMethods, errors.NewInternalError, response)
+	app.expandSpecResponse(vm, errors.NewInternalError, response)
 }
 
-func expandSpecResponse(vm *v1.VirtualMachine, instancetypeMethods instancetype.Methods, errorFunc func(error) *errors.StatusError, response *restful.Response) {
-	instancetypeSpec, err := instancetypeMethods.FindInstancetypeSpec(vm)
+func (app *SubresourceAPIApp) expandSpecResponse(vm *v1.VirtualMachine, errorFunc func(error) *errors.StatusError, response *restful.Response) {
+	expandedVM, err := app.instancetypeExpander.Expand(vm)
 	if err != nil {
 		writeError(errorFunc(err), response)
 		return
-	}
-	preferenceSpec, err := instancetypeMethods.FindPreferenceSpec(vm)
-	if err != nil {
-		writeError(errorFunc(err), response)
-		return
-	}
 
-	if instancetypeSpec == nil && preferenceSpec == nil {
-		err := response.WriteEntity(vm)
-		if err != nil {
-			log.Log.Reason(err).Error("Failed to write http response.")
-		}
-		return
 	}
-
-	conflicts := instancetypeMethods.ApplyToVmi(field.NewPath("spec", "template", "spec"), instancetypeSpec, preferenceSpec, &vm.Spec.Template.Spec, &vm.Spec.Template.ObjectMeta)
-	if len(conflicts) > 0 {
-		writeError(errorFunc(fmt.Errorf("cannot expand instancetype to VM")), response)
-		return
-	}
-
-	// Remove InstancetypeMatcher and PreferenceMatcher, so the returned VM object can be used and not cause a conflict
-	vm.Spec.Instancetype = nil
-	vm.Spec.Preference = nil
-
-	err = response.WriteEntity(vm)
-	if err != nil {
+	if err = response.WriteEntity(expandedVM); err != nil {
 		log.Log.Reason(err).Error("Failed to write http response.")
 	}
 }

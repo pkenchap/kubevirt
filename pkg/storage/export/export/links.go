@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2022 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -32,7 +32,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 
-	exportv1 "kubevirt.io/api/export/v1alpha1"
+	exportv1 "kubevirt.io/api/export/v1beta1"
 
 	"kubevirt.io/kubevirt/pkg/certificates/triple/cert"
 	"kubevirt.io/kubevirt/pkg/controller"
@@ -46,7 +46,7 @@ const (
 	subjectAltNameId     = "2.5.29.17"
 
 	apiGroup              = "export.kubevirt.io"
-	apiVersion            = "v1alpha1"
+	apiVersion            = "v1beta1"
 	exportResourceName    = "virtualmachineexports"
 	gv                    = apiGroup + "/" + apiVersion
 	externalUrlLinkFormat = "/api/" + gv + "/namespaces/%s/" + exportResourceName + "/%s"
@@ -54,75 +54,51 @@ const (
 	external              = "external"
 )
 
-func (ctrl *VMExportController) getInteralLinks(pvcs []*corev1.PersistentVolumeClaim, exporterPod *corev1.Pod, service *corev1.Service, getVolumeName getExportVolumeName, export *exportv1.VirtualMachineExport) (*exportv1.VirtualMachineExportLink, error) {
+func (ctrl *VMExportController) getInteralLinks(exporterPod *corev1.Pod, service *corev1.Service, export *exportv1.VirtualMachineExport, source exportSource) (*exportv1.VirtualMachineExportLink, error) {
 	internalCert, err := ctrl.internalExportCa()
 	if err != nil {
 		return nil, err
 	}
 	host := fmt.Sprintf("%s.%s.svc", service.Name, service.Namespace)
-	return ctrl.getLinks(pvcs, exporterPod, export, host, internal, internalCert, getVolumeName)
+	return ctrl.getLinks(exporterPod, export, host, internal, internalCert, source)
 }
 
-func (ctrl *VMExportController) getExternalLinks(pvcs []*corev1.PersistentVolumeClaim, exporterPod *corev1.Pod, getVolumeName getExportVolumeName, export *exportv1.VirtualMachineExport) (*exportv1.VirtualMachineExportLink, error) {
+func (ctrl *VMExportController) getExternalLinks(exporterPod *corev1.Pod, export *exportv1.VirtualMachineExport, source exportSource) (*exportv1.VirtualMachineExportLink, error) {
 	urlPath := fmt.Sprintf(externalUrlLinkFormat, export.Namespace, export.Name)
 	externalLinkHost, cert := ctrl.getExternalLinkHostAndCert()
 	if externalLinkHost != "" {
 		hostAndBase := path.Join(externalLinkHost, urlPath)
-		return ctrl.getLinks(pvcs, exporterPod, export, hostAndBase, external, cert, getVolumeName)
+		return ctrl.getLinks(exporterPod, export, hostAndBase, external, cert, source)
 	}
 	return nil, nil
 }
 
-func (ctrl *VMExportController) getLinks(pvcs []*corev1.PersistentVolumeClaim, exporterPod *corev1.Pod, export *exportv1.VirtualMachineExport, hostAndBase, linkType, cert string, getVolumeName getExportVolumeName) (*exportv1.VirtualMachineExportLink, error) {
+func (ctrl *VMExportController) getLinks(exporterPod *corev1.Pod, export *exportv1.VirtualMachineExport, hostAndBase, linkType, cert string, source exportSource) (*exportv1.VirtualMachineExportLink, error) {
 	const scheme = "https://"
-	exportLink := &exportv1.VirtualMachineExportLink{
-		Volumes: []exportv1.VirtualMachineExportVolume{},
-		Cert:    cert,
-		Manifests: []exportv1.VirtualMachineExportManifest{
-			{
-				Type: exportv1.AllManifests,
-				Url:  scheme + path.Join(hostAndBase, linkType, manifestsPath),
-			},
-			{
-				Type: exportv1.AuthHeader,
-				Url:  scheme + path.Join(hostAndBase, linkType, secretManifestPath),
-			},
-		},
+	if exporterPod == nil {
+		return nil, nil
 	}
-	for _, pvc := range pvcs {
-		if pvc != nil && exporterPod != nil && exporterPod.Status.Phase == corev1.PodRunning {
 
-			if ctrl.isKubevirtContentType(pvc) {
-				exportLink.Volumes = append(exportLink.Volumes, exportv1.VirtualMachineExportVolume{
-					Name: getVolumeName(pvc, export),
-					Formats: []exportv1.VirtualMachineExportVolumeFormat{
-						{
-							Format: exportv1.KubeVirtRaw,
-							Url:    scheme + path.Join(hostAndBase, rawURI(pvc)),
-						},
-						{
-							Format: exportv1.KubeVirtGz,
-							Url:    scheme + path.Join(hostAndBase, rawGzipURI(pvc)),
-						},
-					},
-				})
-			} else {
-				exportLink.Volumes = append(exportLink.Volumes, exportv1.VirtualMachineExportVolume{
-					Name: getVolumeName(pvc, export),
-					Formats: []exportv1.VirtualMachineExportVolumeFormat{
-						{
-							Format: exportv1.Dir,
-							Url:    scheme + path.Join(hostAndBase, dirURI(pvc)),
-						},
-						{
-							Format: exportv1.ArchiveGz,
-							Url:    scheme + path.Join(hostAndBase, archiveURI(pvc)),
-						},
-					},
-				})
-			}
-		}
+	paths := CreateServerPaths(ContainerEnvToMap(exporterPod.Spec.Containers[0].Env))
+	exportLink := &exportv1.VirtualMachineExportLink{
+		Cert: cert,
 	}
+
+	if paths.VMURI != "" {
+		exportLink.Manifests = append(exportLink.Manifests, exportv1.VirtualMachineExportManifest{
+			Type: exportv1.AllManifests,
+			Url:  scheme + path.Join(hostAndBase, linkType, paths.VMURI),
+		})
+	}
+	if paths.SecretURI != "" {
+		exportLink.Manifests = append(exportLink.Manifests, exportv1.VirtualMachineExportManifest{
+			Type: exportv1.AuthHeader,
+			Url:  scheme + path.Join(hostAndBase, linkType, paths.SecretURI),
+		})
+	}
+
+	source.ConfigureExportLink(exportLink, paths, export, exporterPod, hostAndBase, scheme)
+
 	return exportLink, nil
 }
 

@@ -1,3 +1,22 @@
+/*
+ * This file is part of the KubeVirt project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * Copyright The KubeVirt Authors.
+ *
+ */
+
 package device_manager
 
 import (
@@ -40,7 +59,7 @@ var _ = Describe("USB Device", func() {
 	}
 
 	findAll := func() *LocalDevices {
-		usbDevices := make(map[int][]*USBDevice, 0)
+		usbDevices := make(map[int][]*USBDevice)
 		for _, device := range usbs {
 			usbDevices[device.Vendor] = append(usbDevices[device.Vendor], device)
 		}
@@ -79,7 +98,7 @@ var _ = Describe("USB Device", func() {
 				},
 			},
 			map[string][]*PluginDevices{
-				resourceName1: []*PluginDevices{
+				resourceName1: {
 					newPluginDevices(resourceName1, 0, []*USBDevice{usbs[0]}),
 				},
 			},
@@ -97,7 +116,7 @@ var _ = Describe("USB Device", func() {
 				},
 			},
 			map[string][]*PluginDevices{
-				resourceName1: []*PluginDevices{
+				resourceName1: {
 					newPluginDevices(resourceName1, 0, []*USBDevice{usbs[1]}),
 					newPluginDevices(resourceName1, 1, []*USBDevice{usbs[2]}),
 				},
@@ -120,7 +139,7 @@ var _ = Describe("USB Device", func() {
 				},
 			},
 			map[string][]*PluginDevices{
-				resourceName1: []*PluginDevices{
+				resourceName1: {
 					newPluginDevices(resourceName1, 0, []*USBDevice{usbs[0], usbs[1]}),
 				},
 			},
@@ -147,10 +166,10 @@ var _ = Describe("USB Device", func() {
 				},
 			},
 			map[string][]*PluginDevices{
-				resourceName1: []*PluginDevices{
+				resourceName1: {
 					newPluginDevices(resourceName1, 0, []*USBDevice{usbs[0]}),
 				},
-				resourceName2: []*PluginDevices{
+				resourceName2: {
 					newPluginDevices(resourceName2, 1, []*USBDevice{usbs[1]}),
 					newPluginDevices(resourceName2, 2, []*USBDevice{usbs[2]}),
 				},
@@ -179,7 +198,7 @@ var _ = Describe("USB Device", func() {
 				},
 			},
 			map[string][]*PluginDevices{
-				resourceName1: []*PluginDevices{
+				resourceName1: {
 					newPluginDevices(resourceName1, 0, []*USBDevice{usbs[0]}),
 				},
 			},
@@ -210,7 +229,7 @@ var _ = Describe("USB Device", func() {
 				},
 			},
 			map[string][]*PluginDevices{
-				resourceName1: []*PluginDevices{
+				resourceName1: {
 					newPluginDevices(resourceName1, 0, []*USBDevice{usbs[0]}),
 				},
 			},

@@ -6,7 +6,6 @@ go_library(
     importpath = "kubevirt.io/kubevirt/pkg/util/openapi",
     visibility = ["//visibility:public"],
     deps = [
-        "//staging/src/github.com/golang/glog:go_default_library",
         "//staging/src/kubevirt.io/client-go/api:go_default_library",
         "//vendor/github.com/emicklei/go-restful/v3:go_default_library",
         "//vendor/github.com/go-openapi/spec:go_default_library",
@@ -16,6 +15,7 @@ go_library(
         "//vendor/k8s.io/kube-openapi/pkg/builder:go_default_library",
         "//vendor/k8s.io/kube-openapi/pkg/common:go_default_library",
         "//vendor/k8s.io/kube-openapi/pkg/common/restfuladapter:go_default_library",
+        "//vendor/k8s.io/kube-openapi/pkg/spec3:go_default_library",
         "//vendor/k8s.io/kube-openapi/pkg/validation/errors:go_default_library",
         "//vendor/k8s.io/kube-openapi/pkg/validation/spec:go_default_library",
     ],
@@ -27,6 +27,7 @@ go_test(
         "openapi_suite_test.go",
         "openapi_test.go",
     ],
+    race = "on",
     deps = [
         ":go_default_library",
         "//pkg/virt-api/definitions:go_default_library",

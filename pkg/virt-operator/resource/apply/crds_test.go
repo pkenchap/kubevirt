@@ -3,9 +3,9 @@ package apply
 import (
 	"encoding/json"
 
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
 
 	jsonpatch "github.com/evanphx/json-patch"
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -44,7 +44,7 @@ var _ = Describe("Apply CRDs", func() {
 		})
 
 		stores = util.Stores{}
-		stores.CrdCache = cache.NewStore(cache.DeletionHandlingMetaNamespaceKeyFunc)
+		stores.OperatorCrdCache = cache.NewStore(cache.DeletionHandlingMetaNamespaceKeyFunc)
 		stores.InstallStrategyConfigMapCache = cache.NewStore(cache.MetaNamespaceKeyFunc)
 
 		expectations = &util.Expectations{}
@@ -83,7 +83,7 @@ var _ = Describe("Apply CRDs", func() {
 		crdWithoutSubresource := crd.DeepCopy()
 		crdWithoutSubresource.Spec.Versions[0].Subresources = nil
 
-		stores.CrdCache.Add(crdWithoutSubresource)
+		stores.OperatorCrdCache.Add(crdWithoutSubresource)
 		extClient.Fake.PrependReactor("patch", "customresourcedefinitions", func(action testing.Action) (handled bool, ret runtime.Object, err error) {
 			a := action.(testing.PatchActionImpl)
 			patch, err := jsonpatch.DecodePatch(a.Patch)
@@ -138,7 +138,7 @@ var _ = Describe("Apply CRDs", func() {
 		crdWithoutSubresource := crd.DeepCopy()
 		crdWithoutSubresource.Spec.Versions[0].Subresources = nil
 
-		stores.CrdCache.Add(crdWithoutSubresource)
+		stores.OperatorCrdCache.Add(crdWithoutSubresource)
 		extClient.Fake.PrependReactor("patch", "customresourcedefinitions", func(action testing.Action) (handled bool, ret runtime.Object, err error) {
 			a := action.(testing.PatchActionImpl)
 			patch, err := jsonpatch.DecodePatch(a.Patch)

@@ -13,13 +13,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2021 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
 package network_test
 
 import (
+	"fmt"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -27,14 +29,16 @@ import (
 
 	dutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
 	"kubevirt.io/kubevirt/pkg/network/cache"
+	netsriov "kubevirt.io/kubevirt/pkg/network/deviceinfo"
 	netsetup "kubevirt.io/kubevirt/pkg/network/setup"
-	netsriov "kubevirt.io/kubevirt/pkg/network/sriov"
 	netvmispec "kubevirt.io/kubevirt/pkg/network/vmispec"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 )
 
 var _ = Describe("netstat", func() {
 	var setup testSetup
+
+	const linkStateUp = "up"
 
 	BeforeEach(func() {
 		setup = newTestSetup()
@@ -110,8 +114,22 @@ var _ = Describe("netstat", func() {
 			Expect(setup.NetStat.UpdateStatus(setup.Vmi, setup.Domain)).To(Succeed())
 
 			Expect(setup.Vmi.Status.Interfaces).To(Equal([]v1.VirtualMachineInstanceNetworkInterface{
-				newVMIStatusIface(primaryNetworkName, []string{primaryPodIPv4, primaryPodIPv6}, "", "", netvmispec.InfoSourceDomain, netsetup.DefaultInterfaceQueueCount),
-				newVMIStatusIface(secondaryNetworkName, []string{secondaryPodIPv4, secondaryPodIPv6}, "", "", netvmispec.InfoSourceDomain, netsetup.DefaultInterfaceQueueCount),
+				{
+					Name:       primaryNetworkName,
+					IP:         primaryPodIPv4,
+					IPs:        []string{primaryPodIPv4, primaryPodIPv6},
+					InfoSource: netvmispec.InfoSourceDomain,
+					QueueCount: netsetup.DefaultInterfaceQueueCount,
+					LinkState:  linkStateUp,
+				},
+				{
+					Name:       secondaryNetworkName,
+					IP:         secondaryPodIPv4,
+					IPs:        []string{secondaryPodIPv4, secondaryPodIPv6},
+					InfoSource: netvmispec.InfoSourceDomain,
+					QueueCount: netsetup.DefaultInterfaceQueueCount,
+					LinkState:  linkStateUp,
+				},
 			}), "the pod IP/s should be reported in the status")
 
 			Expect(setup.NetStat.PodInterfaceVolatileDataIsCached(setup.Vmi, primaryNetworkName)).To(BeTrue())
@@ -135,7 +153,14 @@ var _ = Describe("netstat", func() {
 			Expect(setup.NetStat.UpdateStatus(setup.Vmi, setup.Domain)).To(Succeed())
 
 			Expect(setup.Vmi.Status.Interfaces).To(Equal([]v1.VirtualMachineInstanceNetworkInterface{
-				newVMIStatusIface(primaryNetworkName, []string{primaryPodIPv4, primaryPodIPv6}, "", "", netvmispec.InfoSourceDomain, int32(queueCount)),
+				{
+					Name:       primaryNetworkName,
+					IP:         primaryPodIPv4,
+					IPs:        []string{primaryPodIPv4, primaryPodIPv6},
+					InfoSource: netvmispec.InfoSourceDomain,
+					QueueCount: int32(queueCount),
+					LinkState:  linkStateUp,
+				},
 			}), "queue count and the pod IP/s should be reported in the status")
 
 			Expect(setup.NetStat.PodInterfaceVolatileDataIsCached(setup.Vmi, primaryNetworkName)).To(BeTrue())
@@ -169,8 +194,24 @@ var _ = Describe("netstat", func() {
 			Expect(setup.NetStat.UpdateStatus(setup.Vmi, setup.Domain)).To(Succeed())
 
 			Expect(setup.Vmi.Status.Interfaces).To(Equal([]v1.VirtualMachineInstanceNetworkInterface{
-				newVMIStatusIface(primaryNetworkName, []string{primaryPodIPv4, primaryPodIPv6}, primaryMAC, primaryIfaceName, netvmispec.InfoSourceDomainAndGA, netsetup.DefaultInterfaceQueueCount),
-				newVMIStatusIface(secondaryNetworkName, nil, secondaryMAC, secondaryIfaceName, netvmispec.InfoSourceDomainAndGA, netsetup.DefaultInterfaceQueueCount),
+				{
+					Name:          primaryNetworkName,
+					InterfaceName: primaryIfaceName,
+					IP:            primaryPodIPv4,
+					IPs:           []string{primaryPodIPv4, primaryPodIPv6},
+					MAC:           primaryMAC,
+					InfoSource:    netvmispec.InfoSourceDomainAndGA,
+					QueueCount:    netsetup.DefaultInterfaceQueueCount,
+					LinkState:     linkStateUp,
+				},
+				{
+					Name:          secondaryNetworkName,
+					InterfaceName: secondaryIfaceName,
+					MAC:           secondaryMAC,
+					InfoSource:    netvmispec.InfoSourceDomainAndGA,
+					QueueCount:    netsetup.DefaultInterfaceQueueCount,
+					LinkState:     linkStateUp,
+				},
 			}), "the pod & guest-agent IP/s should be reported in the status")
 
 			Expect(setup.NetStat.PodInterfaceVolatileDataIsCached(setup.Vmi, primaryNetworkName)).To(BeTrue())
@@ -193,7 +234,16 @@ var _ = Describe("netstat", func() {
 			Expect(setup.NetStat.UpdateStatus(setup.Vmi, setup.Domain)).To(Succeed())
 
 			Expect(setup.Vmi.Status.Interfaces).To(Equal([]v1.VirtualMachineInstanceNetworkInterface{
-				newVMIStatusIface(primaryNetworkName, []string{primaryGaIPv4, primaryGaIPv6}, primaryMAC, primaryIfaceName, netvmispec.InfoSourceDomainAndGA, netsetup.DefaultInterfaceQueueCount),
+				{
+					Name:          primaryNetworkName,
+					InterfaceName: primaryIfaceName,
+					IP:            primaryGaIPv4,
+					IPs:           []string{primaryGaIPv4, primaryGaIPv6},
+					MAC:           primaryMAC,
+					InfoSource:    netvmispec.InfoSourceDomainAndGA,
+					QueueCount:    netsetup.DefaultInterfaceQueueCount,
+					LinkState:     linkStateUp,
+				},
 			}), "the guest-agent IP/s should be reported in the status")
 
 			Expect(setup.NetStat.PodInterfaceVolatileDataIsCached(setup.Vmi, primaryNetworkName)).To(BeTrue())
@@ -236,8 +286,26 @@ var _ = Describe("netstat", func() {
 			infoSourceDomainGAMultus := netvmispec.NewInfoSource(
 				netvmispec.InfoSourceDomain, netvmispec.InfoSourceGuestAgent, netvmispec.InfoSourceMultusStatus)
 			Expect(setup.Vmi.Status.Interfaces).To(Equal([]v1.VirtualMachineInstanceNetworkInterface{
-				newVMIStatusIface(primaryNetworkName, []string{primaryPodIPv4, primaryPodIPv6}, primaryMAC, primaryIfaceName, infoSourceDomainGAMultus, netsetup.DefaultInterfaceQueueCount),
-				newVMIStatusIface(secondaryNetworkName, []string{secondaryPodIPv4, secondaryPodIPv6}, secondaryMAC, secondaryIfaceName, infoSourceDomainGAMultus, netsetup.DefaultInterfaceQueueCount),
+				{
+					Name:          primaryNetworkName,
+					InterfaceName: primaryIfaceName,
+					IP:            primaryPodIPv4,
+					IPs:           []string{primaryPodIPv4, primaryPodIPv6},
+					MAC:           primaryMAC,
+					InfoSource:    infoSourceDomainGAMultus,
+					QueueCount:    netsetup.DefaultInterfaceQueueCount,
+					LinkState:     linkStateUp,
+				},
+				{
+					Name:          secondaryNetworkName,
+					InterfaceName: secondaryIfaceName,
+					IP:            secondaryPodIPv4,
+					IPs:           []string{secondaryPodIPv4, secondaryPodIPv6},
+					MAC:           secondaryMAC,
+					InfoSource:    infoSourceDomainGAMultus,
+					QueueCount:    netsetup.DefaultInterfaceQueueCount,
+					LinkState:     linkStateUp,
+				},
 			}), "the pod IP/s should be reported in the status")
 
 			Expect(setup.NetStat.PodInterfaceVolatileDataIsCached(setup.Vmi, primaryNetworkName)).To(BeTrue())
@@ -268,8 +336,49 @@ var _ = Describe("netstat", func() {
 			Expect(setup.NetStat.UpdateStatus(setup.Vmi, setup.Domain)).To(Succeed())
 
 			Expect(setup.Vmi.Status.Interfaces).To(Equal([]v1.VirtualMachineInstanceNetworkInterface{
-				newVMIStatusIface(primaryNetworkName, []string{primaryPodIPv4, primaryPodIPv6}, primaryMAC, "eth0", netvmispec.InfoSourceDomainAndGA, netsetup.DefaultInterfaceQueueCount),
+				{
+					Name:          primaryNetworkName,
+					InterfaceName: "eth0",
+					IP:            primaryPodIPv4,
+					IPs:           []string{primaryPodIPv4, primaryPodIPv6},
+					MAC:           primaryMAC,
+					InfoSource:    netvmispec.InfoSourceDomainAndGA,
+					QueueCount:    netsetup.DefaultInterfaceQueueCount,
+					LinkState:     linkStateUp,
+				},
 			}), "the pod IP/s should be reported in the status")
+
+			Expect(setup.NetStat.PodInterfaceVolatileDataIsCached(setup.Vmi, primaryNetworkName)).To(BeTrue())
+		})
+
+		It("run status and given interface with IPv4 and no IPv6 on the pod, vice versa from the guest-agent", func() {
+			Expect(
+				setup.addNetworkInterface(
+					newVMISpecIfaceWithBridgeBinding(primaryNetworkName),
+					newVMISpecPodNetwork(primaryNetworkName),
+					newDomainSpecIface(primaryNetworkName, primaryMAC),
+					primaryPodIPv4,
+				),
+			).To(Succeed())
+
+			setup.addGuestAgentInterfaces(
+				newDomainStatusIface([]string{primaryGaIPv6}, primaryMAC, primaryIfaceName),
+			)
+
+			Expect(setup.NetStat.UpdateStatus(setup.Vmi, setup.Domain)).To(Succeed())
+
+			Expect(setup.Vmi.Status.Interfaces).To(Equal([]v1.VirtualMachineInstanceNetworkInterface{
+				{
+					Name:          primaryNetworkName,
+					InterfaceName: primaryIfaceName,
+					IP:            primaryGaIPv6,
+					IPs:           []string{primaryGaIPv6},
+					MAC:           primaryMAC,
+					InfoSource:    netvmispec.InfoSourceDomainAndGA,
+					QueueCount:    netsetup.DefaultInterfaceQueueCount,
+					LinkState:     linkStateUp,
+				},
+			}), "the guest-agent IP/s should be reported in the status")
 
 			Expect(setup.NetStat.PodInterfaceVolatileDataIsCached(setup.Vmi, primaryNetworkName)).To(BeTrue())
 		})
@@ -301,7 +410,15 @@ var _ = Describe("netstat", func() {
 			Expect(setup.NetStat.UpdateStatus(setup.Vmi, setup.Domain)).To(Succeed())
 
 			Expect(setup.Vmi.Status.Interfaces).To(Equal([]v1.VirtualMachineInstanceNetworkInterface{
-				newVMIStatusIface(primaryNetworkName, []string{primaryPodIPv4, primaryPodIPv6}, newDomainMAC, "", netvmispec.InfoSourceDomain, netsetup.DefaultInterfaceQueueCount),
+				{
+					Name:       primaryNetworkName,
+					IP:         primaryPodIPv4,
+					IPs:        []string{primaryPodIPv4, primaryPodIPv6},
+					MAC:        newDomainMAC,
+					InfoSource: netvmispec.InfoSourceDomain,
+					QueueCount: netsetup.DefaultInterfaceQueueCount,
+					LinkState:  linkStateUp,
+				},
 			}), "the pod IP/s should be reported in the status")
 		})
 
@@ -364,7 +481,14 @@ var _ = Describe("netstat", func() {
 		Expect(setup.NetStat.UpdateStatus(setup.Vmi, setup.Domain)).To(Succeed())
 
 		Expect(setup.Vmi.Status.Interfaces).To(Equal([]v1.VirtualMachineInstanceNetworkInterface{
-			newVMIStatusIface(primaryNetworkName, nil, origMAC, primaryIfaceName, netvmispec.InfoSourceDomainAndGA, netsetup.DefaultInterfaceQueueCount),
+			{
+				Name:          primaryNetworkName,
+				InterfaceName: primaryIfaceName,
+				MAC:           origMAC,
+				InfoSource:    netvmispec.InfoSourceDomainAndGA,
+				QueueCount:    netsetup.DefaultInterfaceQueueCount,
+				LinkState:     linkStateUp,
+			},
 		}), "the pod IP/s should be reported in the status")
 	})
 
@@ -385,7 +509,12 @@ var _ = Describe("netstat", func() {
 		Expect(setup.NetStat.UpdateStatus(setup.Vmi, setup.Domain)).To(Succeed())
 
 		Expect(setup.Vmi.Status.Interfaces).To(Equal([]v1.VirtualMachineInstanceNetworkInterface{
-			newVMIStatusIface(networkName, nil, ifaceMAC, "", netvmispec.InfoSourceDomain, netsetup.UnknownInterfaceQueueCount),
+			{
+				Name:       networkName,
+				MAC:        ifaceMAC,
+				InfoSource: netvmispec.InfoSourceDomain,
+				QueueCount: netsetup.UnknownInterfaceQueueCount,
+			},
 		}), "the SR-IOV interface should be reported in the status.")
 	})
 
@@ -414,8 +543,19 @@ var _ = Describe("netstat", func() {
 		Expect(setup.NetStat.UpdateStatus(setup.Vmi, setup.Domain)).To(Succeed())
 
 		Expect(setup.Vmi.Status.Interfaces).To(Equal([]v1.VirtualMachineInstanceNetworkInterface{
-			newVMIStatusIface(primaryNetworkName, []string{primaryPodIPv4}, "", "", netvmispec.InfoSourceDomain, netsetup.DefaultInterfaceQueueCount),
-			newVMIStatusIface(networkName, nil, "", "", netvmispec.InfoSourceDomain, netsetup.UnknownInterfaceQueueCount),
+			{
+				Name:       primaryNetworkName,
+				IP:         primaryPodIPv4,
+				IPs:        []string{primaryPodIPv4},
+				InfoSource: netvmispec.InfoSourceDomain,
+				QueueCount: netsetup.DefaultInterfaceQueueCount,
+				LinkState:  linkStateUp,
+			},
+			{
+				Name:       networkName,
+				InfoSource: netvmispec.InfoSourceDomain,
+				QueueCount: netsetup.UnknownInterfaceQueueCount,
+			},
 		}), "the SR-IOV interface should be reported in the status.")
 	})
 
@@ -439,8 +579,104 @@ var _ = Describe("netstat", func() {
 		Expect(setup.NetStat.UpdateStatus(setup.Vmi, setup.Domain)).To(Succeed())
 
 		Expect(setup.Vmi.Status.Interfaces).To(Equal([]v1.VirtualMachineInstanceNetworkInterface{
-			newVMIStatusIface(networkName, nil, ifaceMAC, guestIfaceName, netvmispec.InfoSourceDomainAndGA, netsetup.UnknownInterfaceQueueCount),
+			{
+				Name:          networkName,
+				InterfaceName: guestIfaceName,
+				MAC:           ifaceMAC,
+				InfoSource:    netvmispec.InfoSourceDomainAndGA,
+				QueueCount:    netsetup.UnknownInterfaceQueueCount,
+			},
 		}), "the SR-IOV interface should be reported in the status, associated to the network")
+	})
+
+	It("should not report link local addresses for masquerade binding when reported by guest-agent", func() {
+		const (
+			primaryNetworkName = "primary"
+
+			primaryGaIPv4    = "1.1.1.1"
+			primaryGaIPv6    = "fd20:244::8c4c"
+			primaryGaLLAIPv6 = "fe80::a00:27ff:fe8f:5d42"
+
+			primaryMAC     = "1C:CE:C0:01:BE:E7"
+			primaryPodIPv4 = "1.1.1.1"
+		)
+
+		Expect(
+			setup.addNetworkInterface(
+				newVMISpecIfaceWithMasqueradeBinding(primaryNetworkName),
+				newVMISpecPodNetwork(primaryNetworkName),
+				newDomainSpecIface(primaryNetworkName, primaryMAC),
+				primaryPodIPv4,
+			)).To(Succeed())
+
+		setup.addGuestAgentInterfaces(
+			newDomainStatusIface(
+				[]string{primaryGaIPv4, primaryGaIPv6, primaryGaLLAIPv6},
+				primaryMAC,
+				"eth0",
+			),
+		)
+
+		Expect(setup.NetStat.UpdateStatus(setup.Vmi, setup.Domain)).To(Succeed())
+
+		Expect(setup.Vmi.Status.Interfaces).To(Equal([]v1.VirtualMachineInstanceNetworkInterface{
+			{
+				Name:          primaryNetworkName,
+				InterfaceName: "eth0",
+				IP:            primaryPodIPv4,
+				IPs:           []string{primaryPodIPv4, primaryGaIPv6},
+				MAC:           primaryMAC,
+				InfoSource:    netvmispec.InfoSourceDomainAndGA,
+				QueueCount:    netsetup.DefaultInterfaceQueueCount,
+				LinkState:     linkStateUp,
+			},
+		}))
+	})
+
+	It("should report link local addresses for secondary iface using bridge binding w/o IPAM when reported by guest-agent", func() {
+		const (
+			secondaryNetworkName = "secondary"
+
+			secondaryGaIPv4    = "1.1.1.1"
+			secondaryGaIPv4LLA = "169.254.0.1"
+			secondaryGaIPv6    = "fd20:244::8c4c"
+			secondaryGaLLAIPv6 = "fe80::a00:27ff:fe8f:5d42"
+
+			secondaryMAC = "1C:CE:C0:01:BE:E7"
+		)
+
+		Expect(
+			setup.addNetworkInterface(
+				newVMISpecIfaceWithBridgeBinding(secondaryNetworkName),
+				newVMISpecMultusNetwork(secondaryNetworkName),
+				newDomainSpecIface(secondaryNetworkName, secondaryMAC),
+			)).To(Succeed())
+
+		// The IPv4 configuration reported here is illegal according to
+		// https://datatracker.ietf.org/doc/html/rfc3927#section-2.1
+		// but is used for testing the filtering logic
+		setup.addGuestAgentInterfaces(
+			newDomainStatusIface(
+				[]string{secondaryGaIPv4, secondaryGaIPv4LLA, secondaryGaIPv6, secondaryGaLLAIPv6},
+				secondaryMAC,
+				"eth0",
+			),
+		)
+
+		Expect(setup.NetStat.UpdateStatus(setup.Vmi, setup.Domain)).To(Succeed())
+
+		Expect(setup.Vmi.Status.Interfaces).To(Equal([]v1.VirtualMachineInstanceNetworkInterface{
+			{
+				Name:          secondaryNetworkName,
+				InterfaceName: "eth0",
+				IP:            secondaryGaIPv4,
+				IPs:           []string{secondaryGaIPv4, secondaryGaIPv4LLA, secondaryGaIPv6, secondaryGaLLAIPv6},
+				MAC:           secondaryMAC,
+				InfoSource:    netvmispec.InfoSourceDomainAndGA,
+				QueueCount:    netsetup.DefaultInterfaceQueueCount,
+				LinkState:     linkStateUp,
+			},
+		}))
 	})
 
 	When("the desired state (VMI spec) is not in sync with the state in the guest (guest-agent)", func() {
@@ -492,30 +728,94 @@ var _ = Describe("netstat", func() {
 			Expect(setup.NetStat.UpdateStatus(setup.Vmi, setup.Domain)).To(Succeed())
 
 			Expect(setup.Vmi.Status.Interfaces).To(ConsistOf([]v1.VirtualMachineInstanceNetworkInterface{
-				newVMIStatusIface(primaryNetworkName, []string{primaryPodIPv4, primaryPodIPv6}, primaryMAC, "", netvmispec.InfoSourceDomain, netsetup.DefaultInterfaceQueueCount),
-				newVMIStatusIface(secondaryNetworkName, []string{secondaryPodIPv4, secondaryPodIPv6}, secondaryMAC, "", netvmispec.InfoSourceDomain, netsetup.DefaultInterfaceQueueCount),
-				newVMIStatusIface("", []string{primaryGaIPv4, primaryGaIPv6}, newMAC1, primaryIfaceName, netvmispec.InfoSourceGuestAgent, netsetup.UnknownInterfaceQueueCount),
-				newVMIStatusIface("", []string{secondaryGaIPv4, secondaryGaIPv6}, newMAC2, secondaryIfaceName, netvmispec.InfoSourceGuestAgent, netsetup.UnknownInterfaceQueueCount),
+				{
+					Name:       primaryNetworkName,
+					IP:         primaryPodIPv4,
+					IPs:        []string{primaryPodIPv4, primaryPodIPv6},
+					MAC:        primaryMAC,
+					InfoSource: netvmispec.InfoSourceDomain,
+					QueueCount: netsetup.DefaultInterfaceQueueCount,
+					LinkState:  linkStateUp,
+				},
+				{
+					Name:       secondaryNetworkName,
+					IP:         secondaryPodIPv4,
+					IPs:        []string{secondaryPodIPv4, secondaryPodIPv6},
+					MAC:        secondaryMAC,
+					InfoSource: netvmispec.InfoSourceDomain,
+					QueueCount: netsetup.DefaultInterfaceQueueCount,
+					LinkState:  linkStateUp,
+				},
+				{
+					Name:          "",
+					InterfaceName: primaryIfaceName,
+					IP:            primaryGaIPv4,
+					IPs:           []string{primaryGaIPv4, primaryGaIPv6},
+					MAC:           newMAC1,
+					InfoSource:    netvmispec.InfoSourceGuestAgent,
+					QueueCount:    netsetup.UnknownInterfaceQueueCount,
+				},
+				{
+					Name:          "",
+					InterfaceName: secondaryIfaceName,
+					IP:            secondaryGaIPv4,
+					IPs:           []string{secondaryGaIPv4, secondaryGaIPv6},
+					MAC:           newMAC2,
+					InfoSource:    netvmispec.InfoSourceGuestAgent,
+					QueueCount:    netsetup.UnknownInterfaceQueueCount,
+				},
 			}))
 		})
 
 		It("reports a new interface that appeared in the guest", func() {
 			const (
 				newGaIPv4    = "3.3.3.3"
+				newGaIPv4LLA = "169.254.0.1"
 				newGaIPv6    = "fd20:333::3333"
+				newGaIPv6LLA = "fe80::a00:27ff:fe8f:5d42"
 				newIfaceName = "eth3"
 			)
+
+			// The IPv4 configuration reported for the guest interface is illegal according to
+			// https://datatracker.ietf.org/doc/html/rfc3927#section-2.1
+			// but is used for testing the filtering logic
 			setup.addGuestAgentInterfaces(
 				newDomainStatusIface([]string{primaryGaIPv4, primaryGaIPv6}, primaryMAC, primaryIfaceName),
 				newDomainStatusIface([]string{secondaryGaIPv4, secondaryGaIPv6}, secondaryMAC, secondaryIfaceName),
-				newDomainStatusIface([]string{newGaIPv4, newGaIPv6}, newMAC1, newIfaceName),
+				newDomainStatusIface([]string{newGaIPv4, newGaIPv4LLA, newGaIPv6, newGaIPv6LLA}, newMAC1, newIfaceName),
 			)
 			Expect(setup.NetStat.UpdateStatus(setup.Vmi, setup.Domain)).To(Succeed())
 
 			Expect(setup.Vmi.Status.Interfaces).To(ConsistOf([]v1.VirtualMachineInstanceNetworkInterface{
-				newVMIStatusIface(primaryNetworkName, []string{primaryPodIPv4, primaryPodIPv6}, primaryMAC, primaryIfaceName, netvmispec.InfoSourceDomainAndGA, netsetup.DefaultInterfaceQueueCount),
-				newVMIStatusIface(secondaryNetworkName, []string{secondaryPodIPv4, secondaryPodIPv6}, secondaryMAC, secondaryIfaceName, netvmispec.InfoSourceDomainAndGA, netsetup.DefaultInterfaceQueueCount),
-				newVMIStatusIface("", []string{newGaIPv4, newGaIPv6}, newMAC1, newIfaceName, netvmispec.InfoSourceGuestAgent, netsetup.UnknownInterfaceQueueCount),
+				{
+					Name:          primaryNetworkName,
+					InterfaceName: primaryIfaceName,
+					IP:            primaryPodIPv4,
+					IPs:           []string{primaryPodIPv4, primaryPodIPv6},
+					MAC:           primaryMAC,
+					InfoSource:    netvmispec.InfoSourceDomainAndGA,
+					QueueCount:    netsetup.DefaultInterfaceQueueCount,
+					LinkState:     linkStateUp,
+				},
+				{
+					Name:          secondaryNetworkName,
+					InterfaceName: secondaryIfaceName,
+					IP:            secondaryPodIPv4,
+					IPs:           []string{secondaryPodIPv4, secondaryPodIPv6},
+					MAC:           secondaryMAC,
+					InfoSource:    netvmispec.InfoSourceDomainAndGA,
+					QueueCount:    netsetup.DefaultInterfaceQueueCount,
+					LinkState:     linkStateUp,
+				},
+				{
+					Name:          "",
+					InterfaceName: newIfaceName,
+					IP:            newGaIPv4,
+					IPs:           []string{newGaIPv4, newGaIPv4LLA, newGaIPv6, newGaIPv6LLA},
+					MAC:           newMAC1,
+					InfoSource:    netvmispec.InfoSourceGuestAgent,
+					QueueCount:    netsetup.UnknownInterfaceQueueCount,
+				},
 			}))
 		})
 
@@ -523,9 +823,89 @@ var _ = Describe("netstat", func() {
 			Expect(setup.NetStat.UpdateStatus(setup.Vmi, setup.Domain)).To(Succeed())
 
 			Expect(setup.Vmi.Status.Interfaces).To(ConsistOf([]v1.VirtualMachineInstanceNetworkInterface{
-				newVMIStatusIface(primaryNetworkName, []string{primaryPodIPv4, primaryPodIPv6}, primaryMAC, "", netvmispec.InfoSourceDomain, netsetup.DefaultInterfaceQueueCount),
-				newVMIStatusIface(secondaryNetworkName, []string{secondaryPodIPv4, secondaryPodIPv6}, secondaryMAC, "", netvmispec.InfoSourceDomain, netsetup.DefaultInterfaceQueueCount),
+				{
+					Name:       primaryNetworkName,
+					IP:         primaryPodIPv4,
+					IPs:        []string{primaryPodIPv4, primaryPodIPv6},
+					MAC:        primaryMAC,
+					InfoSource: netvmispec.InfoSourceDomain,
+					QueueCount: netsetup.DefaultInterfaceQueueCount,
+					LinkState:  linkStateUp,
+				},
+				{
+					Name:       secondaryNetworkName,
+					IP:         secondaryPodIPv4,
+					IPs:        []string{secondaryPodIPv4, secondaryPodIPv6},
+					MAC:        secondaryMAC,
+					InfoSource: netvmispec.InfoSourceDomain,
+					QueueCount: netsetup.DefaultInterfaceQueueCount,
+					LinkState:  linkStateUp,
+				},
 			}))
+		})
+
+		It("does not report all guest interfaces when their count exceeds the limit", func() {
+			expectedInterfaceStatus := []v1.VirtualMachineInstanceNetworkInterface{
+				{
+					Name:             primaryNetworkName,
+					IP:               primaryPodIPv4,
+					MAC:              primaryMAC,
+					IPs:              []string{primaryPodIPv4, primaryPodIPv6},
+					PodInterfaceName: "",
+					InterfaceName:    primaryIfaceName,
+					InfoSource:       netvmispec.NewInfoSource(netvmispec.InfoSourceDomain, netvmispec.InfoSourceGuestAgent),
+					QueueCount:       1,
+					LinkState:        linkStateUp,
+				},
+				{
+					Name:             secondaryNetworkName,
+					IP:               secondaryGaIPv4,
+					MAC:              secondaryMAC,
+					IPs:              []string{secondaryPodIPv4, secondaryPodIPv6},
+					PodInterfaceName: "",
+					InterfaceName:    secondaryIfaceName,
+					InfoSource:       netvmispec.NewInfoSource(netvmispec.InfoSourceDomain, netvmispec.InfoSourceGuestAgent),
+					QueueCount:       1,
+					LinkState:        linkStateUp,
+				},
+			}
+
+			guestAgentIfaces := []api.InterfaceStatus{
+				newDomainStatusIface([]string{primaryGaIPv4, primaryGaIPv6}, primaryMAC, primaryIfaceName),
+				newDomainStatusIface([]string{secondaryGaIPv4, secondaryGaIPv6}, secondaryMAC, secondaryIfaceName),
+			}
+
+			const (
+				guestOnlyInterfaceLimit  = 10
+				extraGuestOnlyInterfaces = 15
+			)
+
+			for i := 1; i < (guestOnlyInterfaceLimit + extraGuestOnlyInterfaces); i++ {
+				ifaceName := fmt.Sprintf("br%d", i)
+				ifaceMac := fmt.Sprintf("00:00:00:00:00:%02X", i)
+
+				guestAgentIfaces = append(guestAgentIfaces,
+					newDomainStatusIface(nil, ifaceMac, ifaceName),
+				)
+				if i > guestOnlyInterfaceLimit {
+					continue
+				}
+				expectedInterfaceStatus = append(expectedInterfaceStatus, v1.VirtualMachineInstanceNetworkInterface{
+					IP:               "",
+					MAC:              ifaceMac,
+					Name:             "",
+					IPs:              nil,
+					PodInterfaceName: "",
+					InterfaceName:    ifaceName,
+					InfoSource:       netvmispec.InfoSourceGuestAgent,
+					QueueCount:       0,
+					LinkState:        "",
+				})
+			}
+
+			setup.addGuestAgentInterfaces(guestAgentIfaces...)
+			Expect(setup.NetStat.UpdateStatus(setup.Vmi, setup.Domain)).To(Succeed())
+			Expect(setup.Vmi.Status.Interfaces).To(Equal(expectedInterfaceStatus))
 		})
 	})
 
@@ -555,7 +935,13 @@ var _ = Describe("netstat", func() {
 			Expect(setup.NetStat.UpdateStatus(setup.Vmi, setup.Domain)).To(Succeed())
 
 			Expect(setup.Vmi.Status.Interfaces).To(Equal([]v1.VirtualMachineInstanceNetworkInterface{
-				newVMIStatusIface(primaryNetworkName, nil, primaryMAC, "", netvmispec.InfoSourceDomain, netsetup.DefaultInterfaceQueueCount),
+				{
+					Name:       primaryNetworkName,
+					MAC:        primaryMAC,
+					InfoSource: netvmispec.InfoSourceDomain,
+					QueueCount: netsetup.DefaultInterfaceQueueCount,
+					LinkState:  linkStateUp,
+				},
 			}))
 		})
 
@@ -578,7 +964,16 @@ var _ = Describe("netstat", func() {
 			Expect(setup.NetStat.UpdateStatus(setup.Vmi, setup.Domain)).To(Succeed())
 
 			Expect(setup.Vmi.Status.Interfaces).To(Equal([]v1.VirtualMachineInstanceNetworkInterface{
-				newVMIStatusIface(primaryNetworkName, []string{primaryPodIPv4}, primaryMAC, primaryIfaceName, netvmispec.InfoSourceDomainAndGA, netsetup.DefaultInterfaceQueueCount),
+				{
+					Name:          primaryNetworkName,
+					InterfaceName: primaryIfaceName,
+					IP:            primaryPodIPv4,
+					IPs:           []string{primaryPodIPv4},
+					MAC:           primaryMAC,
+					InfoSource:    netvmispec.InfoSourceDomainAndGA,
+					QueueCount:    netsetup.DefaultInterfaceQueueCount,
+					LinkState:     linkStateUp,
+				},
 			}))
 		})
 	})
@@ -635,9 +1030,33 @@ var _ = Describe("netstat", func() {
 			Expect(setup.NetStat.UpdateStatus(setup.Vmi, setup.Domain)).To(Succeed())
 
 			Expect(setup.Vmi.Status.Interfaces).To(Equal([]v1.VirtualMachineInstanceNetworkInterface{
-				newVMIStatusIface(prNetworkName, []string{podIP}, MAC, "", netvmispec.InfoSourceDomain, netsetup.DefaultInterfaceQueueCount),
-				newVMIStatusIface(secNetworkName1, []string{podIP}, MAC1, "", netvmispec.InfoSourceDomain, netsetup.DefaultInterfaceQueueCount),
-				newVMIStatusIface(secNetworkName2, []string{podIP}, MAC2, "", netvmispec.InfoSourceDomain, netsetup.DefaultInterfaceQueueCount),
+				{
+					Name:       prNetworkName,
+					IP:         podIP,
+					IPs:        []string{podIP},
+					MAC:        MAC,
+					InfoSource: netvmispec.InfoSourceDomain,
+					QueueCount: netsetup.DefaultInterfaceQueueCount,
+					LinkState:  linkStateUp,
+				},
+				{
+					Name:       secNetworkName1,
+					IP:         podIP,
+					IPs:        []string{podIP},
+					MAC:        MAC1,
+					InfoSource: netvmispec.InfoSourceDomain,
+					QueueCount: netsetup.DefaultInterfaceQueueCount,
+					LinkState:  linkStateUp,
+				},
+				{
+					Name:       secNetworkName2,
+					IP:         podIP,
+					IPs:        []string{podIP},
+					MAC:        MAC2,
+					InfoSource: netvmispec.InfoSourceDomain,
+					QueueCount: netsetup.DefaultInterfaceQueueCount,
+					LinkState:  linkStateUp,
+				},
 			}))
 		},
 			Entry("primary interface defined first in spec", []int{PRIMARY_IFACE_IND, SECONDARY_IFACE1_IND, SECONDARY_IFACE2_IND}),
@@ -682,8 +1101,21 @@ var _ = Describe("netstat", func() {
 		infoSourceDomainGAMultus := netvmispec.NewInfoSource(
 			netvmispec.InfoSourceDomain, netvmispec.InfoSourceGuestAgent, netvmispec.InfoSourceMultusStatus)
 		Expect(setup.Vmi.Status.Interfaces).To(Equal([]v1.VirtualMachineInstanceNetworkInterface{
-			newVMIStatusIface(primaryNetworkName, []string{primaryPodIPv4, primaryPodIPv6}, primaryMAC, primaryIfaceName, infoSourceDomainGAMultus, netsetup.DefaultInterfaceQueueCount),
-			newVMIStatusIface(secondaryNetworkName, nil, "", "", netvmispec.InfoSourceMultusStatus, 0),
+			{
+				Name:          primaryNetworkName,
+				InterfaceName: primaryIfaceName,
+				IP:            primaryPodIPv4,
+				IPs:           []string{primaryPodIPv4, primaryPodIPv6},
+				MAC:           primaryMAC,
+				InfoSource:    infoSourceDomainGAMultus,
+				QueueCount:    netsetup.DefaultInterfaceQueueCount,
+				LinkState:     linkStateUp,
+			},
+			{
+				Name:       secondaryNetworkName,
+				InfoSource: netvmispec.InfoSourceMultusStatus,
+				QueueCount: 0,
+			},
 		}), "primary and secondary ifaces should exist in status, where secondary iface have multus-status only")
 	})
 
@@ -721,8 +1153,129 @@ var _ = Describe("netstat", func() {
 		infoSourceDomainGAMultus := netvmispec.NewInfoSource(
 			netvmispec.InfoSourceDomain, netvmispec.InfoSourceGuestAgent, netvmispec.InfoSourceMultusStatus)
 		Expect(setup.Vmi.Status.Interfaces).To(Equal([]v1.VirtualMachineInstanceNetworkInterface{
-			newVMIStatusIface(primaryNetworkName, []string{primaryPodIPv4, primaryPodIPv6}, primaryMAC, primaryIfaceName, infoSourceDomainGAMultus, netsetup.DefaultInterfaceQueueCount),
+			{
+				Name:          primaryNetworkName,
+				InterfaceName: primaryIfaceName,
+				IP:            primaryPodIPv4,
+				IPs:           []string{primaryPodIPv4, primaryPodIPv6},
+				MAC:           primaryMAC,
+				InfoSource:    infoSourceDomainGAMultus,
+				QueueCount:    netsetup.DefaultInterfaceQueueCount,
+				LinkState:     linkStateUp,
+			},
 		}), "only primary should exist in status since secondary iface not exist in spec")
+	})
+
+	It("VMI with custom primary interface name", func() {
+		const (
+			primaryNetworkName  = "primary"
+			primaryPodIPv4      = "1.1.1.1"
+			primaryPodIPv6      = "fd10:244::8c4c"
+			primaryMAC          = "1C:CE:C0:01:BE:E7"
+			primaryIfaceName    = "eth0"
+			primaryPodIfaceName = "custom-iface"
+		)
+
+		Expect(
+			setup.addNetworkInterface(
+				newVMISpecIfaceWithBridgeBinding(primaryNetworkName),
+				newVMISpecPodNetwork(primaryNetworkName),
+				newDomainSpecIface(primaryNetworkName, primaryMAC),
+				primaryPodIPv4, primaryPodIPv6,
+			),
+		).To(Succeed())
+
+		setup.addGuestAgentInterfaces(
+			newDomainStatusIface([]string{primaryPodIPv4, primaryPodIPv6}, primaryMAC, primaryIfaceName),
+		)
+
+		setup.Vmi.Status.Interfaces = []v1.VirtualMachineInstanceNetworkInterface{
+			{Name: primaryNetworkName, PodInterfaceName: primaryPodIfaceName},
+		}
+
+		Expect(setup.NetStat.UpdateStatus(setup.Vmi, setup.Domain)).To(Succeed())
+
+		infoSourceDomainGA := netvmispec.NewInfoSource(
+			netvmispec.InfoSourceDomain, netvmispec.InfoSourceGuestAgent,
+		)
+		Expect(setup.Vmi.Status.Interfaces).To(Equal([]v1.VirtualMachineInstanceNetworkInterface{
+			{
+				Name:             primaryNetworkName,
+				PodInterfaceName: primaryPodIfaceName,
+				InterfaceName:    primaryIfaceName,
+				IP:               primaryPodIPv4,
+				IPs:              []string{primaryPodIPv4, primaryPodIPv6},
+				MAC:              primaryMAC,
+				InfoSource:       infoSourceDomainGA,
+				QueueCount:       netsetup.DefaultInterfaceQueueCount,
+				LinkState:        linkStateUp,
+			},
+		}))
+	})
+
+	DescribeTable("VMI with primary interface status reported should keep the prev PodInterfaceName", func(primaryPodIfaceName string) {
+		const primaryNetworkName = "default"
+
+		setup.Vmi.Spec.Domain.Devices.Interfaces = append(setup.Vmi.Spec.Domain.Devices.Interfaces, newVMISpecIfaceWithBridgeBinding(primaryNetworkName))
+		setup.Vmi.Spec.Networks = append(setup.Vmi.Spec.Networks, newVMISpecPodNetwork(primaryNetworkName))
+		setup.Vmi.Status.Interfaces = []v1.VirtualMachineInstanceNetworkInterface{{Name: primaryNetworkName, PodInterfaceName: primaryPodIfaceName}}
+		Expect(setup.NetStat.UpdateStatus(setup.Vmi, setup.Domain)).To(Succeed())
+
+		Expect(setup.Vmi.Status.Interfaces).To(Equal([]v1.VirtualMachineInstanceNetworkInterface{{Name: primaryNetworkName, PodInterfaceName: primaryPodIfaceName}}))
+	},
+		Entry("When existing pod interface name is empty", ""),
+		Entry("When existing pod interface name has the default value", "eth0"),
+		Entry("When existing pod interface name has a custom value", "custom-iface"),
+	)
+
+	It("VMI with a secondary interface status reported interface should keep the prev PodInterfaceName", func() {
+		const (
+			secondaryNetworkName  = "secondary"
+			secondaryPodIfaceName = "pod123456"
+		)
+		setup.Vmi.Spec.Domain.Devices.Interfaces = append(setup.Vmi.Spec.Domain.Devices.Interfaces, newVMISpecIfaceWithBridgeBinding(secondaryNetworkName))
+		setup.Vmi.Spec.Networks = append(setup.Vmi.Spec.Networks, newVMISpecMultusNetwork(secondaryNetworkName))
+		setup.Vmi.Status.Interfaces = []v1.VirtualMachineInstanceNetworkInterface{
+			{Name: secondaryNetworkName, PodInterfaceName: secondaryPodIfaceName, InfoSource: netvmispec.InfoSourceMultusStatus},
+		}
+		Expect(setup.NetStat.UpdateStatus(setup.Vmi, setup.Domain)).To(Succeed())
+
+		Expect(setup.Vmi.Status.Interfaces).To(Equal([]v1.VirtualMachineInstanceNetworkInterface{
+			{Name: secondaryNetworkName, PodInterfaceName: secondaryPodIfaceName, InfoSource: netvmispec.InfoSourceMultusStatus},
+		}))
+	})
+
+	Context("Link state", func() {
+		const (
+			linkStateUp   = "up"
+			linkStateDown = "down"
+		)
+		DescribeTable("should report correct link state", func(linkState string) {
+			const (
+				networkName = "primary"
+				MAC         = "1C:CE:C0:01:BE:E7"
+			)
+
+			domainIface := newDomainSpecIface(networkName, MAC)
+			domainIface.LinkState = &api.LinkState{State: linkState}
+
+			setup.Domain.Spec.Devices.Interfaces = append(setup.Domain.Spec.Devices.Interfaces, domainIface)
+
+			Expect(setup.NetStat.UpdateStatus(setup.Vmi, setup.Domain)).To(Succeed())
+
+			Expect(setup.Vmi.Status.Interfaces).To(Equal([]v1.VirtualMachineInstanceNetworkInterface{
+				{
+					Name:       networkName,
+					MAC:        MAC,
+					InfoSource: netvmispec.InfoSourceDomain,
+					QueueCount: netsetup.DefaultInterfaceQueueCount,
+					LinkState:  linkState,
+				},
+			}))
+		},
+			Entry("When link state is explicitly set to up", linkStateUp),
+			Entry("When link state is explicitly set to down", linkStateDown),
+		)
 	})
 
 	Context("misc scenario", func() {
@@ -737,7 +1290,13 @@ var _ = Describe("netstat", func() {
 			Expect(setup.NetStat.UpdateStatus(setup.Vmi, setup.Domain)).To(Succeed())
 
 			Expect(setup.Vmi.Status.Interfaces).To(Equal([]v1.VirtualMachineInstanceNetworkInterface{
-				newVMIStatusIface(networkName, nil, MAC, "", netvmispec.InfoSourceDomain, netsetup.DefaultInterfaceQueueCount),
+				{
+					Name:       networkName,
+					MAC:        MAC,
+					InfoSource: netvmispec.InfoSourceDomain,
+					QueueCount: netsetup.DefaultInterfaceQueueCount,
+					LinkState:  linkStateUp,
+				},
 			}))
 		})
 
@@ -758,7 +1317,13 @@ var _ = Describe("netstat", func() {
 			Expect(setup.NetStat.UpdateStatus(setup.Vmi, setup.Domain)).To(Succeed())
 
 			Expect(setup.Vmi.Status.Interfaces).To(Equal([]v1.VirtualMachineInstanceNetworkInterface{
-				newVMIStatusIface(networkName, nil, MAC, "", netvmispec.InfoSourceDomain, netsetup.DefaultInterfaceQueueCount),
+				{
+					Name:       networkName,
+					MAC:        MAC,
+					InfoSource: netvmispec.InfoSourceDomain,
+					QueueCount: netsetup.DefaultInterfaceQueueCount,
+					LinkState:  linkStateUp,
+				},
 			}))
 		})
 
@@ -856,7 +1421,7 @@ func (t *testSetup) addSRIOVNetworkInterface(vmiIface v1.Interface, vmiNetwork v
 	t.Vmi.Spec.Networks = append(t.Vmi.Spec.Networks, vmiNetwork)
 
 	t.Domain.Spec.Devices.HostDevices = append(t.Domain.Spec.Devices.HostDevices, api.HostDevice{
-		Alias: api.NewUserDefinedAlias(netsriov.AliasPrefix + vmiNetwork.Name),
+		Alias: api.NewUserDefinedAlias(netsriov.SRIOVAliasPrefix + vmiNetwork.Name),
 	})
 }
 
@@ -910,22 +1475,6 @@ func newDomainStatusIface(IPs []string, mac, interfaceName string) api.Interface
 		IPs:           IPs,
 		Mac:           mac,
 		InterfaceName: interfaceName,
-	}
-}
-
-func newVMIStatusIface(name string, IPs []string, mac, ifaceName string, infoSource string, queueCount int32) v1.VirtualMachineInstanceNetworkInterface {
-	var ip string
-	if len(IPs) > 0 {
-		ip = IPs[0]
-	}
-	return v1.VirtualMachineInstanceNetworkInterface{
-		Name:          name,
-		InterfaceName: ifaceName,
-		IP:            ip,
-		IPs:           IPs,
-		MAC:           mac,
-		InfoSource:    infoSource,
-		QueueCount:    queueCount,
 	}
 }
 

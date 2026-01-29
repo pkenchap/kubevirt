@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2023 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -24,24 +24,23 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"k8s.io/client-go/tools/clientcmd"
+
 	v1 "kubevirt.io/api/core/v1"
 
+	"kubevirt.io/kubevirt/pkg/virtctl/clientconfig"
 	"kubevirt.io/kubevirt/pkg/virtctl/templates"
 )
 
 const COMMAND_STOP = "stop"
 
-func NewStopCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
+func NewStopCommand() *cobra.Command {
+	c := Command{command: COMMAND_STOP}
 	cmd := &cobra.Command{
 		Use:     "stop (VM)",
 		Short:   "Stop a virtual machine.",
 		Example: usage(COMMAND_STOP),
-		Args:    templates.ExactArgs("stop", 1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			c := Command{command: COMMAND_STOP, clientConfig: clientConfig}
-			return c.stopRun(args, cmd)
-		},
+		Args:    cobra.ExactArgs(1),
+		RunE:    c.stopRun,
 	}
 
 	cmd.Flags().BoolVar(&forceRestart, forceArg, false, "--force=false: Only used when grace-period=0. If true, immediately remove VMI pod from API and bypass graceful deletion. Note that immediate deletion of some resources may result in inconsistency or data loss and requires confirmation.")
@@ -51,10 +50,11 @@ func NewStopCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
 	return cmd
 }
 
-func (o *Command) stopRun(args []string, cmd *cobra.Command) error {
+func (o *Command) stopRun(cmd *cobra.Command, args []string) error {
 	vmiName := args[0]
+	errorFmt := "error stopping VirtualMachine %v"
 
-	virtClient, namespace, err := GetNamespaceAndClient(o.clientConfig)
+	virtClient, namespace, _, err := clientconfig.ClientAndNamespaceFromContext(cmd.Context())
 	if err != nil {
 		return err
 	}
@@ -66,16 +66,15 @@ func (o *Command) stopRun(args []string, cmd *cobra.Command) error {
 		return fmt.Errorf("Must both use --force=true and set --grace-period.")
 	}
 
+	stopOpts := &v1.StopOptions{DryRun: dryRunOption}
 	if forceRestart {
-		err = virtClient.VirtualMachine(namespace).ForceStop(context.Background(), vmiName, &v1.StopOptions{GracePeriod: &gracePeriod, DryRun: dryRunOption})
-		if err != nil {
-			return fmt.Errorf("Error force stopping VirtualMachine, %v", err)
-		}
-	} else {
-		err = virtClient.VirtualMachine(namespace).Stop(context.Background(), vmiName, &v1.StopOptions{DryRun: dryRunOption})
-		if err != nil {
-			return fmt.Errorf("Error stopping VirtualMachine %v", err)
-		}
+		stopOpts.GracePeriod = &gracePeriod
+		errorFmt = "error force stopping VirtualMachine: %v"
+	}
+
+	err = virtClient.VirtualMachine(namespace).Stop(context.Background(), vmiName, stopOpts)
+	if err != nil {
+		return fmt.Errorf(errorFmt, err)
 	}
 
 	fmt.Printf("VM %s was scheduled to %s\n", vmiName, o.command)

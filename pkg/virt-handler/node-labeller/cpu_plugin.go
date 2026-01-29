@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2021 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -24,14 +24,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
+	"slices"
 	"strings"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
 
-	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
-	"kubevirt.io/kubevirt/pkg/virt-handler/node-labeller/api"
 	"kubevirt.io/kubevirt/pkg/virt-handler/node-labeller/util"
 )
 
@@ -39,34 +37,32 @@ const (
 	isSupported            string = "yes"
 	isUnusable             string = "no"
 	isRequired             string = "require"
-	nodeLabellerVolumePath        = "/var/lib/kubevirt-node-labeller/"
+	NodeLabellerVolumePath        = "/var/lib/kubevirt-node-labeller/"
 
 	supportedFeaturesXml = "supported_features.xml"
 )
 
-func (n *NodeLabeller) getMinCpuFeature() cpuFeatures {
-	minCPUModel := n.clusterConfig.GetMinCPUModel()
-	if minCPUModel == "" {
-		minCPUModel = util.DefaultMinCPUModel
-	}
-	return n.cpuInfo.usableModels[minCPUModel]
-}
-
-func (n *NodeLabeller) getSupportedCpuModels(obsoleteCPUsx86 map[string]bool) []string {
-	supportedCPUModels := make([]string, 0)
-
-	if obsoleteCPUsx86 == nil {
-		obsoleteCPUsx86 = util.DefaultObsoleteCPUModels
+func (n *NodeLabeller) filterCpuModels(models []string, obsolete map[string]bool) []string {
+	if obsolete == nil {
+		obsolete = util.DefaultObsoleteCPUModels
 	}
 
-	for _, model := range n.hostCapabilities.items {
-		if _, ok := obsoleteCPUsx86[model]; ok {
+	filtered := make([]string, 0, len(models))
+	for _, model := range models {
+		if _, ok := obsolete[model]; ok {
 			continue
 		}
-		supportedCPUModels = append(supportedCPUModels, model)
+		filtered = append(filtered, model)
 	}
+	return filtered
+}
 
-	return supportedCPUModels
+func (n *NodeLabeller) getSupportedCpuModels(obsolete map[string]bool) []string {
+	return n.filterCpuModels(n.hostCapabilities.usableModels, obsolete)
+}
+
+func (n *NodeLabeller) getKnownCpuModels(obsolete map[string]bool) []string {
+	return n.filterCpuModels(n.hostCapabilities.knownModels, obsolete)
 }
 
 func (n *NodeLabeller) getSupportedCpuFeatures() cpuFeatures {
@@ -91,14 +87,18 @@ func (n *NodeLabeller) loadDomCapabilities() error {
 	}
 
 	usableModels := make([]string, 0)
+	knownModels := make([]string, 0)
 	for _, mode := range hostDomCapabilities.CPU.Mode {
 		if mode.Name == v1.CPUModeHostModel {
-			if virtconfig.IsARM64(runtime.GOARCH) {
-				log.Log.Warning("host-model cpu mode is not supported for ARM architecture")
+			if !n.arch.supportsHostModel() {
+				log.Log.Warningf("host-model cpu mode is not supported for %s architecture", n.arch.arch())
 				continue
 			}
 
 			n.cpuModelVendor = mode.Vendor.Name
+			if n.cpuModelVendor == "" {
+				n.cpuModelVendor = n.arch.defaultVendor()
+			}
 
 			if len(mode.Model) < 1 {
 				return fmt.Errorf("host model mode is expected to contain a model")
@@ -119,15 +119,22 @@ func (n *NodeLabeller) loadDomCapabilities() error {
 		}
 
 		for _, model := range mode.Model {
-			if model.Usable == isUnusable || model.Usable == "" {
+			name := strings.TrimSpace(model.Name)
+			if model.Usable == "" || name == "" {
 				continue
 			}
-			usableModels = append(usableModels, model.Name)
+			knownModels = append(knownModels, name)
+			if model.Usable != isUnusable {
+				usableModels = append(usableModels, name)
+			}
 		}
 	}
 
-	n.hostCapabilities.items = usableModels
+	n.hostCapabilities.usableModels = usableModels
+	n.hostCapabilities.knownModels = knownModels
 	n.SEV = hostDomCapabilities.SEV
+	n.SecureExecution = hostDomCapabilities.SecureExecution
+	n.TDX = hostDomCapabilities.TDX
 
 	return nil
 }
@@ -144,54 +151,12 @@ func (n *NodeLabeller) loadHostSupportedFeatures() error {
 
 	usableFeatures := make([]string, 0)
 	for _, f := range hostFeatures.Feature {
-		if f.Policy != util.RequirePolicy {
-			continue
+		if n.arch.requirePolicy(f.Policy) {
+			usableFeatures = append(usableFeatures, f.Name)
 		}
-
-		usableFeatures = append(usableFeatures, f.Name)
 	}
 
 	n.supportedFeatures = usableFeatures
-	return nil
-}
-
-func (n *NodeLabeller) loadHostCapabilities() error {
-	capsFile := filepath.Join(n.volumePath, "capabilities.xml")
-	n.capabilities = &api.Capabilities{}
-	err := n.getStructureFromXMLFile(capsFile, n.capabilities)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-// loadCPUInfo load info about all cpu models
-func (n *NodeLabeller) loadCPUInfo() error {
-	files, err := os.ReadDir(filepath.Join(n.volumePath, "cpu_map"))
-	if err != nil {
-		return err
-	}
-
-	models := make(map[string]cpuFeatures)
-	archPrefix, ok := util.DefaultArchitecturePrefix[runtime.GOARCH]
-	// Only arm64 and amd64 architectures are currently supported.
-	if !ok {
-		return fmt.Errorf("unsupported system architecture")
-	}
-	for _, f := range files {
-		fileName := f.Name()
-		if strings.HasPrefix(fileName, archPrefix) {
-			features, err := n.loadFeatures(fileName)
-			if err != nil {
-				return err
-			}
-			cpuName := strings.TrimSuffix(strings.TrimPrefix(fileName, archPrefix), ".xml")
-
-			models[cpuName] = features
-		}
-	}
-
-	n.cpuInfo.usableModels = models
 	return nil
 }
 
@@ -203,38 +168,19 @@ func (n *NodeLabeller) getDomCapabilities() (HostDomCapabilities, error) {
 		return hostDomCapabilities, err
 	}
 
-	if hostDomCapabilities.SEV.Supported == "yes" && hostDomCapabilities.SEV.MaxESGuests > 0 {
-		hostDomCapabilities.SEV.SupportedES = "yes"
+	if hostDomCapabilities.SEV.Supported == isSupported && hostDomCapabilities.SEV.MaxESGuests > 0 {
+		hostDomCapabilities.SEV.SupportedES = isSupported
+		if hostDomCapabilities.LaunchSecurity.Supported == isSupported && slices.Contains(hostDomCapabilities.LaunchSecurity.SecTypes.Values, "sev-snp") {
+			hostDomCapabilities.SEV.SupportedSNP = isSupported
+		} else {
+			hostDomCapabilities.SEV.SupportedSNP = isUnusable
+		}
 	} else {
-		hostDomCapabilities.SEV.SupportedES = "no"
+		hostDomCapabilities.SEV.SupportedES = isUnusable
+		hostDomCapabilities.SEV.SupportedSNP = isUnusable
 	}
 
 	return hostDomCapabilities, err
-}
-
-// LoadFeatures loads features for given cpu name
-func (n *NodeLabeller) loadFeatures(fileName string) (cpuFeatures, error) {
-	if fileName == "" {
-		return nil, fmt.Errorf("file name can't be empty")
-	}
-
-	cpuFeaturepath := getPathCPUFeatures(n.volumePath, fileName)
-	features := FeatureModel{}
-	err := n.getStructureFromXMLFile(cpuFeaturepath, &features)
-	if err != nil {
-		return nil, err
-	}
-
-	modelFeatures := cpuFeatures{}
-	for _, f := range features.Model.Features {
-		modelFeatures[f.Name] = true
-	}
-	return modelFeatures, nil
-}
-
-// getPathCPUFeatures creates path where folder with cpu models is
-func getPathCPUFeatures(volumePath string, name string) string {
-	return filepath.Join(volumePath, "cpu_map", name)
 }
 
 // GetStructureFromXMLFile load data from xml file and unmarshals them into given structure

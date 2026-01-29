@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2019 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -140,10 +140,7 @@ func podIsRunning(pod *k8sv1.Pod) bool {
 }
 
 func podHasNamePrefix(pod *k8sv1.Pod, namePrefix string) bool {
-	if strings.Contains(pod.Name, namePrefix) {
-		return true
-	}
-	return false
+	return strings.Contains(pod.Name, namePrefix)
 }
 
 func PodIsUpToDate(pod *k8sv1.Pod, kv *v1.KubeVirt) bool {

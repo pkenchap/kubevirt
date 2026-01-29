@@ -13,18 +13,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2018 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
 package webhooks
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-
-	"kubevirt.io/kubevirt/pkg/virt-config/deprecation"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -32,11 +31,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	"k8s.io/utils/pointer"
 
 	v1 "kubevirt.io/api/core/v1"
 
+	"kubevirt.io/kubevirt/pkg/pointer"
 	"kubevirt.io/kubevirt/pkg/testutils"
+	"kubevirt.io/kubevirt/pkg/virt-config/featuregate"
 )
 
 var _ = Describe("Validating KubeVirtUpdate Admitter", func() {
@@ -62,7 +62,7 @@ var _ = Describe("Validating KubeVirtUpdate Admitter", func() {
 			VirtualMachineInstanceProfile: &v1.VirtualMachineInstanceProfile{
 				CustomProfile: &v1.CustomProfile{
 					RuntimeDefaultProfile: true,
-					LocalhostProfile:      pointer.String("somethingNotImportant"),
+					LocalhostProfile:      pointer.P("somethingNotImportant"),
 				},
 			},
 		}, []string{vmProfileField.Child("customProfile", "runtimeDefaultProfile").String(), vmProfileField.Child("customProfile", "localhostProfile").String()}),
@@ -172,7 +172,7 @@ var _ = Describe("Validating KubeVirtUpdate Admitter", func() {
 			admitter = NewKubeVirtUpdateAdmitter(nil, clusterConfig)
 		})
 
-		admit := func(kubevirt v1.KubeVirt) *admissionv1.AdmissionResponse {
+		admit := func(ctx context.Context, kubevirt v1.KubeVirt) *admissionv1.AdmissionResponse {
 			kvBytes, err := json.Marshal(kubevirt)
 			Expect(err).ToNot(HaveOccurred())
 
@@ -188,7 +188,7 @@ var _ = Describe("Validating KubeVirtUpdate Admitter", func() {
 					Operation: admissionv1.Update,
 				},
 			}
-			return admitter.Admit(request)
+			return admitter.Admit(ctx, request)
 		}
 
 		const warn = true
@@ -206,7 +206,7 @@ var _ = Describe("Validating KubeVirtUpdate Admitter", func() {
 				},
 			}
 
-			response := admit(kvObject)
+			response := admit(context.Background(), kvObject)
 			Expect(response).NotTo(BeNil())
 			if shouldWarn {
 				Expect(response.Warnings).NotTo(BeEmpty())
@@ -241,7 +241,7 @@ var _ = Describe("Validating KubeVirtUpdate Admitter", func() {
 				},
 			}
 
-			response := admit(kvObject)
+			response := admit(context.Background(), kvObject)
 			Expect(response).NotTo(BeNil())
 			if shouldWarn {
 				Expect(response.Warnings).NotTo(BeEmpty())
@@ -298,15 +298,46 @@ var _ = Describe("Validating KubeVirtUpdate Admitter", func() {
 				},
 			}
 
-			Expect(admitter.Admit(request)).To(Equal(&admissionv1.AdmissionResponse{
+			Expect(admitter.Admit(context.Background(), request)).To(Equal(&admissionv1.AdmissionResponse{
 				Allowed: true,
 				Warnings: []string{
 					expectedWarning,
 				},
 			}))
 		},
-			Entry("with Passt", deprecation.PasstGate, "Passt network binding will be deprecated next release. Please refer to Kubevirt user guide for alternatives."),
-			Entry("with SRIOVLiveMigrationGate", deprecation.SRIOVLiveMigrationGate, "feature gate SRIOVLiveMigration is deprecated, therefore it can be safely removed and is redundant. For more info, please look at: https://github.com/kubevirt/kubevirt/blob/main/docs/deprecation.md"),
+			Entry("with LiveMigration", featuregate.LiveMigrationGate, fmt.Sprintf(featuregate.WarningPattern, featuregate.LiveMigrationGate, featuregate.GA)),
+			Entry("with SRIOVLiveMigration", featuregate.SRIOVLiveMigrationGate, fmt.Sprintf(featuregate.WarningPattern, featuregate.SRIOVLiveMigrationGate, featuregate.GA)),
+			Entry("with NonRoot", featuregate.NonRoot, fmt.Sprintf(featuregate.WarningPattern, featuregate.NonRoot, featuregate.GA)),
+			Entry("with PSA", featuregate.PSA, fmt.Sprintf(featuregate.WarningPattern, featuregate.PSA, featuregate.GA)),
+			Entry("with CPUNodeDiscoveryGate", featuregate.CPUNodeDiscoveryGate, fmt.Sprintf(featuregate.WarningPattern, featuregate.CPUNodeDiscoveryGate, featuregate.GA)),
+			Entry("with HotplugNICs", featuregate.HotplugNetworkIfacesGate, fmt.Sprintf(featuregate.WarningPattern, featuregate.HotplugNetworkIfacesGate, featuregate.GA)),
+			Entry("with Passt", featuregate.PasstGate, featuregate.PasstDiscontinueMessage),
+			Entry("with MacvtapGate", featuregate.MacvtapGate, featuregate.MacvtapDiscontinueMessage),
+			Entry("with ExperimentalVirtiofsSupport", featuregate.VirtIOFSGate, featuregate.VirtioFsFeatureGateDiscontinueMessage),
+			Entry("with DisableMediatedDevicesHandling", featuregate.DisableMediatedDevicesHandling, "DisableMDEVConfiguration has been deprecated since v1.8.0"),
+		)
+
+		DescribeTable("should raise warning when archConfig is set for ppc64le", func(shouldWarn bool, archConfig *v1.ArchConfiguration) {
+			kv := v1.KubeVirt{
+				Spec: v1.KubeVirtSpec{
+					Configuration: v1.KubeVirtConfiguration{
+						ArchitectureConfiguration: archConfig,
+					},
+				},
+			}
+
+			response := admit(context.Background(), kv)
+			Expect(response).NotTo(BeNil())
+
+			if shouldWarn {
+				Expect(response.Warnings).NotTo(BeEmpty())
+				Expect(response.Warnings).To(ContainElement("spec.configuration.architectureConfiguration.ppc64le is deprecated and no longer supported."))
+			} else {
+				Expect(response.Warnings).To(BeEmpty())
+			}
+		},
+			Entry("should warn when archConfig is set for ppc64le", true, &v1.ArchConfiguration{Ppc64le: &v1.ArchSpecificConfiguration{}}),
+			Entry("should not warn when archConfig is not set for ppc64le", false, &v1.ArchConfiguration{}),
 		)
 	})
 })

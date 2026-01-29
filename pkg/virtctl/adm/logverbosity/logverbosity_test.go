@@ -1,25 +1,25 @@
 package logverbosity_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 
-	jsonpatch "github.com/evanphx/json-patch"
-	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
+
+	jsonpatch "github.com/evanphx/json-patch"
+	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	"kubevirt.io/kubevirt/tests/clientcmd"
-
+	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
-	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1 "kubevirt.io/api/core/v1"
-
 	"kubevirt.io/kubevirt/pkg/virtctl/adm/logverbosity"
+	"kubevirt.io/kubevirt/pkg/virtctl/testing"
 )
 
 var _ = Describe("Log Verbosity", func() {
@@ -86,8 +86,8 @@ var _ = Describe("Log Verbosity", func() {
 		kubecli.MockKubevirtClientInstance.EXPECT().KubeVirt(kvs.Items[0].Namespace).Return(kvInterface).AnyTimes() // Get & Patch
 		kubecli.MockKubevirtClientInstance.EXPECT().KubeVirt(k8smetav1.NamespaceAll).Return(kvInterface).AnyTimes() // List
 
-		kvInterface.EXPECT().Patch(gomock.Any(), types.JSONPatchType, gomock.Any(), gomock.Any()).DoAndReturn(
-			func(name string, _ any, patchData []byte, _ any, _ ...any) (*v1.KubeVirt, error) {
+		kvInterface.EXPECT().Patch(context.Background(), gomock.Any(), types.JSONPatchType, gomock.Any(), gomock.Any()).DoAndReturn(
+			func(ctx context.Context, name string, _ any, patchData []byte, _ any, _ ...any) (*v1.KubeVirt, error) {
 				Expect(name).To(Equal(kvs.Items[0].Name))
 
 				patch, err := jsonpatch.DecodePatch(patchData)
@@ -115,22 +115,22 @@ var _ = Describe("Log Verbosity", func() {
 			})
 
 			It("should fail (not executing the command)", func() {
-				cmd := clientcmd.NewRepeatableVirtctlCommand("adm", "log-verbosity", "--all")
+				cmd := testing.NewRepeatableVirtctlCommand("adm", "log-verbosity", "--all")
 				Expect(cmd).NotTo(BeNil())
 			})
 		})
 
 		Context("detectInstallNamespaceAndName has en error", func() {
 			expectListError := func() {
-				kvInterface.EXPECT().List(gomock.Any()).DoAndReturn(
-					func(_ any) (*v1.KubeVirt, error) {
+				kvInterface.EXPECT().List(context.Background(), gomock.Any()).DoAndReturn(
+					func(ctx context.Context, _ any) (*v1.KubeVirt, error) {
 						return nil, errors.New("List error")
 					}).AnyTimes()
 			}
 
 			It("should fail", func() {
 				expectListError() // simulate something like no permission to access the namespace
-				cmd := clientcmd.NewRepeatableVirtctlCommand("adm", "log-verbosity", "--all")
+				cmd := testing.NewRepeatableVirtctlCommand("adm", "log-verbosity", "--all")
 				err := cmd()
 				Expect(err).NotTo(Succeed())
 				Expect(err).To(MatchError(ContainSubstring("could not list KubeVirt CRs across all namespaces: List error")))
@@ -139,12 +139,12 @@ var _ = Describe("Log Verbosity", func() {
 
 		Context("Get function has an error", func() {
 			BeforeEach(func() {
-				kvInterface.EXPECT().List(gomock.Any()).Return(kvs, nil).AnyTimes()
+				kvInterface.EXPECT().List(context.Background(), gomock.Any()).Return(kvs, nil).AnyTimes()
 			})
 
 			expectGetError := func() {
-				kvInterface.EXPECT().Get(gomock.Any(), gomock.Any()).DoAndReturn(
-					func(name string, _ any) (*v1.KubeVirt, error) {
+				kvInterface.EXPECT().Get(context.Background(), gomock.Any(), gomock.Any()).DoAndReturn(
+					func(ctx context.Context, name string, _ any) (*v1.KubeVirt, error) {
 						Expect(name).To(Equal(kvs.Items[0].Name))
 						return nil, errors.New("Get error")
 					}).AnyTimes()
@@ -152,7 +152,7 @@ var _ = Describe("Log Verbosity", func() {
 
 			It("should fail", func() {
 				expectGetError() // for some reason, Get function returns an error
-				cmd := clientcmd.NewRepeatableVirtctlCommand("adm", "log-verbosity", "--all")
+				cmd := testing.NewRepeatableVirtctlCommand("adm", "log-verbosity", "--all")
 				err := cmd()
 				Expect(err).NotTo(Succeed())
 				Expect(err).To(MatchError(ContainSubstring("Get error")))
@@ -166,12 +166,12 @@ var _ = Describe("Log Verbosity", func() {
 			kvs = kubecli.NewKubeVirtList(*kv)
 
 			kubecli.MockKubevirtClientInstance.EXPECT().KubeVirt(kvs.Items[0].Namespace).Return(kvInterface).AnyTimes() // Get & Patch
-			kvInterface.EXPECT().List(gomock.Any()).Return(kvs, nil).AnyTimes()
+			kvInterface.EXPECT().List(context.Background(), gomock.Any()).Return(kvs, nil).AnyTimes()
 		})
 
 		expectGetKv := func() {
-			kvInterface.EXPECT().Get(gomock.Any(), gomock.Any()).DoAndReturn(
-				func(name string, _ any) (*v1.KubeVirt, error) {
+			kvInterface.EXPECT().Get(context.Background(), gomock.Any(), gomock.Any()).DoAndReturn(
+				func(ctx context.Context, name string, _ any) (*v1.KubeVirt, error) {
 					Expect(name).To(Equal(kvs.Items[0].Name))
 					return &kvs.Items[0], nil
 				}).AnyTimes()
@@ -179,7 +179,7 @@ var _ = Describe("Log Verbosity", func() {
 
 		It("show: should succeed", func() {
 			expectGetKv()
-			bytes, err := clientcmd.NewRepeatableVirtctlCommandWithOut("adm", "log-verbosity", "--all")()
+			bytes, err := testing.NewRepeatableVirtctlCommandWithOut("adm", "log-verbosity", "--all")()
 			Expect(err).To(Succeed())
 			output := []uint{2, 2, 2, 2, 2}
 			message := createOutputMessage(output)
@@ -188,7 +188,7 @@ var _ = Describe("Log Verbosity", func() {
 
 		It("set: should succeed", func() {
 			expectGetKv()
-			cmd := clientcmd.NewRepeatableVirtctlCommand("adm", "log-verbosity", "--all=7")
+			cmd := testing.NewRepeatableVirtctlCommand("adm", "log-verbosity", "--all=7")
 			Expect(cmd()).To(Succeed())
 			output := []uint{7, 7, 7, 7, 7}
 			expectAllComponentVerbosity(kv, output)
@@ -202,7 +202,7 @@ var _ = Describe("Log Verbosity", func() {
 
 		Context("with empty set of flags", func() {
 			It("should fail (return help)", func() {
-				cmd := clientcmd.NewRepeatableVirtctlCommand("adm", "log-verbosity")
+				cmd := testing.NewRepeatableVirtctlCommand("adm", "log-verbosity")
 				err := cmd()
 				Expect(err).NotTo(Succeed())
 				Expect(err).To(MatchError(ContainSubstring("no flag specified - expecting at least one flag")))
@@ -211,7 +211,7 @@ var _ = Describe("Log Verbosity", func() {
 
 		DescribeTable("should fail handled by the CLI package", func(args ...string) {
 			argStr := strings.Join(args, ",")
-			cmd := clientcmd.NewRepeatableVirtctlCommand("adm", "log-verbosity", argStr)
+			cmd := testing.NewRepeatableVirtctlCommand("adm", "log-verbosity", argStr)
 			Expect(cmd()).NotTo(Succeed())
 		},
 			Entry("reset and all coexist", "--reset", "--all=3"),
@@ -224,7 +224,7 @@ var _ = Describe("Log Verbosity", func() {
 		DescribeTable("should fail handled by error handler", func(output string, args ...string) {
 			commandAndArgs := []string{"adm", "log-verbosity"}
 			commandAndArgs = append(commandAndArgs, args...)
-			_, err := clientcmd.NewRepeatableVirtctlCommandWithOut(commandAndArgs...)()
+			_, err := testing.NewRepeatableVirtctlCommandWithOut(commandAndArgs...)()
 			Expect(err).NotTo(Succeed())
 
 			Expect(err).To(MatchError(ContainSubstring(output)))
@@ -248,7 +248,7 @@ var _ = Describe("Log Verbosity", func() {
 		Describe("set operation", func() {
 			Context("reset", func() {
 				It("do nothing", func() {
-					cmd := clientcmd.NewRepeatableVirtctlCommand("adm", "log-verbosity", "--reset")
+					cmd := testing.NewRepeatableVirtctlCommand("adm", "log-verbosity", "--reset")
 					Expect(cmd()).To(Succeed())
 					Expect(kv.Spec.Configuration.DeveloperConfiguration).To(BeNil())
 				})
@@ -273,7 +273,7 @@ var _ = Describe("Log Verbosity", func() {
 		Describe("set operation", func() {
 			Context("reset", func() {
 				It("do nothing", func() {
-					cmd := clientcmd.NewRepeatableVirtctlCommand("adm", "log-verbosity", "--reset")
+					cmd := testing.NewRepeatableVirtctlCommand("adm", "log-verbosity", "--reset")
 					Expect(cmd()).To(Succeed())
 					Expect(kv.Spec.Configuration.DeveloperConfiguration.LogVerbosity).To(BeNil())
 				})
@@ -345,7 +345,6 @@ var _ = Describe("Log Verbosity", func() {
 			)
 		})
 	})
-
 })
 
 func expectAllComponentVerbosity(kv *v1.KubeVirt, output []uint) {
@@ -359,7 +358,7 @@ func expectAllComponentVerbosity(kv *v1.KubeVirt, output []uint) {
 // create an expected output message
 func createOutputMessage(output []uint) *string {
 	var message string
-	var components = []string{"virt-api", "virt-controller", "virt-handler", "virt-launcher", "virt-operator"}
+	components := []string{"virt-api", "virt-controller", "virt-handler", "virt-launcher", "virt-operator"}
 	for component := 0; component < len(components); component++ {
 		if output[component] == logverbosity.NoFlag {
 			continue
@@ -392,14 +391,14 @@ func NewKubeVirtWithoutDeveloperConfiguration(namespace, name string) *v1.KubeVi
 }
 
 func commonSetup(kvInterface *kubecli.MockKubeVirtInterface, kvs *v1.KubeVirtList) {
-	kvInterface.EXPECT().List(gomock.Any()).Return(kvs, nil).AnyTimes()
-	kvInterface.EXPECT().Get(kvs.Items[0].Name, gomock.Any()).Return(&kvs.Items[0], nil).AnyTimes()
+	kvInterface.EXPECT().List(context.Background(), gomock.Any()).Return(kvs, nil).AnyTimes()
+	kvInterface.EXPECT().Get(context.Background(), kvs.Items[0].Name, gomock.Any()).Return(&kvs.Items[0], nil).AnyTimes()
 }
 
 func commonShowTest(output []uint, args ...string) {
 	commandAndArgs := []string{"adm", "log-verbosity"}
 	commandAndArgs = append(commandAndArgs, args...)
-	bytes, err := clientcmd.NewRepeatableVirtctlCommandWithOut(commandAndArgs...)()
+	bytes, err := testing.NewRepeatableVirtctlCommandWithOut(commandAndArgs...)()
 	Expect(err).To(Succeed())
 
 	message := createOutputMessage(output) // create an expected output message
@@ -409,6 +408,6 @@ func commonShowTest(output []uint, args ...string) {
 func commonSetCommand(args ...string) {
 	commandAndArgs := []string{"adm", "log-verbosity"}
 	commandAndArgs = append(commandAndArgs, args...)
-	cmd := clientcmd.NewRepeatableVirtctlCommand(commandAndArgs...)
+	cmd := testing.NewRepeatableVirtctlCommand(commandAndArgs...)
 	Expect(cmd()).To(Succeed())
 }

@@ -31,6 +31,7 @@ import (
 
 type mockCAManager struct {
 	caBundle []byte
+	cns      []string
 }
 
 type mockCertManager struct {
@@ -66,12 +67,16 @@ func (m *mockCAManager) GetCurrentRaw() ([]byte, error) {
 	return nil, fmt.Errorf("not implemented")
 }
 
+func (m *mockCAManager) GetCNs() ([]string, error) {
+	return m.cns, nil
+}
+
 var _ = Describe("TLS", func() {
 
-	var caManager kvtls.ClientCAManager
+	var caManager kvtls.KubernetesCAManager
 	var certmanagers map[string]certificate.Manager
 	var clusterConfig *virtconfig.ClusterConfig
-	var kubeVirtInformer cache.SharedIndexInformer
+	var kubeVirtStore cache.Store
 
 	BeforeEach(func() {
 		// Bootstrap TLS for kubevirt
@@ -108,11 +113,11 @@ var _ = Describe("TLS", func() {
 				},
 			},
 		}
-		clusterConfig, _, kubeVirtInformer = testutils.NewFakeClusterConfigUsingKV(kv)
+		clusterConfig, _, kubeVirtStore = testutils.NewFakeClusterConfigUsingKV(kv)
 	})
 
 	DescribeTable("on virt-handler with self-signed CA should", func(serverSecret, clientSecret string, errStr string) {
-		serverTLSConfig := kvtls.SetupTLSForVirtHandlerServer(caManager, certmanagers[serverSecret], false, clusterConfig)
+		serverTLSConfig := kvtls.SetupTLSForVirtHandlerServer(caManager, certmanagers[serverSecret], false, clusterConfig, []string{"virt-handler", "migration"})
 		clientTLSConfig := kvtls.SetupTLSForVirtHandlerClients(caManager, certmanagers[clientSecret], false)
 		srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintln(w, "hello")
@@ -135,6 +140,12 @@ var _ = Describe("TLS", func() {
 		Expect(strings.TrimSpace(string(body))).To(Equal("hello"))
 	},
 		Entry(
+			"connect with migration certificate",
+			components.VirtHandlerServerCertSecretName,
+			components.VirtHandlerMigrationClientCertSecretName,
+			"",
+		),
+		Entry(
 			"connect with proper certificates",
 			components.VirtHandlerServerCertSecretName,
 			components.VirtHandlerCertSecretName,
@@ -155,7 +166,7 @@ var _ = Describe("TLS", func() {
 	)
 
 	DescribeTable("on virt-handler with externally-managed certificates should", func(serverSecret, clientSecret string, errStr string) {
-		serverTLSConfig := kvtls.SetupTLSForVirtHandlerServer(caManager, certmanagers[serverSecret], true, clusterConfig)
+		serverTLSConfig := kvtls.SetupTLSForVirtHandlerServer(caManager, certmanagers[serverSecret], true, clusterConfig, []string{"virt-handler"})
 		clientTLSConfig := kvtls.SetupTLSForVirtHandlerClients(caManager, certmanagers[clientSecret], true)
 		srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintln(w, "hello")
@@ -216,11 +227,12 @@ var _ = Describe("TLS", func() {
 			return kvtls.SetupPromTLS(certmanagers[components.VirtHandlerServerCertSecretName], clusterConfig)
 		}),
 		Entry("to exportproxy endpoints", func() *tls.Config {
-			return kvtls.SetupExportProxyTLS(certmanagers[components.VirtHandlerServerCertSecretName], kubeVirtInformer)
+			return kvtls.SetupExportProxyTLS(certmanagers[components.VirtHandlerServerCertSecretName], kubeVirtStore)
 		}),
 	)
 
-	DescribeTable("should verify self-signed client and server certificates", func(serverSecret, clientSecret string, errStr string) {
+	DescribeTable("should verify self-signed client and server certificates", func(serverSecret, clientSecret, errStr string, cns []string) {
+		caManager.(*mockCAManager).cns = cns
 		serverTLSConfig := kvtls.SetupTLSWithCertManager(caManager, certmanagers[serverSecret], tls.RequireAndVerifyClientCert, clusterConfig)
 		clientTLSConfig := kvtls.SetupTLSForVirtHandlerClients(caManager, certmanagers[clientSecret], false)
 		srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -248,18 +260,35 @@ var _ = Describe("TLS", func() {
 			components.VirtHandlerServerCertSecretName,
 			components.VirtHandlerCertSecretName,
 			"",
+			[]string{"kubevirt.io:system:client:virt-handler"},
+		),
+		Entry(
+			"connect with proper certificates with no CN auth",
+			components.VirtHandlerServerCertSecretName,
+			components.VirtHandlerCertSecretName,
+			"",
+			[]string{},
+		),
+		Entry(
+			"fail if client uses an invalid certificates (CN)",
+			components.VirtHandlerServerCertSecretName,
+			components.VirtHandlerCertSecretName,
+			"remote error: tls: bad certificate",
+			[]string{"kubevirt.io:system:clientv2:virt-handler"},
 		),
 		Entry(
 			"fail if client uses an invalid certificate",
 			components.VirtHandlerServerCertSecretName,
 			components.VirtHandlerServerCertSecretName,
 			"remote error: tls: bad certificate",
+			[]string{"kubevirt.io:system:client:virt-handler"},
 		),
 		Entry(
 			"fail if server uses an invalid certificate",
 			components.VirtHandlerCertSecretName,
 			components.VirtHandlerCertSecretName,
 			"x509: certificate specifies an incompatible key usage",
+			[]string{"kubevirt.io:system:client:virt-handler"},
 		),
 	)
 
@@ -331,7 +360,7 @@ var _ = Describe("TLS", func() {
 		kvConfig.Spec.Configuration.TLSConfiguration = &v12.TLSConfiguration{
 			MinTLSVersion: "VersionTLS13",
 		}
-		testutils.UpdateFakeKubeVirtClusterConfig(kubeVirtInformer, kvConfig)
+		testutils.UpdateFakeKubeVirtClusterConfig(kubeVirtStore, kvConfig)
 		client = &http.Client{Transport: &http.Transport{TLSClientConfig: clientTLSConfig}}
 		resp, err = client.Get(srv.URL)
 		Expect(err).To(HaveOccurred())
@@ -339,7 +368,7 @@ var _ = Describe("TLS", func() {
 	},
 		Entry("on virt-handler",
 			func() *tls.Config {
-				return kvtls.SetupTLSForVirtHandlerServer(caManager, certmanagers[components.VirtHandlerServerCertSecretName], false, clusterConfig)
+				return kvtls.SetupTLSForVirtHandlerServer(caManager, certmanagers[components.VirtHandlerServerCertSecretName], false, clusterConfig, []string{"virt-handler"})
 			},
 
 			func() *tls.Config {
@@ -356,7 +385,7 @@ var _ = Describe("TLS", func() {
 		),
 		Entry("on exportproxy endpoint",
 			func() *tls.Config {
-				return kvtls.SetupExportProxyTLS(certmanagers[components.VirtHandlerServerCertSecretName], kubeVirtInformer)
+				return kvtls.SetupExportProxyTLS(certmanagers[components.VirtHandlerServerCertSecretName], kubeVirtStore)
 			},
 			func() *tls.Config {
 				return &tls.Config{InsecureSkipVerify: true}

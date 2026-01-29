@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2017 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -25,21 +25,23 @@ import (
 	. "github.com/onsi/gomega"
 
 	"kubevirt.io/kubevirt/tests/decorators"
+	"kubevirt.io/kubevirt/tests/libvmops"
 
 	"kubevirt.io/kubevirt/tests/framework/checks"
 
 	v1 "kubevirt.io/api/core/v1"
 
-	"kubevirt.io/kubevirt/tests"
+	"kubevirt.io/kubevirt/pkg/libvmi"
+
 	"kubevirt.io/kubevirt/tests/console"
-	"kubevirt.io/kubevirt/tests/libvmi"
+	"kubevirt.io/kubevirt/tests/libvmifact"
 )
 
 var _ = Describe("[rfe_id:151][crit:high][vendor:cnv-qe@redhat.com][level:component][sig-compute]IgnitionData", decorators.SigCompute, func() {
 
 	BeforeEach(func() {
 		if !checks.HasFeature("ExperimentalIgnitionSupport") {
-			Skip("ExperimentalIgnitionSupport feature gate is not enabled in kubevirt-config")
+			Fail("ExperimentalIgnitionSupport feature gate is not enabled")
 		}
 	})
 
@@ -48,9 +50,9 @@ var _ = Describe("[rfe_id:151][crit:high][vendor:cnv-qe@redhat.com][level:compon
 			Context("with injected data", func() {
 				It("[test_id:1616]should have injected data under firmware directory", func() {
 					ignitionData := "ignition injected"
-					vmi := tests.RunVMIAndExpectLaunch(
-						libvmi.NewFedora(libvmi.WithAnnotation(v1.IgnitionAnnotation, ignitionData)),
-						240)
+					vmi := libvmops.RunVMIAndExpectLaunch(
+						libvmifact.NewFedora(libvmi.WithAnnotation(v1.IgnitionAnnotation, ignitionData)),
+						libvmops.StartupTimeoutSecondsHuge)
 
 					Expect(console.LoginToFedora(vmi)).To(Succeed())
 					Expect(console.SafeExpectBatch(vmi, []expect.Batcher{

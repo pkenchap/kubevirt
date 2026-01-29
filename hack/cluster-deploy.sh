@@ -21,12 +21,10 @@ set -ex pipefail
 
 DOCKER_TAG=${DOCKER_TAG:-devel}
 KUBEVIRT_DEPLOY_CDI=${KUBEVIRT_DEPLOY_CDI:-true}
-CDI_DV_GC_DEFAULT=-1
-CDI_DV_GC=${CDI_DV_GC:--1}
 
 source hack/common.sh
 # shellcheck disable=SC1090
-source cluster-up/cluster/$KUBEVIRT_PROVIDER/provider.sh
+source kubevirtci/cluster-up/cluster/$KUBEVIRT_PROVIDER/provider.sh
 source hack/config.sh
 
 function dump_kubevirt() {
@@ -51,16 +49,9 @@ function _ensure_cdi_deployment() {
     _kubectl patch cdi ${cdi_namespace} --type merge -p '{"spec": {"config": {"insecureRegistries": [ "registry:5000", "fakeregistry:5000" ]}}}'
 
     # Configure uploadproxy override for virtctl imageupload
-    host_port=$(${KUBEVIRT_PATH}cluster-up/cli.sh ports uploadproxy | xargs)
+    host_port=$(${KUBEVIRT_PATH}kubevirtci/cluster-up/cli.sh ports uploadproxy | xargs)
     override="https://127.0.0.1:$host_port"
     _kubectl patch cdi ${cdi_namespace} --type merge -p '{"spec": {"config": {"uploadProxyURLOverride": "'"$override"'"}}}'
-
-    # Configure DataVolume garbage collection
-    if [[ $CDI_DV_GC != $CDI_DV_GC_DEFAULT ]]; then
-        _kubectl patch cdi ${cdi_namespace} --type merge -p '{"spec": {"config": {"dataVolumeTTLSeconds": '"$CDI_DV_GC"'}}}'
-    fi
-
-    _kubectl patch cdi ${cdi_namespace} --type merge -p '{"spec":{"config":{"podResourceRequirements": {"limits": {"cpu": "750m", "memory": "1Gi"}, "requests": {"cpu": "100m", "memory": "60M"}}}}}'
 }
 
 function configure_prometheus() {
@@ -96,6 +87,11 @@ if [[ "$KUBEVIRT_DEPLOY_CDI" != "false" ]] && [[ ${ARCHITECTURE} != *aarch64 ]];
     _ensure_cdi_deployment
 fi
 
+if [ "${KUBEVIRT_DEPLOY_NP}" == "true" ]; then
+    _kubectl apply -f hack/cluster-services-np.yaml
+    _kubectl apply -f ${MANIFESTS_OUT_DIR}/release/kubevirt-network-policies.yaml
+fi
+
 # Deploy kubevirt operator
 _kubectl apply -f ${MANIFESTS_OUT_DIR}/release/kubevirt-operator.yaml
 
@@ -120,7 +116,7 @@ _kubectl create -n ${namespace} -f ${MANIFESTS_OUT_DIR}/release/kubevirt-cr.yaml
 
 # Ensure the KubeVirt CR is created
 count=0
-until _kubectl -n kubevirt get kv kubevirt; do
+until _kubectl -n ${namespace} get kv kubevirt; do
     ((count++)) && ((count == 30)) && echo "KubeVirt CR not found" && exit 1
     echo "waiting for KubeVirt CR"
     sleep 1
@@ -128,7 +124,7 @@ done
 
 # Wait until KubeVirt is ready
 count=0
-until _kubectl wait -n kubevirt kv kubevirt --for condition=Available --timeout 5m; do
+until _kubectl wait -n ${namespace} kv kubevirt --for condition=Available --timeout 5m; do
     ((count++)) && ((count == 5)) && echo "KubeVirt not ready in time" && exit 1
     echo "Error waiting for KubeVirt to be Available, sleeping 1m and retrying"
     sleep 1m

@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2021 Red Hat, Inc.
+ * Copyright The KubeVirt Authors.
  *
  */
 
@@ -22,15 +22,12 @@ package network
 import (
 	"context"
 	"fmt"
-	"os"
-	"strings"
 	"time"
 
-	expect "github.com/google/goexpect"
-	k8snetworkplumbingwgv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	expect "github.com/google/goexpect"
 	batchv1 "k8s.io/api/batch/v1"
 	k8sv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -40,26 +37,29 @@ import (
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 
+	"kubevirt.io/kubevirt/pkg/libvmi"
+	libvmici "kubevirt.io/kubevirt/pkg/libvmi/cloudinit"
 	"kubevirt.io/kubevirt/pkg/network/istio"
-	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
-
-	"kubevirt.io/kubevirt/tests"
 	"kubevirt.io/kubevirt/tests/console"
 	"kubevirt.io/kubevirt/tests/decorators"
-	"kubevirt.io/kubevirt/tests/framework/checks"
 	"kubevirt.io/kubevirt/tests/framework/kubevirt"
-	"kubevirt.io/kubevirt/tests/libkvconfig"
+	"kubevirt.io/kubevirt/tests/libkubevirt/config"
 	"kubevirt.io/kubevirt/tests/libmigration"
+	"kubevirt.io/kubevirt/tests/libnamespace"
 	"kubevirt.io/kubevirt/tests/libnet"
+	"kubevirt.io/kubevirt/tests/libnet/cloudinit"
 	"kubevirt.io/kubevirt/tests/libnet/job"
 	netservice "kubevirt.io/kubevirt/tests/libnet/service"
-	"kubevirt.io/kubevirt/tests/libvmi"
+	"kubevirt.io/kubevirt/tests/libnet/vmnetserver"
+	"kubevirt.io/kubevirt/tests/libpod"
+	"kubevirt.io/kubevirt/tests/libregistry"
+	"kubevirt.io/kubevirt/tests/libvmifact"
+	"kubevirt.io/kubevirt/tests/libvmops"
 	"kubevirt.io/kubevirt/tests/libwait"
 	"kubevirt.io/kubevirt/tests/testsuite"
 )
 
 const (
-	istioDeployedEnvVariable  = "KUBEVIRT_DEPLOY_ISTIO"
 	vmiAppSelectorKey         = "app"
 	vmiAppSelectorValue       = "istio-vmi-app"
 	vmiServerAppSelectorValue = "vmi-server-app"
@@ -108,19 +108,13 @@ var istioTests = func(vmType VmType) {
 		namespace = testsuite.GetTestNamespace(nil)
 	})
 
-	BeforeEach(func() {
-		if !istioServiceMeshDeployed() {
-			Skip("Istio service mesh is required for service-mesh tests to run")
-		}
-	})
-
 	Context("Virtual Machine with istio supported interface", func() {
 		createJobCheckingVMIReachability := func(serverVMI *v1.VirtualMachineInstance, targetPort int) (*batchv1.Job, error) {
 			By("Starting HTTP Server")
-			tests.StartPythonHttpServer(vmi, targetPort)
+			vmnetserver.StartPythonHTTPServer(vmi, targetPort)
 
 			By("Getting back the VMI IP")
-			vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, &metav1.GetOptions{})
+			vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, metav1.GetOptions{})
 			Expect(err).ShouldNot(HaveOccurred())
 			vmiIP := libnet.GetVmiPrimaryIPByFamily(vmi, k8sv1.IPv4Protocol)
 
@@ -132,17 +126,16 @@ var istioTests = func(vmType VmType) {
 			)
 		}
 		BeforeEach(func() {
-			virtClient = kubevirt.Client()
-
 			libnet.SkipWhenClusterNotSupportIpv4()
 
 			By("Create NetworkAttachmentDefinition")
-			nad := generateIstioCNINetworkAttachmentDefinition()
-			_, err = virtClient.NetworkClient().K8sCniCncfIoV1().NetworkAttachmentDefinitions(namespace).Create(context.TODO(), nad, metav1.CreateOptions{})
+			nad := libnet.NewNetAttachDef("istio-cni", "")
+			_, err = libnet.CreateNetAttachDef(context.Background(), namespace, nad)
 			Expect(err).ShouldNot(HaveOccurred())
 
 			By("Creating k8s service for the VMI")
 
+			virtClient = kubevirt.Client()
 			serviceName := fmt.Sprintf("%s-service", vmiAppSelectorValue)
 			service := netservice.BuildSpec(serviceName, svcDeclaredTestPort, svcDeclaredTestPort, vmiAppSelectorKey, vmiAppSelectorValue)
 			_, err = virtClient.CoreV1().Services(namespace).Create(context.Background(), service, metav1.CreateOptions{})
@@ -150,24 +143,22 @@ var istioTests = func(vmType VmType) {
 		})
 		JustBeforeEach(func() {
 			// Enable sidecar injection by setting the namespace label
-			Expect(libnet.AddLabelToNamespace(virtClient, namespace, istioInjectNamespaceLabel, "enabled")).ShouldNot(HaveOccurred())
+			Expect(libnamespace.AddLabelToNamespace(virtClient, namespace, istioInjectNamespaceLabel, "enabled")).ShouldNot(HaveOccurred())
 			defer func() {
-				Expect(libnet.RemoveLabelFromNamespace(virtClient, namespace, istioInjectNamespaceLabel)).ShouldNot(HaveOccurred())
+				Expect(libnamespace.RemoveLabelFromNamespace(virtClient, namespace, istioInjectNamespaceLabel)).ShouldNot(HaveOccurred())
 			}()
 
 			By("Creating VMI")
 			vmi, err = newVMIWithIstioSidecar(vmiPorts, vmType)
 			Expect(err).ShouldNot(HaveOccurred())
-			vmi, err = virtClient.VirtualMachineInstance(namespace).Create(context.Background(), vmi)
+			vmi, err = virtClient.VirtualMachineInstance(namespace).Create(context.Background(), vmi, metav1.CreateOptions{})
 			Expect(err).ShouldNot(HaveOccurred())
 
 			By("Waiting for VMI to be ready")
 			libwait.WaitUntilVMIReady(vmi, console.LoginToAlpine)
 		})
-		Describe("Live Migration", decorators.SigComputeMigrations, func() {
-			var (
-				sourcePodName string
-			)
+		Describe("Live Migration", decorators.RequiresTwoSchedulableNodes, func() {
+			var sourcePodName string
 			allContainersCompleted := func(podName string) error {
 				pod, err := virtClient.CoreV1().Pods(vmi.Namespace).Get(context.TODO(), podName, metav1.GetOptions{})
 				if err != nil {
@@ -180,15 +171,12 @@ var istioTests = func(vmType VmType) {
 				}
 				return nil
 			}
-			BeforeEach(func() {
-				checks.SkipIfMigrationIsNotPossible()
-				if vmType == Passt {
-					Skip("passt doesn't support live migration.")
-				}
-			})
 			JustBeforeEach(func() {
-				sourcePodName = tests.GetVmPodName(virtClient, vmi)
-				migration := tests.NewRandomMigration(vmi.Name, vmi.Namespace)
+				sourcePod, err := libpod.GetPodByVirtualMachineInstance(vmi, vmi.Namespace)
+				Expect(err).ToNot(HaveOccurred())
+				sourcePodName = sourcePod.Name
+
+				migration := libmigration.New(vmi.Name, vmi.Namespace)
 				libmigration.RunMigrationAndExpectToCompleteWithDefaultTimeout(virtClient, migration)
 			})
 			It("All containers should complete in source virt-launcher pod after migration", func() {
@@ -205,21 +193,23 @@ var istioTests = func(vmType VmType) {
 			}
 			checkSSHConnection := func(vmi *v1.VirtualMachineInstance, vmiAddress string) error {
 				user := "doesntmatter"
-				return console.SafeExpectBatch(vmi, []expect.Batcher{
+				// Can't use SafeExpectBatch here because the last command never returns to prompt
+				return console.ExpectBatch(vmi, []expect.Batcher{
 					&expect.BSnd{S: "\n"},
 					&expect.BExp{R: console.PromptExpression},
 					&expect.BSnd{S: sshCommand(user, vmiAddress)},
 					&expect.BExp{R: fmt.Sprintf("%s@%s's password: ", user, vmiAddress)},
-				}, 60)
+				}, 60*time.Second)
 			}
 
 			BeforeEach(func() {
-				bastionVMI = libvmi.NewCirros(
+
+				bastionVMI = libvmifact.NewCirros(
 					libvmi.WithNetwork(v1.DefaultPodNetwork()),
 					libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding([]v1.Port{}...)),
 				)
 
-				bastionVMI, err = virtClient.VirtualMachineInstance(namespace).Create(context.Background(), bastionVMI)
+				bastionVMI, err = virtClient.VirtualMachineInstance(namespace).Create(context.Background(), bastionVMI, metav1.CreateOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				bastionVMI = libwait.WaitUntilVMIReady(bastionVMI, console.LoginToCirros)
 			})
@@ -229,7 +219,7 @@ var istioTests = func(vmType VmType) {
 				})
 				It("should ssh to VMI with Istio proxy", func() {
 					By("Getting the VMI IP")
-					vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, &metav1.GetOptions{})
+					vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, metav1.GetOptions{})
 					Expect(err).ShouldNot(HaveOccurred())
 					vmiIP := libnet.GetVmiPrimaryIPByFamily(vmi, k8sv1.IPv4Protocol)
 
@@ -244,7 +234,7 @@ var istioTests = func(vmType VmType) {
 				})
 				It("should ssh to VMI with Istio proxy", func() {
 					By("Getting the VMI IP")
-					vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, &metav1.GetOptions{})
+					vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, metav1.GetOptions{})
 					Expect(err).ShouldNot(HaveOccurred())
 					vmiIP := libnet.GetVmiPrimaryIPByFamily(vmi, k8sv1.IPv4Protocol)
 
@@ -341,18 +331,18 @@ var istioTests = func(vmType VmType) {
 			}
 
 			BeforeEach(func() {
-				networkData := libnet.CreateDefaultCloudInitNetworkData()
+				networkData := cloudinit.CreateDefaultCloudInitNetworkData()
 
-				serverVMI = libvmi.NewAlpineWithTestTooling(
+				serverVMI = libvmifact.NewAlpineWithTestTooling(
 					libvmi.WithNetwork(v1.DefaultPodNetwork()),
 					libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding([]v1.Port{}...)),
 					libvmi.WithLabel("version", "v1"),
 					libvmi.WithLabel(vmiAppSelectorKey, vmiServerAppSelectorValue),
-					libvmi.WithCloudInitNoCloudNetworkData(networkData),
+					libvmi.WithCloudInitNoCloud(libvmici.WithNoCloudNetworkData(networkData)),
 					libvmi.WithNamespace(namespace),
 				)
 				By("Starting VirtualMachineInstance")
-				serverVMI = tests.RunVMIAndExpectLaunch(serverVMI, 240)
+				serverVMI = libvmops.RunVMIAndExpectLaunch(serverVMI, libvmops.StartupTimeoutSecondsHuge)
 
 				serverVMIService := netservice.BuildSpec("vmi-server", vmiServerTestPort, vmiServerTestPort, vmiAppSelectorKey, vmiServerAppSelectorValue)
 				_, err = virtClient.CoreV1().Services(namespace).Create(context.Background(), serverVMIService, metav1.CreateOptions{})
@@ -360,7 +350,7 @@ var istioTests = func(vmType VmType) {
 
 				By("Starting HTTP Server")
 				Expect(console.LoginToAlpine(serverVMI)).To(Succeed())
-				tests.StartPythonHttpServer(serverVMI, vmiServerTestPort)
+				vmnetserver.StartPythonHTTPServer(serverVMI, vmiServerTestPort)
 
 				By("Creating Istio VirtualService")
 				virtualServicesRes := schema.GroupVersionResource{Group: networkingIstioIO, Version: istioApiVersion, Resource: "virtualservices"}
@@ -384,13 +374,12 @@ var istioTests = func(vmType VmType) {
 				ingressGatewayService, err := virtClient.CoreV1().Services(istioNamespace).Get(context.TODO(), "istio-ingressgateway", metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				ingressGatewayServiceIP = ingressGatewayService.Spec.ClusterIP
-
 			})
 
-			checkHTTPServiceReturnCode := func(ingressGatewayAddress string, returnCode string) error {
+			checkHTTPServiceReturnCode := func(ingressGatewayAddress, returnCode string) error {
 				return console.SafeExpectBatch(vmi, []expect.Batcher{
 					&expect.BSnd{S: "\n"},
-					&expect.BExp{R: console.PromptExpression},
+					&expect.BExp{R: ""},
 					&expect.BSnd{S: curlCommand(ingressGatewayAddress)},
 					&expect.BExp{R: returnCode},
 					&expect.BSnd{S: "echo $?\n"},
@@ -462,40 +451,38 @@ var istioTestsWithMasqueradeBinding = func() {
 }
 
 var istioTestsWithPasstBinding = func() {
-	BeforeEach(func() {
-		tests.EnableFeatureGate(virtconfig.NetworkBindingPlugingsGate)
-	})
+	const passtNetAttDefName = "netbindingpasst"
 
 	BeforeEach(func() {
 		const passtBindingName = "passt"
-		const passtSidecarImage = "registry:5000/kubevirt/network-passt-binding:devel"
+		passtSidecarImage := libregistry.GetUtilityImageFromRegistry("network-passt-binding")
 
-		err := libkvconfig.WithNetBindingPlugin(passtBindingName, v1.InterfaceBindingPlugin{
-			SidecarImage:                passtSidecarImage,
-			NetworkAttachmentDefinition: libnet.PasstNetAttDef,
-		})
+		err := config.RegisterKubevirtConfigChange(
+			config.WithNetBindingPluginIfNotPresent(passtBindingName, v1.InterfaceBindingPlugin{
+				SidecarImage:                passtSidecarImage,
+				NetworkAttachmentDefinition: passtNetAttDefName,
+				Migration:                   &v1.InterfaceBindingMigration{},
+			}),
+		)
 		Expect(err).NotTo(HaveOccurred())
 	})
 
 	BeforeEach(func() {
-		Expect(libnet.CreatePasstNetworkAttachmentDefinition(testsuite.GetTestNamespace(nil))).To(Succeed())
+		netAttachDef := libnet.NewPasstNetAttachDef(passtNetAttDefName)
+		_, err := libnet.CreateNetAttachDef(context.Background(), testsuite.GetTestNamespace(nil), netAttachDef)
+		Expect(err).NotTo(HaveOccurred())
 	})
 
 	istioTests(Passt)
 }
 
-var _ = SIGDescribe("[Serial] Istio with masquerade binding", decorators.Istio, Serial, istioTestsWithMasqueradeBinding)
+var _ = Describe(SIG(" Istio with masquerade binding", decorators.Istio, Serial, istioTestsWithMasqueradeBinding))
 
-var _ = SIGDescribe("[Serial] Istio with passt binding", decorators.Istio, decorators.NetCustomBindingPlugins, Serial, istioTestsWithPasstBinding)
-
-func istioServiceMeshDeployed() bool {
-	return strings.ToLower(os.Getenv(istioDeployedEnvVariable)) == "true"
-}
+var _ = Describe(SIG(" Istio with passt binding", decorators.Istio, decorators.NetCustomBindingPlugins, Serial, istioTestsWithPasstBinding))
 
 func newVMIWithIstioSidecar(ports []v1.Port, vmType VmType) (*v1.VirtualMachineInstance, error) {
 	if vmType == Masquerade {
 		return createMasqueradeVm(ports), nil
-
 	}
 	if vmType == Passt {
 		return createPasstVm(ports), nil
@@ -503,43 +490,32 @@ func newVMIWithIstioSidecar(ports []v1.Port, vmType VmType) (*v1.VirtualMachineI
 	return nil, nil
 }
 
+const enablePasswordAuth = "#cloud-config\nssh_pwauth: true\n"
+
 func createMasqueradeVm(ports []v1.Port) *v1.VirtualMachineInstance {
-	networkData := libnet.CreateDefaultCloudInitNetworkData()
-	vmi := libvmi.NewAlpineWithTestTooling(
+	networkData := cloudinit.CreateDefaultCloudInitNetworkData()
+	vmi := libvmifact.NewAlpineWithTestTooling(
 		libvmi.WithNetwork(v1.DefaultPodNetwork()),
 		libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding(ports...)),
 		libvmi.WithLabel(vmiAppSelectorKey, vmiAppSelectorValue),
-		libvmi.WithAnnotation(istio.ISTIO_INJECT_ANNOTATION, "true"),
-		libvmi.WithCloudInitNoCloudNetworkData(networkData),
-		libvmi.WithCloudInitNoCloudEncodedUserData(enablePasswordAuth()),
+		libvmi.WithAnnotation(istio.InjectSidecarAnnotation, "true"),
+		libvmi.WithCloudInitNoCloud(
+			libvmici.WithNoCloudNetworkData(networkData),
+			libvmici.WithNoCloudEncodedUserData(enablePasswordAuth),
+		),
 	)
 	return vmi
 }
 
 func createPasstVm(ports []v1.Port) *v1.VirtualMachineInstance {
-	vmi := libvmi.NewAlpineWithTestTooling(
+	vmi := libvmifact.NewAlpineWithTestTooling(
 		libvmi.WithNetwork(v1.DefaultPodNetwork()),
 		libvmi.WithInterface(libvmi.InterfaceWithPasstBindingPlugin(ports...)),
 		libvmi.WithLabel(vmiAppSelectorKey, vmiAppSelectorValue),
-		libvmi.WithAnnotation(istio.ISTIO_INJECT_ANNOTATION, "true"),
-		libvmi.WithCloudInitNoCloudEncodedUserData(enablePasswordAuth()),
+		libvmi.WithAnnotation(istio.InjectSidecarAnnotation, "true"),
+		libvmi.WithCloudInitNoCloud(libvmici.WithNoCloudEncodedUserData(enablePasswordAuth)),
 	)
 	return vmi
-}
-
-func enablePasswordAuth() string {
-	sedCmd := "sed -ri 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config"
-
-	return "#!/bin/sh\n" + sedCmd + "\n"
-}
-
-func generateIstioCNINetworkAttachmentDefinition() *k8snetworkplumbingwgv1.NetworkAttachmentDefinition {
-	return &k8snetworkplumbingwgv1.NetworkAttachmentDefinition{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "istio-cni",
-		},
-		Spec: k8snetworkplumbingwgv1.NetworkAttachmentDefinitionSpec{},
-	}
 }
 
 func generateStrictPeerAuthentication() *unstructured.Unstructured {

@@ -1,4 +1,7 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_oci//oci:defs.bzl", "oci_image")
+load("@rules_pkg//:pkg.bzl", "pkg_tar")
+load("//staging/src/kubevirt.io/client-go/version:def.bzl", "version_x_defs")
 
 go_library(
     name = "go_default_library",
@@ -10,7 +13,7 @@ go_library(
         "//pkg/controller:go_default_library",
         "//pkg/service:go_default_library",
         "//pkg/util/tls:go_default_library",
-        "//staging/src/kubevirt.io/api/export/v1alpha1:go_default_library",
+        "//staging/src/kubevirt.io/api/export/v1beta1:go_default_library",
         "//staging/src/kubevirt.io/client-go/kubecli:go_default_library",
         "//staging/src/kubevirt.io/client-go/log:go_default_library",
         "//staging/src/kubevirt.io/client-go/util:go_default_library",
@@ -21,8 +24,6 @@ go_library(
     ],
 )
 
-load("//vendor/kubevirt.io/client-go/version:def.bzl", "version_x_defs")
-
 go_binary(
     name = "virt-exportproxy",
     embed = [":go_default_library"],
@@ -31,28 +32,33 @@ go_binary(
     x_defs = version_x_defs(),
 )
 
-load(
-    "@io_bazel_rules_docker//container:container.bzl",
-    "container_image",
+pkg_tar(
+    name = "get-version",
+    srcs = ["//:get-version"],
+    package_dir = "/",
 )
 
-container_image(
+pkg_tar(
+    name = "virt-exportproxy-bin",
+    srcs = [":virt-exportproxy"],
+    package_dir = "/usr/bin",
+)
+
+oci_image(
     name = "version-container",
     base = "//:passwd-image",
-    directory = "/",
-    files = ["//:get-version"],
+    tars = [
+        ":get-version",
+    ],
 )
 
-container_image(
+oci_image(
     name = "virt-exportproxy-image",
-    architecture = select({
-        "@io_bazel_rules_go//go/platform:linux_arm64": "arm64",
-        "//conditions:default": "amd64",
-    }),
     base = ":version-container",
-    directory = "/usr/bin/",
     entrypoint = ["/usr/bin/virt-exportproxy"],
-    files = [":virt-exportproxy"],
+    tars = [
+        ":virt-exportproxy-bin",
+    ],
     user = "1001",
     visibility = ["//visibility:public"],
 )
