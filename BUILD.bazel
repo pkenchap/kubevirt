@@ -148,7 +148,7 @@ cc_library(
         # CentOS Stream 9 combinations (default)
         "//rpm:aarch64_cs9": "/rpm/libvirt-libs_aarch64_cs9/usr/include/",
         "//rpm:s390x_cs9": "/rpm/libvirt-libs_s390x_cs9/usr/include/",
-        "//rpm:ppc64le_cs9": "/rpm/libvirt-libs_ppc64le_cs9/usr/include/",
+        "//rpm:ppc64le_cs9": "/rpm/libvirt-libs_ppc64le_cs10/usr/include/",  # ldd cannot run cross-arch; cs9 redirects to cs10
         "//conditions:default": "/rpm/libvirt-libs_x86_64_cs9/usr/include/",
     }),
     visibility = ["//visibility:public"],
@@ -178,7 +178,7 @@ cc_library(
         # CentOS Stream 9 combinations (default)
         "//rpm:aarch64_cs9": "/rpm/libnbd-libs_aarch64_cs9/usr/include/",
         "//rpm:s390x_cs9": "/rpm/libnbd-libs_s390x_cs9/usr/include/",
-        "//rpm:ppc64le_cs9": "/rpm/libnbd-libs_ppc64le_cs9/usr/include/",
+        "//rpm:ppc64le_cs9": "/rpm/libnbd-libs_ppc64le_cs10/usr/include/",  # ldd cannot run cross-arch; cs9 redirects to cs10
         "//conditions:default": "/rpm/libnbd-libs_x86_64_cs9/usr/include/",
     }),
     visibility = ["//visibility:public"],
