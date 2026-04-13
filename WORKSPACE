@@ -198,6 +198,14 @@ http_file(
 )
 
 http_file(
+    name = "alpine_image_ppc64le",
+    sha256 = "f0ee46531aa7b897afa804b8fcc4a94e73143b4ce1a614e5c6a25b27a538d920",
+    urls = [
+        "https://dl-cdn.alpinelinux.org/alpine/v3.18/releases/ppc64le/alpine-standard-3.18.8-ppc64le.iso",
+    ],
+)
+
+http_file(
     name = "cirros_image",
     sha256 = "932fcae93574e242dc3d772d5235061747dfe537668443a1f0567d893614b464",
     urls = [
@@ -277,6 +285,8 @@ load(
 )
 
 gazelle_dependencies(go_sdk = "go_sdk")
+
+bazeldnf_dependencies()
 
 # Winrmcli dependencies
 go_repository(
@@ -373,6 +383,12 @@ oci_pull(
     image = "gcr.io/distroless/base-debian12",
 )
 
+oci_pull(
+    name = "go_image_base_ppc64le",
+    digest = "sha256:0e72bb83ef5a42644da031c5b11b97e1c9d74ed4322a5314a88db97fbacbc9d3",
+    image = "gcr.io/distroless/base-debian12",
+)
+
 # Pull fedora container-disk preconfigured with ci tooling
 # like stress and qemu guest agent pre-configured
 # TODO build fedora_with_test_tooling for multi-arch
@@ -395,6 +411,12 @@ oci_pull(
 )
 
 oci_pull(
+    name = "alpine_with_test_tooling_ppc64le",
+    digest = "PLACEHOLDER_ALPINE_DIGEST",
+    image = "quay.io/kubevirtci/alpine-with-test-tooling-container-disk",
+)
+
+oci_pull(
     name = "fedora_with_test_tooling_aarch64",
     digest = "sha256:3d5a2a95f7f9382dc6730073fe19a6b1bc668b424c362339c88c6a13dff2ef49",
     image = "quay.io/kubevirtci/fedora-with-test-tooling",
@@ -403,6 +425,12 @@ oci_pull(
 oci_pull(
     name = "fedora_with_test_tooling_s390x",
     digest = "sha256:3d9f468750d90845a81608ea13c85237ea295c6295c911a99dc5e0504c8bc05b",
+    image = "quay.io/kubevirtci/fedora-with-test-tooling",
+)
+
+oci_pull(
+    name = "fedora_with_test_tooling_ppc64le",
+    digest = "PLACEHOLDER_FEDORA_DIGEST",
     image = "quay.io/kubevirtci/fedora-with-test-tooling",
 )
 
@@ -458,6 +486,14 @@ http_archive(
     sha256 = "532cb951d4245265da645c8cce14033c19ea8f0d163c01e88f4153dae44e0f95",
     urls = [
         "https://storage.googleapis.com/kubevirt-prow/devel/release/kubevirt/libguestfs-appliance/libguestfs-appliance-1.54.0-qcow2-linux-5.14.0-575-centos9-s390x.tar.xz",
+    ],
+)
+
+http_archive(
+    name = "libguestfs-appliance-ppc64le",
+    sha256 = "PLACEHOLDER_LIBGUESTFS_SHA",
+    urls = [
+        "https://storage.googleapis.com/kubevirt-prow/devel/release/kubevirt/libguestfs-appliance/PLACEHOLDER_NOT_PUBLISHED_YET.tar.xz",
     ],
 )
 
