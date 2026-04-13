@@ -10,11 +10,11 @@ toolchain(
     name = "bazeldnf_ppc64le_toolchain",
     exec_compatible_with = [
         "@platforms//os:linux",
-        "@platforms//cpu:ppc",
+        "@platforms//cpu:x86_64",
     ],
     target_compatible_with = [
         "@platforms//os:linux",
-        "@platforms//cpu:ppc",
+        "@platforms//cpu:ppc64le",
     ],
     toolchain = ":bazeldnf_ppc64le_toolchain_impl",
     toolchain_type = "@bazeldnf//bazeldnf:toolchain_type",

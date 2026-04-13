@@ -20,7 +20,7 @@ The repository is configured to cross-compile ppc64le binaries on x86_64 build h
 2. **Bazel Platform Definition**
    - File: `bazel/platforms/BUILD`
    - Platform: `ppc64le-none-linux-gnu`
-   - Constraints: `@platforms//cpu:ppc`, `@platforms//os:linux`
+   - Constraints: `@platforms//cpu:ppc64le`, `@platforms//os:linux`
 
 3. **C++ Toolchains**
    - Location: `bazel/toolchain/ppc64le-none-linux-gnu/`
@@ -40,7 +40,7 @@ The repository is configured to cross-compile ppc64le binaries on x86_64 build h
 
 6. **Config Settings**
    - File: `rpm/centos_stream.bzl`
-   - Platform config: `linux_ppc64le` (uses `@platforms//cpu:ppc`)
+   - Platform config: `linux_ppc64le` (uses `@platforms//cpu:ppc64le`)
    - Compound settings: `ppc64le_cs9`, `ppc64le_cs10`
 
 7. **Library Targets**
@@ -155,7 +155,7 @@ KubeVirt had ppc64le support around 2020. You can reference that version for:
 
 1. **Toolchain Resolution Failure**
    - Check `exec_compatible_with` is set to `x86_64` (not `ppc`)
-   - Verify platform constraints use `@platforms//cpu:ppc` (not `ppc64le`)
+   - Verify platform constraints use `@platforms//cpu:ppc64le` (not `ppc`)
 
 2. **Header Path Mismatch**
    - Ensure `strip_include_prefix` uses absolute paths: `/rpm/libvirt-libs_ppc64le_cs9/usr/include/`
