@@ -127,59 +127,23 @@ genrule(
 cc_library(
     name = "libvirt-libs",
     srcs = select({
-        "//rpm:linux_ppc64le": select({
-            "//rpm:is_cs10": ["//rpm:libvirt-libs_ppc64le_cs10/usr/lib64"],
-            "//conditions:default": ["//rpm:libvirt-libs_ppc64le_cs9/usr/lib64"],
-        }),
-        "//rpm:linux_arm64": select({
-            "//rpm:is_cs10": ["//rpm:libvirt-libs_aarch64_cs10/usr/lib64"],
-            "//conditions:default": ["//rpm:libvirt-libs_aarch64_cs9/usr/lib64"],
-        }),
-        "//rpm:linux_s390x": select({
-            "//rpm:is_cs10": ["//rpm:libvirt-libs_s390x_cs10/usr/lib64"],
-            "//conditions:default": ["//rpm:libvirt-libs_s390x_cs9/usr/lib64"],
-        }),
-        "//conditions:default": select({
-            "//rpm:is_cs10": ["//rpm:libvirt-libs_x86_64_cs10/usr/lib64"],
-            "//conditions:default": ["//rpm:libvirt-libs_x86_64_cs9/usr/lib64"],
-        }),
+        "@io_bazel_rules_go//go/platform:linux_arm64": ["//rpm:libvirt-libs_aarch64/usr/lib64"],
+        "@io_bazel_rules_go//go/platform:linux_ppc64le": ["//rpm:libvirt-libs_ppc64le/usr/lib64"],
+        "@io_bazel_rules_go//go/platform:linux_s390x": ["//rpm:libvirt-libs_s390x/usr/lib64"],
+        "//conditions:default": ["//rpm:libvirt-libs_x86_64/usr/lib64"],
     }),
     hdrs = select({
-        "//rpm:linux_ppc64le": select({
-            "//rpm:is_cs10": ["//rpm:libvirt-libs_ppc64le_cs10/usr/include/libvirt"],
-            "//conditions:default": ["//rpm:libvirt-libs_ppc64le_cs9/usr/include/libvirt"],
-        }),
-        "//rpm:linux_arm64": select({
-            "//rpm:is_cs10": ["//rpm:libvirt-libs_aarch64_cs10/usr/include/libvirt"],
-            "//conditions:default": ["//rpm:libvirt-libs_aarch64_cs9/usr/include/libvirt"],
-        }),
-        "//rpm:linux_s390x": select({
-            "//rpm:is_cs10": ["//rpm:libvirt-libs_s390x_cs10/usr/include/libvirt"],
-            "//conditions:default": ["//rpm:libvirt-libs_s390x_cs9/usr/include/libvirt"],
-        }),
-        "//conditions:default": select({
-            "//rpm:is_cs10": ["//rpm:libvirt-libs_x86_64_cs10/usr/include/libvirt"],
-            "//conditions:default": ["//rpm:libvirt-libs_x86_64_cs9/usr/include/libvirt"],
-        }),
+        "@io_bazel_rules_go//go/platform:linux_arm64": ["//rpm:libvirt-libs_aarch64/usr/include/libvirt"],
+        "@io_bazel_rules_go//go/platform:linux_ppc64le": ["//rpm:libvirt-libs_ppc64le/usr/include/libvirt"],
+        "@io_bazel_rules_go//go/platform:linux_s390x": ["//rpm:libvirt-libs_s390x/usr/include/libvirt"],
+        "//conditions:default": ["//rpm:libvirt-libs_x86_64/usr/include/libvirt"],
     }),
     linkstatic = 1,
     strip_include_prefix = select({
-        "//rpm:linux_ppc64le": select({
-            "//rpm:is_cs10": "rpm/libvirt-libs_ppc64le_cs10/usr/include",
-            "//conditions:default": "rpm/libvirt-libs_ppc64le_cs9/usr/include",
-        }),
-        "//rpm:linux_arm64": select({
-            "//rpm:is_cs10": "rpm/libvirt-libs_aarch64_cs10/usr/include",
-            "//conditions:default": "rpm/libvirt-libs_aarch64_cs9/usr/include",
-        }),
-        "//rpm:linux_s390x": select({
-            "//rpm:is_cs10": "rpm/libvirt-libs_s390x_cs10/usr/include",
-            "//conditions:default": "rpm/libvirt-libs_s390x_cs9/usr/include",
-        }),
-        "//conditions:default": select({
-            "//rpm:is_cs10": "rpm/libvirt-libs_x86_64_cs10/usr/include",
-            "//conditions:default": "rpm/libvirt-libs_x86_64_cs9/usr/include",
-        }),
+        "@io_bazel_rules_go//go/platform:linux_arm64": "rpm/libvirt-libs_aarch64/usr/include",
+        "@io_bazel_rules_go//go/platform:linux_ppc64le": "rpm/libvirt-libs_ppc64le/usr/include",
+        "@io_bazel_rules_go//go/platform:linux_s390x": "rpm/libvirt-libs_s390x/usr/include",
+        "//conditions:default": "rpm/libvirt-libs_x86_64/usr/include",
     }),
     visibility = ["//visibility:public"],
 )
@@ -187,59 +151,23 @@ cc_library(
 cc_library(
     name = "libnbd-libs",
     srcs = select({
-        "//rpm:linux_ppc64le": select({
-            "//rpm:is_cs10": ["//rpm:libnbd-libs_ppc64le_cs10/usr/lib64"],
-            "//conditions:default": ["//rpm:libnbd-libs_ppc64le_cs9/usr/lib64"],
-        }),
-        "//rpm:linux_arm64": select({
-            "//rpm:is_cs10": ["//rpm:libnbd-libs_aarch64_cs10/usr/lib64"],
-            "//conditions:default": ["//rpm:libnbd-libs_aarch64_cs9/usr/lib64"],
-        }),
-        "//rpm:linux_s390x": select({
-            "//rpm:is_cs10": ["//rpm:libnbd-libs_s390x_cs10/usr/lib64"],
-            "//conditions:default": ["//rpm:libnbd-libs_s390x_cs9/usr/lib64"],
-        }),
-        "//conditions:default": select({
-            "//rpm:is_cs10": ["//rpm:libnbd-libs_x86_64_cs10/usr/lib64"],
-            "//conditions:default": ["//rpm:libnbd-libs_x86_64_cs9/usr/lib64"],
-        }),
+        "@io_bazel_rules_go//go/platform:linux_arm64": ["//rpm:libnbd-libs_aarch64/usr/lib64"],
+        "@io_bazel_rules_go//go/platform:linux_ppc64le": ["//rpm:libnbd-libs_ppc64le/usr/lib64"],
+        "@io_bazel_rules_go//go/platform:linux_s390x": ["//rpm:libnbd-libs_s390x/usr/lib64"],
+        "//conditions:default": ["//rpm:libnbd-libs_x86_64/usr/lib64"],
     }),
     hdrs = select({
-        "//rpm:linux_ppc64le": select({
-            "//rpm:is_cs10": ["//rpm:libnbd-libs_ppc64le_cs10/usr/include"],
-            "//conditions:default": ["//rpm:libnbd-libs_ppc64le_cs9/usr/include"],
-        }),
-        "//rpm:linux_arm64": select({
-            "//rpm:is_cs10": ["//rpm:libnbd-libs_aarch64_cs10/usr/include"],
-            "//conditions:default": ["//rpm:libnbd-libs_aarch64_cs9/usr/include"],
-        }),
-        "//rpm:linux_s390x": select({
-            "//rpm:is_cs10": ["//rpm:libnbd-libs_s390x_cs10/usr/include"],
-            "//conditions:default": ["//rpm:libnbd-libs_s390x_cs9/usr/include"],
-        }),
-        "//conditions:default": select({
-            "//rpm:is_cs10": ["//rpm:libnbd-libs_x86_64_cs10/usr/include"],
-            "//conditions:default": ["//rpm:libnbd-libs_x86_64_cs9/usr/include"],
-        }),
+        "@io_bazel_rules_go//go/platform:linux_arm64": ["//rpm:libnbd-libs_aarch64/usr/include"],
+        "@io_bazel_rules_go//go/platform:linux_ppc64le": ["//rpm:libnbd-libs_ppc64le/usr/include"],
+        "@io_bazel_rules_go//go/platform:linux_s390x": ["//rpm:libnbd-libs_s390x/usr/include"],
+        "//conditions:default": ["//rpm:libnbd-libs_x86_64/usr/include"],
     }),
     linkstatic = 1,
     strip_include_prefix = select({
-        "//rpm:linux_ppc64le": select({
-            "//rpm:is_cs10": "rpm/libnbd-libs_ppc64le_cs10/usr/include",
-            "//conditions:default": "rpm/libnbd-libs_ppc64le_cs9/usr/include",
-        }),
-        "//rpm:linux_arm64": select({
-            "//rpm:is_cs10": "rpm/libnbd-libs_aarch64_cs10/usr/include",
-            "//conditions:default": "rpm/libnbd-libs_aarch64_cs9/usr/include",
-        }),
-        "//rpm:linux_s390x": select({
-            "//rpm:is_cs10": "rpm/libnbd-libs_s390x_cs10/usr/include",
-            "//conditions:default": "rpm/libnbd-libs_s390x_cs9/usr/include",
-        }),
-        "//conditions:default": select({
-            "//rpm:is_cs10": "rpm/libnbd-libs_x86_64_cs10/usr/include",
-            "//conditions:default": "rpm/libnbd-libs_x86_64_cs9/usr/include",
-        }),
+        "@io_bazel_rules_go//go/platform:linux_arm64": "rpm/libnbd-libs_aarch64/usr/include",
+        "@io_bazel_rules_go//go/platform:linux_ppc64le": "rpm/libnbd-libs_ppc64le/usr/include",
+        "@io_bazel_rules_go//go/platform:linux_s390x": "rpm/libnbd-libs_s390x/usr/include",
+        "//conditions:default": "rpm/libnbd-libs_x86_64/usr/include",
     }),
     visibility = ["//visibility:public"],
 )
