@@ -83,7 +83,7 @@ oci_image(
             "//rpm:libguestfs-tools_s390x",
             ":entrypoint",
         ],
-        "@io_bazel_rules_go//go/platform:linux_ppc64le": [
+        "//rpm:linux_ppc64le": [
             ":appliance_layer_ppc64le",
             "//rpm:libguestfs-tools_ppc64le",
             ":entrypoint",
