@@ -491,9 +491,9 @@ http_archive(
 
 http_archive(
     name = "libguestfs-appliance-ppc64le",
-    sha256 = "PLACEHOLDER_LIBGUESTFS_SHA",
+    sha256 = "fb6da700eeae24da89aae6516091f7c5f46958b0b7812d2b122dc11dca1ab26a",
     urls = [
-        "https://storage.googleapis.com/kubevirt-prow/devel/release/kubevirt/libguestfs-appliance/PLACEHOLDER_NOT_PUBLISHED_YET.tar.xz",
+        "https://storage.googleapis.com/kubevirt-prow/devel/release/kubevirt/libguestfs-appliance/libguestfs-appliance-1.54.0-qcow2-linux-5.14.0-575-centos9-amd64.tar.xz",
     ],
 )
 

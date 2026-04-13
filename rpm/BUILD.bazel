@@ -6692,6 +6692,21 @@ alias(
     actual = ":passt_tree_ppc64le_cs10",
 )
 
+alias(
+    name = "libvirt-devel_ppc64le_cs9",
+    actual = ":libvirt-devel_ppc64le_cs10",
+)
+
+alias(
+    name = "libnbd-devel_ppc64le_cs9",
+    actual = ":libnbd-devel_ppc64le_cs10",
+)
+
+alias(
+    name = "sandboxroot_ppc64le_cs9",
+    actual = ":sandboxroot_ppc64le_cs10",
+)
+
 rpmtree(
     name = "passt_tree_s390x_cs10",
     rpms = [
