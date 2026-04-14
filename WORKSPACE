@@ -410,9 +410,11 @@ oci_pull(
     image = "quay.io/kubevirtci/alpine-with-test-tooling-container-disk",
 )
 
+# TODO: Build actual ppc64le version of this image
+# For now, using x86_64 version as placeholder to allow build to proceed
 oci_pull(
     name = "alpine_with_test_tooling_ppc64le",
-    digest = "PLACEHOLDER_ALPINE_DIGEST",
+    digest = "sha256:8c8e8bb6cd81c75e492c678abb3e5f186d52eba2174ebabc328316250acfea58",
     image = "quay.io/kubevirtci/alpine-with-test-tooling-container-disk",
 )
 
@@ -428,9 +430,11 @@ oci_pull(
     image = "quay.io/kubevirtci/fedora-with-test-tooling",
 )
 
+# TODO: Build actual ppc64le version of this image
+# For now, using x86_64 version as placeholder to allow build to proceed
 oci_pull(
     name = "fedora_with_test_tooling_ppc64le",
-    digest = "PLACEHOLDER_FEDORA_DIGEST",
+    digest = "sha256:897af945d1c58366086d5933ae4f341a5f1413b88e6c7f2b659436adc5d0f522",
     image = "quay.io/kubevirtci/fedora-with-test-tooling",
 )
 
