@@ -23,6 +23,15 @@ platform(
 )
 
 platform(
+    name = "ppc64le-linux-cgo",
+    constraint_values = [
+        "@platforms//cpu:ppc64le",
+        "@platforms//os:linux",
+        "@io_bazel_rules_go//go/toolchain:cgo",
+    ],
+)
+
+platform(
     name = "x86_64-none-linux-gnu",
     constraint_values = [
         "@platforms//cpu:x86_64",
