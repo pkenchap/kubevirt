@@ -53,7 +53,6 @@ toolchain(
     target_compatible_with = [
         "@platforms//os:linux",
         "@platforms//cpu:ppc64le",
-        "@io_bazel_rules_go//go/toolchain:cgo",
     ],
     toolchain = ":ppc64le_toolchain",
     toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
@@ -69,7 +68,6 @@ toolchain(
     target_compatible_with = [
         "@platforms//os:linux",
         "@platforms//cpu:ppc64le",
-        "@io_bazel_rules_go//go/toolchain:cgo",
     ],
     target_settings = [
         "//rpm:is_cs10",
