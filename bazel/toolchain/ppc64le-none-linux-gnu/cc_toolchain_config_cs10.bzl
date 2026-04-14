@@ -30,35 +30,35 @@ def _impl(ctx):
     tool_paths = [
         tool_path(
             name = "ar",
-            path = "/usr/bin/ar",
+            path = "/usr/bin/powerpc64le-linux-gnu-ar",
         ),
         tool_path(
             name = "cpp",
-            path = "/usr/bin/cpp",
+            path = "/usr/bin/powerpc64le-linux-gnu-cpp",
         ),
         tool_path(
             name = "gcc",
-            path = "/usr/bin/gcc",
+            path = "/usr/bin/powerpc64le-linux-gnu-gcc",
         ),
         tool_path(
             name = "gcov",
-            path = "/usr/bin/gcov",
+            path = "/usr/bin/powerpc64le-linux-gnu-gcov",
         ),
         tool_path(
             name = "ld",
-            path = "/usr/bin/ld",
+            path = "/usr/bin/powerpc64le-linux-gnu-ld",
         ),
         tool_path(
             name = "nm",
-            path = "/usr/bin/nm",
+            path = "/usr/bin/powerpc64le-linux-gnu-nm",
         ),
         tool_path(
             name = "objdump",
-            path = "/usr/bin/objdump",
+            path = "/usr/bin/powerpc64le-linux-gnu-objdump",
         ),
         tool_path(
             name = "strip",
-            path = "/usr/bin/strip",
+            path = "/usr/bin/powerpc64le-linux-gnu-strip",
         ),
     ]
 
@@ -79,6 +79,10 @@ def _impl(ctx):
                             "-D__TIMESTAMP__=\"redacted\"",
                             "-D__TIME__=\"redacted\"",
                             "-D__TOOLCHAIN_SYSROOT__=\"centos-stream-10\"",
+                            "-nostdinc",
+                            "-I/usr/powerpc64le-linux-gnu/sys-root/usr/include",
+                            "-I/usr/lib/gcc/powerpc64le-linux-gnu/14/include",
+                            "-I/usr/lib/gcc/powerpc64le-linux-gnu/14/include-fixed",
                         ],
                     ),
                 ],
@@ -88,7 +92,7 @@ def _impl(ctx):
 
     default_linker_flags = feature(
         name = "default_linker_flags",
-        enabled = False,
+        enabled = True,
         flag_sets = [
             flag_set(
                 actions = all_link_actions,
@@ -111,8 +115,9 @@ def _impl(ctx):
     return cc_common.create_cc_toolchain_config_info(
         ctx = ctx,
         cxx_builtin_include_directories = [
-            "/usr/lib/gcc/ppc64le-redhat-linux/14/include",
-            "/usr/include",
+            "/usr/powerpc64le-linux-gnu/sys-root/usr/include",
+            "/usr/lib/gcc/powerpc64le-linux-gnu/14/include",
+            "/usr/lib/gcc/powerpc64le-linux-gnu/14/include-fixed",
         ],
         features = features,
         toolchain_identifier = "ppc64le-toolchain-cs10",
