@@ -271,18 +271,23 @@ var _ = Describe(SIG("Volumes update with migration", decorators.RequiresTwoSche
 				}
 				return vm.Status.VolumeUpdateState.VolumeMigrationState.MigratedVolumes
 			}).WithTimeout(120*time.Second).WithPolling(time.Second).Should(
-				ContainElement(virtv1.StorageMigratedVolumeInfo{
-					VolumeName: volName,
-					SourcePVCInfo: &virtv1.PersistentVolumeClaimInfo{
-						ClaimName:  src,
-						VolumeMode: pointer.P(k8sv1.PersistentVolumeFilesystem),
-					},
-					DestinationPVCInfo: &virtv1.PersistentVolumeClaimInfo{
-						ClaimName:  dst,
-						VolumeMode: pointer.P(k8sv1.PersistentVolumeFilesystem),
-					},
-				}), "The volumes migrated should be set",
+				ContainElement(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+					"VolumeName": Equal(volName),
+					"SourcePVCInfo": gstruct.PointTo(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+						"ClaimName":   Equal(src),
+						"VolumeMode":  Equal(pointer.P(k8sv1.PersistentVolumeFilesystem)),
+						"AccessModes": Not(BeEmpty()),
+						"Requests":    HaveLen(1),
+					})),
+					"DestinationPVCInfo": gstruct.PointTo(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+						"ClaimName":   Equal(dst),
+						"VolumeMode":  Equal(pointer.P(k8sv1.PersistentVolumeFilesystem)),
+						"AccessModes": Not(BeEmpty()),
+						"Requests":    HaveLen(1),
+					})),
+				})), "The volumes migrated should be set",
 			)
+
 			Eventually(matcher.ThisVM(vm)).WithTimeout(120 * time.Second).WithPolling(time.Second).Should(matcher.HaveConditionTrue(virtv1.VirtualMachineManualRecoveryRequired))
 		}
 
@@ -555,7 +560,9 @@ var _ = Describe(SIG("Volumes update with migration", decorators.RequiresTwoSche
 		It("should migrate the source volume from a source and destination block RWX DVs", decorators.StorageCritical, decorators.RequiresRWXBlock, func() {
 			volName := "disk0"
 			sc, exist := libstorage.GetRWXBlockStorageClass()
-			Expect(exist).To(BeTrue())
+			if !exist {
+				Fail("Failed test when RWX Block storage is not present")
+			}
 			srcDV := libdv.NewDataVolume(
 				libdv.WithRegistryURLSource(cd.DataVolumeImportUrlForContainerDisk(cd.ContainerDiskCirros)),
 				libdv.WithStorage(libdv.StorageWithStorageClass(sc),
@@ -826,17 +833,21 @@ var _ = Describe(SIG("Volumes update with migration", decorators.RequiresTwoSche
 				}
 				return vm.Status.VolumeUpdateState.VolumeMigrationState.MigratedVolumes
 			}).WithTimeout(120*time.Second).WithPolling(time.Second).Should(
-				ContainElement(virtv1.StorageMigratedVolumeInfo{
-					VolumeName: volName,
-					SourcePVCInfo: &virtv1.PersistentVolumeClaimInfo{
-						ClaimName:  dv.Name,
-						VolumeMode: pointer.P(k8sv1.PersistentVolumeFilesystem),
-					},
-					DestinationPVCInfo: &virtv1.PersistentVolumeClaimInfo{
-						ClaimName:  destPVC,
-						VolumeMode: pointer.P(k8sv1.PersistentVolumeFilesystem),
-					},
-				}), "The volumes migrated should be set",
+				ContainElement(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+					"VolumeName": Equal(volName),
+					"SourcePVCInfo": gstruct.PointTo(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+						"ClaimName":   Equal(dv.Name),
+						"VolumeMode":  Equal(pointer.P(k8sv1.PersistentVolumeFilesystem)),
+						"AccessModes": Not(BeEmpty()),
+						"Requests":    HaveLen(1),
+					})),
+					"DestinationPVCInfo": gstruct.PointTo(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+						"ClaimName":   Equal(destPVC),
+						"VolumeMode":  Equal(pointer.P(k8sv1.PersistentVolumeFilesystem)),
+						"AccessModes": Not(BeEmpty()),
+						"Requests":    HaveLen(1),
+					})),
+				})), "The volumes migrated should be set",
 			)
 			By("Cancel the volume migration")
 			updateVMWithPVC(vm, volName, dv.Name)

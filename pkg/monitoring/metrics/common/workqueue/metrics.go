@@ -24,6 +24,12 @@ import (
 	k8sworkqueue "k8s.io/client-go/util/workqueue"
 )
 
+const (
+	workqueueBucketStart  = 10e-9
+	workqueueBucketFactor = 10
+	workqueueBucketCount  = 10
+)
+
 var (
 	workqueueMetrics = []operatormetrics.Metric{
 		depth,
@@ -57,7 +63,7 @@ var (
 			Help: "How long an item stays in workqueue before being requested.",
 		},
 		prometheus.HistogramOpts{
-			Buckets: prometheus.ExponentialBuckets(10e-9, 10, 10),
+			Buckets: prometheus.ExponentialBuckets(workqueueBucketStart, workqueueBucketFactor, workqueueBucketCount),
 		},
 		[]string{"name"},
 	)
@@ -68,7 +74,7 @@ var (
 			Help: "How long in seconds processing an item from workqueue takes.",
 		},
 		prometheus.HistogramOpts{
-			Buckets: prometheus.ExponentialBuckets(10e-9, 10, 10),
+			Buckets: prometheus.ExponentialBuckets(workqueueBucketStart, workqueueBucketFactor, workqueueBucketCount),
 		},
 		[]string{"name"},
 	)
@@ -92,10 +98,10 @@ var (
 	unfinishedWork = operatormetrics.NewGaugeVec(
 		operatormetrics.MetricOpts{
 			Name: "kubevirt_workqueue_unfinished_work_seconds",
-			Help: "How many seconds of work has done that is in progress and hasn't " +
-				"been observed by work_duration. Large values indicate stuck " +
-				"threads. One can deduce the number of stuck threads by observing " +
-				"the rate at which this increases.",
+			Help: "How many seconds of work have been in progress without " +
+				"being observed by work_duration. Large values indicate stuck " +
+				"threads. The number of stuck threads can be deduced by observing " +
+				"the rate at which this value increases.",
 		},
 		[]string{"name"},
 	)
@@ -103,7 +109,7 @@ var (
 
 type Provider struct{}
 
-func init() {
+func init() { //nolint:gochecknoinits // Force KubeVirt workqueue metrics to be registered before default k8s workqueue metrics
 	k8sworkqueue.SetProvider(Provider{})
 }
 

@@ -55,13 +55,13 @@ import (
 	"kubevirt.io/kubevirt/pkg/certificates/triple"
 	"kubevirt.io/kubevirt/pkg/certificates/triple/cert"
 	"kubevirt.io/kubevirt/pkg/controller"
+	"kubevirt.io/kubevirt/pkg/hypervisor"
 	"kubevirt.io/kubevirt/pkg/libdv"
 	"kubevirt.io/kubevirt/pkg/libvmi"
 	libvmici "kubevirt.io/kubevirt/pkg/libvmi/cloudinit"
 	"kubevirt.io/kubevirt/pkg/pointer"
 	"kubevirt.io/kubevirt/pkg/util/hardware"
 	"kubevirt.io/kubevirt/pkg/virt-config/featuregate"
-	"kubevirt.io/kubevirt/pkg/virt-controller/services"
 	"kubevirt.io/kubevirt/pkg/virt-controller/watch/topology"
 	virthandler "kubevirt.io/kubevirt/pkg/virt-handler"
 	"kubevirt.io/kubevirt/pkg/virt-handler/cgroup"
@@ -175,7 +175,7 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 			const labelKey = "subdomain"
 			const labelValue = "mysub"
 
-			vmi := libvmifact.NewCirros(
+			vmi := libvmifact.NewAlpineWithTestTooling(
 				libvmi.WithHostname(hostname),
 				withSubdomain(subdomain),
 				libvmi.WithLabel(labelKey, labelValue),
@@ -185,7 +185,7 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 			vmi = libvmops.RunVMIAndExpectLaunch(vmi, libvmops.StartupTimeoutSecondsHuge)
 
 			By("Starting hello world in the VM")
-			vmnetserver.StartTCPServer(vmi, port, console.LoginToCirros)
+			vmnetserver.StartTCPServer(vmi, port, console.LoginToAlpine)
 
 			By("Exposing headless service matching subdomain")
 			service := service.BuildHeadlessSpec(subdomain, port, port, labelKey, labelValue)
@@ -259,7 +259,7 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 				return migrationDurationTotal
 			}
 
-			It("[test_id:6968]should apply them and result in different migration durations", func() {
+			It("[test_id:6968] should apply them and result in different migration durations", decorators.WgS390x, func() {
 				vmi := libvmifact.NewAlpineWithTestTooling(libnet.WithMasqueradeNetworking())
 				migrationPolicy := CreateMigrationPolicy(virtClient, GeneratePolicyAndAlignVMI(vmi))
 
@@ -291,7 +291,7 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 				// check VMI, confirm migration state
 				libmigration.ConfirmVMIPostMigration(virtClient, vmi, migration)
 			})
-			It("should be successfully migrate with a WriteBack disk cache", func() {
+			It("[test_id:5689]should be successfully migrate with a WriteBack disk cache", decorators.WgS390x, func() {
 				vmi := libvmifact.NewAlpineWithTestTooling(libnet.WithMasqueradeNetworking())
 				vmi.Spec.Domain.Devices.Disks[0].Cache = v1.CacheWriteBack
 
@@ -339,7 +339,7 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 				libmigration.ConfirmVMIPostMigration(virtClient, vmi, migration)
 			})
 
-			It("should migrate vmi with LiveMigrateIfPossible eviction strategy", func() {
+			It("[test_id:2353]should migrate vmi with LiveMigrateIfPossible eviction strategy", decorators.WgS390x, func() {
 				vmi := libvmifact.NewAlpineWithTestTooling(
 					libnet.WithMasqueradeNetworking(),
 					libvmi.WithEvictionStrategy(v1.EvictionStrategyLiveMigrateIfPossible),
@@ -360,14 +360,14 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 				libmigration.ConfirmVMIPostMigration(virtClient, vmi, migration)
 			})
 
-			It("should migrate vmi and use Live Migration method with read-only disks", func() {
+			It("should migrate vmi and use Live Migration method with read-only disks", decorators.RequiresRWXBlock, func() {
 				By("Defining a VMI with PVC disk and read-only CDRoms")
 				if !libstorage.HasCDI() {
 					Fail("Fail DataVolume tests when CDI is not present")
 				}
 				sc, exists := libstorage.GetRWXBlockStorageClass()
 				if !exists {
-					Fail("Block storage (RWX) is not present")
+					Fail("Failed test when RWX Block storage is not present")
 				}
 				dv := libdv.NewDataVolume(
 					libdv.WithRegistryURLSourceAndPullMethod(cd.DataVolumeImportUrlForContainerDisk(cd.ContainerDiskAlpine), cdiv1.RegistryPullNode),
@@ -544,7 +544,7 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 				libmigration.ConfirmVMIPostMigration(virtClient, vmi, migration)
 			})
 
-			It("[test_id:1783]should be successfully migrated multiple times with cloud-init disk", decorators.Conformance, func() {
+			It("[test_id:1783] should be successfully migrated multiple times with cloud-init disk", decorators.Conformance, decorators.WgS390x, func() {
 				vmi := libvmifact.NewAlpineWithTestTooling(libnet.WithMasqueradeNetworking())
 
 				By("Starting the VirtualMachineInstance")
@@ -582,7 +582,7 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 			// Previously, we'd stop getting events after libvirt reconnect, which
 			// prevented things like migration. This test verifies we can migrate after
 			// resetting virtqemud
-			It("[test_id:4746]should migrate even if virtqemud has restarted at some point.", func() {
+			It("[test_id:4746]should migrate even if virtqemud has restarted at some point.", decorators.WgS390x, func() {
 				vmi := libvmifact.NewAlpineWithTestTooling(libnet.WithMasqueradeNetworking())
 
 				By("Starting the VirtualMachineInstance")
@@ -627,7 +627,7 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 				libmigration.ConfirmVMIPostMigration(virtClient, vmi, migration)
 			})
 
-			It("[test_id:6972]should migrate to a persistent (non-transient) libvirt domain.", func() {
+			It("[test_id:6972]should migrate to a persistent (non-transient) libvirt domain.", decorators.WgS390x, func() {
 				vmi := libvmifact.NewAlpineWithTestTooling(libnet.WithMasqueradeNetworking())
 
 				By("Starting the VirtualMachineInstance")
@@ -650,7 +650,7 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 				Expect(isLibvirtDomainPersistent(vmi)).To(BeTrue(), "The VMI was not found in the list of libvirt persistent domains")
 				libmigration.EnsureNoMigrationMetadataInPersistentXML(vmi)
 			})
-			It("[test_id:6973]should be able to successfully migrate with a paused vmi", func() {
+			It("[test_id:6973]should be able to successfully migrate with a paused vmi", decorators.WgS390x, func() {
 				vmi := libvmifact.NewAlpineWithTestTooling(libnet.WithMasqueradeNetworking())
 
 				By("Starting the VirtualMachineInstance")
@@ -887,10 +887,10 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(ContainSubstring("DisksNotLiveMigratable"))
 			})
-			It("[test_id:1479][storage-req] should migrate a vmi with a shared block disk", decorators.StorageReq, func() {
+			It("[test_id:1479][storage-req] should migrate a vmi with a shared block disk", decorators.StorageReq, decorators.RequiresRWXBlock, func() {
 				sc, exists := libstorage.GetRWXBlockStorageClass()
 				if !exists {
-					Skip("Skip test when Block storage is not present")
+					Fail("Failed test when RWX Block storage is not present")
 				}
 
 				By("Starting the VirtualMachineInstance")
@@ -947,14 +947,14 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 				libmigration.ExpectMigrationToSucceedWithDefaultTimeout(virtClient, migration1)
 			})
 		})
-		Context("[storage-req]with an Alpine shared block volume PVC", decorators.StorageReq, func() {
+		Context("[storage-req]with an Alpine shared block volume PVC", decorators.StorageReq, decorators.RequiresRWXBlock, func() {
 			var sc string
 			var exists bool
 
 			BeforeEach(func() {
 				sc, exists = libstorage.GetRWXBlockStorageClass()
 				if !exists {
-					Skip("Skip test when Block storage is not present")
+					Fail("Failed test when RWX Block storage is not present")
 				}
 			})
 
@@ -1015,7 +1015,7 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 			})
 		})
 
-		Context("with a Fedora shared NFS PVC (using nfs ipv4 address), cloud init and service account", func() {
+		Context("with a Fedora shared NFS PVC (using nfs ipv4 address), cloud init and service account", decorators.RequiresRWXFilesystemStorage, func() {
 			var vmi *v1.VirtualMachineInstance
 			var dv *cdiv1.DataVolume
 			var storageClass string
@@ -1040,7 +1040,7 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 				var foundSC bool
 				storageClass, foundSC = libstorage.GetRWXFileSystemStorageClass()
 				if !foundSC {
-					Skip("Skip test when Filesystem storage is not present")
+					Fail("Failed test when RWX Filesystem storage is not present")
 				}
 			})
 
@@ -1081,7 +1081,7 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 			// Create DV and alter permission of disk.img
 			sc, foundSC := libstorage.GetRWXFileSystemStorageClass()
 			if !foundSC {
-				Skip("Skip test when Filesystem storage is not present")
+				Fail("Failed test when RWX Filesystem storage is not present")
 			}
 
 			dv := libdv.NewDataVolume(
@@ -1167,7 +1167,7 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 						libvmi.WithNetwork(v1.DefaultPodNetwork()))
 				}, console.LoginToAlpine),
 
-				Entry("[test_id:8610] with DataVolume", func() *v1.VirtualMachineInstance {
+				Entry("[test_id:8610] with DataVolume", decorators.RequiresRWXFilesystemStorage, func() *v1.VirtualMachineInstance {
 					dv = createDataVolumePVCAndChangeDiskImgPermissions(testsuite.NamespacePrivileged, size)
 					// Use the DataVolume
 					return libvmi.New(
@@ -1182,7 +1182,7 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 					return prepareVMIWithAllVolumeSources(testsuite.NamespacePrivileged, false)
 				}, console.LoginToFedora),
 
-				Entry("[test_id:8612] with PVC", func() *v1.VirtualMachineInstance {
+				Entry("[test_id:8612] with PVC", decorators.RequiresRWXFilesystemStorage, func() *v1.VirtualMachineInstance {
 					dv = createDataVolumePVCAndChangeDiskImgPermissions(testsuite.NamespacePrivileged, size)
 					// Use the Underlying PVC
 					return libvmi.New(
@@ -1253,7 +1253,7 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 						libvmi.WithNetwork(v1.DefaultPodNetwork()))
 				}, console.LoginToAlpine),
 
-				Entry("with DataVolume", func() *v1.VirtualMachineInstance {
+				Entry("with DataVolume", decorators.RequiresRWXFilesystemStorage, func() *v1.VirtualMachineInstance {
 					dv = createDataVolumePVCAndChangeDiskImgPermissions(testsuite.NamespacePrivileged, size)
 					// Use the DataVolume
 					return libvmi.New(
@@ -1268,7 +1268,7 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 					return prepareVMIWithAllVolumeSources(testsuite.NamespacePrivileged, false)
 				}, console.LoginToFedora),
 
-				Entry("with PVC", func() *v1.VirtualMachineInstance {
+				Entry("with PVC", decorators.RequiresRWXFilesystemStorage, func() *v1.VirtualMachineInstance {
 					dv = createDataVolumePVCAndChangeDiskImgPermissions(testsuite.NamespacePrivileged, size)
 					// Use the underlying PVC
 					return libvmi.New(
@@ -1283,7 +1283,7 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 		})
 		Context("migration security", func() {
 			Context(" with TLS disabled", Serial, func() {
-				It("[test_id:6976] should be successfully migrated", func() {
+				It("[test_id:6976] should be successfully migrated", decorators.WgS390x, func() {
 					cfg := getCurrentKvConfig(virtClient)
 					cfg.MigrationConfiguration.DisableTLS = pointer.P(true)
 					kvconfig.UpdateKubeVirtConfigValueAndWait(cfg)
@@ -2145,7 +2145,7 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 
 		})
 
-		Context(" with freePageReporting", Serial, func() {
+		Context(" with freePageReporting", Serial, decorators.WgS390x, func() {
 
 			BeforeEach(func() {
 				kv := libkubevirt.GetCurrentKv(virtClient)
@@ -2154,7 +2154,7 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 				kvconfig.UpdateKubeVirtConfigValueAndWait(*kvConfigurationCopy)
 			})
 
-			It("should be able to migrate", func() {
+			It("[test_id:2387]should be able to migrate", func() {
 				vmi := libvmifact.NewAlpineWithTestTooling(libnet.WithMasqueradeNetworking())
 
 				By("Starting the VirtualMachineInstance")
@@ -2722,7 +2722,7 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 			)
 
 			vmiRequest.Add(resource.MustParse("50Mi")) //add 50Mi memoryOverHead to make sure vmi creation won't be blocked
-			enoughMemoryToStartVmiButNotEnoughForMigration := services.GetMemoryOverhead(vmi, runtime.GOARCH, nil)
+			enoughMemoryToStartVmiButNotEnoughForMigration := hypervisor.NewLauncherHypervisorResources(v1.KvmHypervisorName).GetMemoryOverhead(vmi, runtime.GOARCH, nil)
 			enoughMemoryToStartVmiButNotEnoughForMigration.Add(vmiRequest)
 			resourcesToLimit := k8sv1.ResourceList{
 				k8sv1.ResourceMemory: resource.MustParse(enoughMemoryToStartVmiButNotEnoughForMigration.String()),
@@ -2812,11 +2812,11 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 			}, 200)).To(Succeed())
 		})
 
-		It("should migrate with a shared DV", func() {
+		It("should migrate with a shared DV", decorators.RequiresRWXFilesystemStorage, func() {
 			sc, foundSC := libstorage.GetRWXFileSystemStorageClass()
 
 			if !foundSC {
-				Skip("Skip test when Filesystem RWX storage is not present")
+				Fail("Failed test when RWX Filesystem storage is not present")
 			}
 
 			dataVolume := libdv.NewDataVolume(

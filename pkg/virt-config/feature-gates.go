@@ -19,34 +19,30 @@
 
 package virtconfig
 
-import "kubevirt.io/kubevirt/pkg/virt-config/featuregate"
+import (
+	"slices"
+
+	"kubevirt.io/kubevirt/pkg/virt-config/featuregate"
+)
 
 /*
  This module is intended for determining whether an optional feature is enabled or not at the cluster-level.
 */
-
-func (config *ClusterConfig) isFeatureGateDefined(featureGate string) bool {
-	for _, fg := range config.GetConfig().DeveloperConfiguration.FeatureGates {
-		if fg == featureGate {
-			return true
-		}
-	}
-	return false
-}
 
 func (config *ClusterConfig) isFeatureGateEnabled(featureGate string) bool {
 	if fg := featuregate.FeatureGateInfo(featureGate); fg != nil && fg.State == featuregate.GA {
 		return true
 	}
 
-	if config.isFeatureGateDefined(featureGate) {
+	if isExplicitlyEnabled := slices.Contains(config.GetConfig().DeveloperConfiguration.FeatureGates, featureGate); isExplicitlyEnabled {
 		return true
 	}
-	return false
-}
 
-func (config *ClusterConfig) ExpandDisksEnabled() bool {
-	return config.isFeatureGateEnabled(featuregate.ExpandDisksGate)
+	if isExplicitlyDisabled := slices.Contains(config.GetConfig().DeveloperConfiguration.DisabledFeatureGates, featureGate); isExplicitlyDisabled {
+		return false
+	}
+
+	return false
 }
 
 func (config *ClusterConfig) CPUManagerEnabled() bool {
@@ -91,10 +87,6 @@ func (config *ClusterConfig) GPUPassthroughEnabled() bool {
 
 func (config *ClusterConfig) SnapshotEnabled() bool {
 	return config.isFeatureGateEnabled(featuregate.SnapshotGate)
-}
-
-func (config *ClusterConfig) VMExportEnabled() bool {
-	return config.isFeatureGateEnabled(featuregate.VMExportGate)
 }
 
 func (config *ClusterConfig) HotplugVolumesEnabled() bool {
@@ -177,12 +169,8 @@ func (config *ClusterConfig) SecureExecutionEnabled() bool {
 	return config.isFeatureGateEnabled(featuregate.SecureExecution)
 }
 
-func (config *ClusterConfig) PanicDevicesEnabled() bool {
-	return config.isFeatureGateEnabled(featuregate.PanicDevicesGate)
-}
-
-func (config *ClusterConfig) PasstIPStackMigrationEnabled() bool {
-	return config.isFeatureGateEnabled(featuregate.PasstIPStackMigration)
+func (config *ClusterConfig) PasstBindingEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.PasstBinding)
 }
 
 func (config *ClusterConfig) DecentralizedLiveMigrationEnabled() bool {
@@ -201,10 +189,54 @@ func (config *ClusterConfig) ConfigurableHypervisorEnabled() bool {
 	return config.isFeatureGateEnabled(featuregate.ConfigurableHypervisor)
 }
 
+func (config *ClusterConfig) PCINUMAAwareTopologyEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.PCINUMAAwareTopologyEnabled)
+}
+
 func (config *ClusterConfig) IncrementalBackupEnabled() bool {
 	return config.isFeatureGateEnabled(featuregate.IncrementalBackupGate)
 }
 
 func (config *ClusterConfig) MigrationPriorityQueueEnabled() bool {
 	return config.isFeatureGateEnabled(featuregate.MigrationPriorityQueue)
+}
+
+func (config *ClusterConfig) PodSecondaryInterfaceNamingUpgradeEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.PodSecondaryInterfaceNamingUpgrade)
+}
+
+func (config *ClusterConfig) ExternalNetResourceInjectionEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.ExternalNetResourceInjection)
+}
+
+func (config *ClusterConfig) RebootPolicyEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.RebootPolicy)
+}
+
+func (config *ClusterConfig) VmiMemoryOverheadReportEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.VmiMemoryOverheadReport)
+}
+
+func (config *ClusterConfig) TemplateEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.Template)
+}
+
+func (config *ClusterConfig) ContainerPathVolumesEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.ContainerPathVolumesGate)
+}
+
+func (config *ClusterConfig) ReservedOverheadMemlockEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.ReservedOverheadMemlock)
+}
+
+func (config *ClusterConfig) OptOutRoleAggregationEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.OptOutRoleAggregation)
+}
+
+func (config *ClusterConfig) LiveUpdateNADRefEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.LiveUpdateNADRef)
+}
+
+func (config *ClusterConfig) VGPULiveMigrationEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.VGPULiveMigration)
 }

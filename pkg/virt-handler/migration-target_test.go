@@ -30,9 +30,8 @@ import (
 	"sync"
 	"time"
 
-	k8sv1 "k8s.io/api/core/v1"
-
 	"go.uber.org/mock/gomock"
+	k8sv1 "k8s.io/api/core/v1"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -55,11 +54,12 @@ import (
 	virtcontroller "kubevirt.io/kubevirt/pkg/controller"
 	controllertesting "kubevirt.io/kubevirt/pkg/controller/testing"
 	diskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
+	"kubevirt.io/kubevirt/pkg/hypervisor"
 	"kubevirt.io/kubevirt/pkg/pointer"
 	"kubevirt.io/kubevirt/pkg/safepath"
+	"kubevirt.io/kubevirt/pkg/storage/cbt"
 	"kubevirt.io/kubevirt/pkg/testutils"
 	"kubevirt.io/kubevirt/pkg/virt-config/featuregate"
-	"kubevirt.io/kubevirt/pkg/virt-controller/services"
 	virtcache "kubevirt.io/kubevirt/pkg/virt-handler/cache"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
 	hotplugvolume "kubevirt.io/kubevirt/pkg/virt-handler/hotplug-disk"
@@ -93,10 +93,7 @@ var _ = Describe("VirtualMachineInstance migration target", func() {
 		migrationTargetPasstRepairHandler    *stubTargetPasstRepairHandler
 	)
 
-	const (
-		host                           = "master"
-		migratableNetworkBindingPlugin = "mig_plug"
-	)
+	const host = "master"
 
 	addDomain := func(domain *api.Domain) {
 		Expect(controller.domainStore.Add(domain)).To(Succeed())
@@ -170,11 +167,8 @@ var _ = Describe("VirtualMachineInstance migration target", func() {
 		virtClient.EXPECT().CoreV1().Return(k8sfakeClient.CoreV1()).AnyTimes()
 		virtClient.EXPECT().VirtualMachineInstance(metav1.NamespaceDefault).Return(virtfakeClient.KubevirtV1().VirtualMachineInstances(metav1.NamespaceDefault)).AnyTimes()
 		kv := &v1.KubeVirtConfiguration{
-			NetworkConfiguration: &v1.NetworkConfiguration{Binding: map[string]v1.InterfaceBindingPlugin{
-				migratableNetworkBindingPlugin: {Migration: &v1.InterfaceBindingMigration{}},
-			}},
 			DeveloperConfiguration: &v1.DeveloperConfiguration{
-				FeatureGates: []string{featuregate.PasstIPStackMigration},
+				FeatureGates: []string{featuregate.PasstBinding},
 			},
 		}
 
@@ -193,7 +187,6 @@ var _ = Describe("VirtualMachineInstance migration target", func() {
 
 		mockIsolationDetector := isolation.NewMockPodIsolationDetector(ctrl)
 		mockIsolationDetector.EXPECT().Detect(gomock.Any()).Return(mockIsolationResult, nil).AnyTimes()
-		mockIsolationDetector.EXPECT().AdjustResources(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 
 		mockHotplugVolumeMounter = hotplugvolume.NewMockVolumeMounter(ctrl)
 
@@ -285,16 +278,6 @@ var _ = Describe("VirtualMachineInstance migration target", func() {
 		Expect(err).NotTo(HaveOccurred())
 		defer socket.Close()
 
-		// since a random port is generated, we have to create the proxy
-		// here in order to know what port will be in the update.
-		err = controller.handleTargetMigrationProxy(vmi)
-		Expect(err).NotTo(HaveOccurred())
-
-		destSrcPorts := controller.migrationProxy.GetTargetListenerPorts(string(vmi.UID))
-		updatedVmi := vmi.DeepCopy()
-		updatedVmi.Status.MigrationState.TargetNodeAddress = controller.migrationIpAddress
-		updatedVmi.Status.MigrationState.TargetDirectMigrationNodePorts = destSrcPorts
-
 		client.EXPECT().SyncMigrationTarget(vmi, gomock.Any())
 		createVMI(vmi)
 		sanityExecute()
@@ -362,7 +345,7 @@ var _ = Describe("VirtualMachineInstance migration target", func() {
 			GuestRequested: &initialMemory,
 		}
 
-		targetPodMemory := services.GetMemoryOverhead(vmi, runtime.GOARCH, nil)
+		targetPodMemory := hypervisor.NewLauncherHypervisorResources(v1.KvmHypervisorName).GetMemoryOverhead(vmi, runtime.GOARCH, nil)
 		targetPodMemory.Add(requestedMemory)
 		vmi.Labels = map[string]string{
 			v1.VirtualMachinePodMemoryRequestsLabel: targetPodMemory.String(),
@@ -436,7 +419,7 @@ var _ = Describe("VirtualMachineInstance migration target", func() {
 		}
 		vmi.Spec.Architecture = "amd64"
 
-		targetPodMemory := services.GetMemoryOverhead(vmi, runtime.GOARCH, nil)
+		targetPodMemory := hypervisor.NewLauncherHypervisorResources(v1.KvmHypervisorName).GetMemoryOverhead(vmi, runtime.GOARCH, nil)
 		targetPodMemory.Add(requestedMemory)
 		vmi.Labels = map[string]string{
 			v1.VirtualMachinePodMemoryRequestsLabel: targetPodMemory.String(),
@@ -667,6 +650,51 @@ var _ = Describe("VirtualMachineInstance migration target", func() {
 		Expect(updatedVMI.Status.MigrationState.Completed).To(BeTrue())
 	})
 
+	It("should set CBT to Initializing after migration finalization when CBT was Enabled", func() {
+		vmi := api2.NewMinimalVMI("testvmi")
+		vmi.UID = vmiTestUUID
+		vmi.ObjectMeta.ResourceVersion = "1"
+		vmi.Status.Phase = v1.Running
+		vmi.Labels = make(map[string]string)
+		vmi.Status.NodeName = host
+		vmi.Labels[v1.MigrationTargetNodeNameLabel] = host
+		vmi.Status.Interfaces = make([]v1.VirtualMachineInstanceNetworkInterface, 0)
+		// Set CBT to Enabled before migration
+		cbt.SetCBTState(&vmi.Status.ChangedBlockTracking, v1.ChangedBlockTrackingEnabled)
+		vmi.Status.MigrationState = &v1.VirtualMachineInstanceMigrationState{
+			TargetNode:                     host,
+			TargetNodeAddress:              "127.0.0.1:12345",
+			SourceNode:                     "othernode",
+			MigrationUID:                   "123",
+			TargetNodeDomainDetected:       true,
+			TargetNodeDomainReadyTimestamp: pointer.P(metav1.Now()),
+			StartTimestamp:                 pointer.P(metav1.NewTime(metav1.Now().Add(-1 * time.Minute))),
+			EndTimestamp:                   pointer.P(metav1.Now()),
+		}
+
+		domain := api.NewMinimalDomainWithUUID("testvmi", vmiTestUUID)
+		domain.Status.Status = api.Running
+
+		domain.Spec.Metadata.KubeVirt.Migration = &api.MigrationMetadata{
+			UID:            "123",
+			StartTimestamp: pointer.P(metav1.NewTime(metav1.Now().Add(-1 * time.Minute))),
+			EndTimestamp:   pointer.P(metav1.Now()),
+		}
+
+		addVMI(vmi, domain)
+
+		client.EXPECT().Ping().AnyTimes()
+		client.EXPECT().FinalizeVirtualMachineMigration(gomock.Any(), gomock.Any()).Return(nil)
+
+		sanityExecute()
+
+		updatedVMI, err := virtfakeClient.KubevirtV1().VirtualMachineInstances(metav1.NamespaceDefault).Get(context.TODO(), vmi.Name, metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(updatedVMI.Status.MigrationState.Completed).To(BeTrue())
+		// CBT should be set to Initializing to trigger checkpoint redefinition
+		Expect(cbt.CBTState(updatedVMI.Status.ChangedBlockTracking)).To(Equal(v1.ChangedBlockTrackingInitializing))
+	})
+
 	It("should signal target pod to early exit on failed migration", func() {
 		vmi := api2.NewMinimalVMI("testvmi")
 		vmi.UID = vmiTestUUID
@@ -688,6 +716,193 @@ var _ = Describe("VirtualMachineInstance migration target", func() {
 
 		client.EXPECT().SignalTargetPodCleanup(vmi)
 		sanityExecute()
+	})
+
+	It("should not accidentally update VMI spec on cleanup", func() {
+		vmi := api2.NewMinimalVMI("testvmi")
+		vmi.Spec.Volumes = []v1.Volume{
+			{
+				Name: "testvol",
+				VolumeSource: v1.VolumeSource{
+					PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
+						PersistentVolumeClaimVolumeSource: k8sv1.PersistentVolumeClaimVolumeSource{ClaimName: "testclaim"},
+					},
+				},
+			},
+		}
+		vmi.Status.VolumeStatus = []v1.VolumeStatus{
+			{
+				Name: "testvol",
+				PersistentVolumeClaimInfo: &v1.PersistentVolumeClaimInfo{
+					ClaimName:  "testclaim",
+					VolumeMode: pointer.P(k8sv1.PersistentVolumeFilesystem),
+					Capacity: k8sv1.ResourceList{
+						k8sv1.ResourceStorage: resource.MustParse("1Gi"),
+					},
+					Requests: k8sv1.ResourceList{
+						k8sv1.ResourceStorage: resource.MustParse("1Gi"),
+					},
+				},
+			},
+		}
+		vmi.UID = vmiTestUUID
+		vmi.ObjectMeta.ResourceVersion = "1"
+		vmi.Status.Phase = v1.Running
+		vmi.Labels = make(map[string]string)
+		vmi.Status.NodeName = "othernode"
+		vmi.Labels[v1.MigrationTargetNodeNameLabel] = host
+		vmi.Status.MigrationState = &v1.VirtualMachineInstanceMigrationState{
+			TargetNode:   host,
+			SourceNode:   "othernode",
+			MigrationUID: "123",
+			Failed:       true,
+			EndTimestamp: pointer.P(metav1.Now()),
+		}
+		vmi = addActivePods(vmi, podTestUUID, host)
+
+		createVMI(vmi)
+
+		client.EXPECT().SignalTargetPodCleanup(vmi)
+		originalVMI := vmi.DeepCopy()
+		sanityExecute()
+
+		updatedVMI, err := virtfakeClient.KubevirtV1().VirtualMachineInstances(metav1.NamespaceDefault).Get(context.TODO(), vmi.Name, metav1.GetOptions{})
+		Expect(err).ToNot(HaveOccurred())
+		// Update occured for labels but not spec
+		Expect(updatedVMI.Spec.Volumes).To(Equal(originalVMI.Spec.Volumes))
+		Expect(updatedVMI.Labels).To(Not(HaveKey(v1.MigrationTargetNodeNameLabel)))
+	})
+
+	It("should preserve CreateMigrationTarget annotation on failed migration cleanup", func() {
+		vmi := api2.NewMinimalVMI("testvmi")
+		vmi.UID = vmiTestUUID
+		vmi.ObjectMeta.ResourceVersion = "1"
+		vmi.Status.Phase = v1.Running
+		vmi.Labels = make(map[string]string)
+		vmi.Annotations = map[string]string{
+			v1.CreateMigrationTarget: "true",
+		}
+		vmi.Status.NodeName = "othernode"
+		vmi.Labels[v1.MigrationTargetNodeNameLabel] = host
+		vmi.Status.MigrationState = &v1.VirtualMachineInstanceMigrationState{
+			TargetNode:   host,
+			SourceNode:   "othernode",
+			MigrationUID: "123",
+			Failed:       true,
+			EndTimestamp: pointer.P(metav1.Now()),
+		}
+		vmi = addActivePods(vmi, podTestUUID, host)
+
+		createVMI(vmi)
+
+		client.EXPECT().SignalTargetPodCleanup(vmi)
+		sanityExecute()
+
+		updatedVMI, err := virtfakeClient.KubevirtV1().VirtualMachineInstances(metav1.NamespaceDefault).Get(context.TODO(), vmi.Name, metav1.GetOptions{})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(updatedVMI.Labels).To(Not(HaveKey(v1.MigrationTargetNodeNameLabel)))
+		Expect(updatedVMI.Annotations).To(HaveKey(v1.CreateMigrationTarget))
+	})
+
+	It("should remove CreateMigrationTarget annotation on successful migration cleanup", func() {
+		vmi := api2.NewMinimalVMI("testvmi")
+		vmi.UID = vmiTestUUID
+		vmi.ObjectMeta.ResourceVersion = "1"
+		vmi.Status.Phase = v1.Running
+		vmi.Labels = make(map[string]string)
+		vmi.Annotations = map[string]string{
+			v1.CreateMigrationTarget: "true",
+		}
+		vmi.Status.NodeName = host
+		vmi.Labels[v1.MigrationTargetNodeNameLabel] = host
+		pastTime := metav1.NewTime(metav1.Now().Add(time.Duration(-10) * time.Second))
+		vmi.Status.MigrationState = &v1.VirtualMachineInstanceMigrationState{
+			TargetNode:               host,
+			TargetNodeAddress:        "127.0.0.1:12345",
+			SourceNode:               "othernode",
+			MigrationUID:             "123",
+			TargetNodeDomainDetected: true,
+			StartTimestamp:           &pastTime,
+			EndTimestamp:             pointer.P(metav1.Now()),
+			Completed:                true,
+		}
+		vmi = addActivePods(vmi, podTestUUID, host)
+
+		createVMI(vmi)
+
+		client.EXPECT().FinalizeVirtualMachineMigration(vmi, gomock.Any())
+		sanityExecute()
+
+		updatedVMI, err := virtfakeClient.KubevirtV1().VirtualMachineInstances(metav1.NamespaceDefault).Get(context.TODO(), vmi.Name, metav1.GetOptions{})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(updatedVMI.Labels).To(Not(HaveKey(v1.MigrationTargetNodeNameLabel)))
+		Expect(updatedVMI.Annotations).To(Not(HaveKey(v1.CreateMigrationTarget)))
+	})
+
+	Context("migrationProxyKey", func() {
+		It("should return the VMI UID for regular migrations", func() {
+			vmi := api2.NewMinimalVMI("testvmi")
+			vmi.UID = "local-uid"
+			vmi.Status.MigrationState = &v1.VirtualMachineInstanceMigrationState{
+				TargetNode: "node-1",
+			}
+			Expect(migrationProxyKey(vmi)).To(Equal("local-uid"))
+		})
+
+		It("should return the VMI UID when MigrationState is nil", func() {
+			vmi := api2.NewMinimalVMI("testvmi")
+			vmi.UID = "local-uid"
+			Expect(migrationProxyKey(vmi)).To(Equal("local-uid"))
+		})
+
+		It("should return the source VMI UID for decentralized UNIX transport migrations", func() {
+			sourceUID := types.UID("source-uid")
+			vmi := api2.NewMinimalVMI("testvmi")
+			vmi.UID = "target-uid"
+			vmi.Annotations = map[string]string{v1.CreateMigrationTarget: "true"}
+			vmi.Status.MigrationTransport = v1.MigrationTransportUnix
+			vmi.Status.MigrationState = &v1.VirtualMachineInstanceMigrationState{
+				TargetNode: "node-1",
+				SourceState: &v1.VirtualMachineInstanceMigrationSourceState{
+					VirtualMachineInstanceCommonMigrationState: v1.VirtualMachineInstanceCommonMigrationState{
+						Node:                      "source-node",
+						VirtualMachineInstanceUID: &sourceUID,
+					},
+				},
+			}
+			Expect(migrationProxyKey(vmi)).To(Equal("source-uid"))
+		})
+
+		It("should return the VMI UID for decentralized non-UNIX transport migrations", func() {
+			sourceUID := types.UID("source-uid")
+			vmi := api2.NewMinimalVMI("testvmi")
+			vmi.UID = "target-uid"
+			vmi.Annotations = map[string]string{v1.CreateMigrationTarget: "true"}
+			vmi.Status.MigrationState = &v1.VirtualMachineInstanceMigrationState{
+				TargetNode: "node-1",
+				SourceState: &v1.VirtualMachineInstanceMigrationSourceState{
+					VirtualMachineInstanceCommonMigrationState: v1.VirtualMachineInstanceCommonMigrationState{
+						Node:                      "source-node",
+						VirtualMachineInstanceUID: &sourceUID,
+					},
+				},
+			}
+			Expect(migrationProxyKey(vmi)).To(Equal("target-uid"))
+		})
+
+		It("should return the VMI UID when SourceState has no VirtualMachineInstanceUID", func() {
+			vmi := api2.NewMinimalVMI("testvmi")
+			vmi.UID = "local-uid"
+			vmi.Status.MigrationState = &v1.VirtualMachineInstanceMigrationState{
+				TargetNode: "node-1",
+				SourceState: &v1.VirtualMachineInstanceMigrationSourceState{
+					VirtualMachineInstanceCommonMigrationState: v1.VirtualMachineInstanceCommonMigrationState{
+						Node: "source-node",
+					},
+				},
+			}
+			Expect(migrationProxyKey(vmi)).To(Equal("local-uid"))
+		})
 	})
 })
 

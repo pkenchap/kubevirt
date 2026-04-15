@@ -83,6 +83,7 @@ type StrategyInterface interface {
 	ControllerDeployments() []*appsv1.Deployment
 	ExportProxyDeployments() []*appsv1.Deployment
 	SynchronizationControllerDeployments() []*appsv1.Deployment
+	VirtTemplateDeployments() []*appsv1.Deployment
 	DaemonSets() []*appsv1.DaemonSet
 	ValidatingWebhookConfigurations() []*admissionregistrationv1.ValidatingWebhookConfiguration
 	MutatingWebhookConfigurations() []*admissionregistrationv1.MutatingWebhookConfiguration
@@ -203,6 +204,19 @@ func (ins *Strategy) SynchronizationControllerDeployments() []*appsv1.Deployment
 
 	for _, deployment := range ins.deployments {
 		if !strings.Contains(deployment.Name, "virt-synchronization-controller") {
+			continue
+		}
+		deployments = append(deployments, deployment)
+	}
+	return deployments
+}
+
+func (ins *Strategy) VirtTemplateDeployments() []*appsv1.Deployment {
+	var deployments []*appsv1.Deployment
+
+	for _, deployment := range ins.deployments {
+		if !strings.Contains(deployment.Name, "virt-template-controller") &&
+			!strings.Contains(deployment.Name, "virt-template-apiserver") {
 			continue
 		}
 		deployments = append(deployments, deployment)
@@ -498,7 +512,7 @@ func GenerateCurrentInstallStrategy(config *operatorutil.KubeVirtDeploymentConfi
 	rbaclist := make([]runtime.Object, 0)
 	rbaclist = append(rbaclist, rbac.GetAllCluster()...)
 	rbaclist = append(rbaclist, rbac.GetAllApiServer(config.GetNamespace())...)
-	rbaclist = append(rbaclist, rbac.GetAllController(config.GetNamespace())...)
+	rbaclist = append(rbaclist, rbac.GetAllController(config.GetNamespace(), !config.ExternalNetResourceInjectionEnabled())...)
 	rbaclist = append(rbaclist, rbac.GetAllHandler(config.GetNamespace())...)
 	rbaclist = append(rbaclist, rbac.GetAllExportProxy(config.GetNamespace())...)
 	rbaclist = append(rbaclist, rbac.GetAllSynchronizationController(config.GetNamespace())...)
@@ -580,6 +594,8 @@ func GenerateCurrentInstallStrategy(config *operatorutil.KubeVirtDeploymentConfi
 	strategy.validatingWebhookConfigurations = append(strategy.validatingWebhookConfigurations, components.NewOpertorValidatingWebhookConfiguration(operatorNamespace))
 	strategy.validatingWebhookConfigurations = append(strategy.validatingWebhookConfigurations, components.NewVirtAPIValidatingWebhookConfiguration(config.GetNamespace()))
 	strategy.mutatingWebhookConfigurations = append(strategy.mutatingWebhookConfigurations, components.NewVirtAPIMutatingWebhookConfiguration(config.GetNamespace()))
+	// Add feature-gated webhook for ContainerPath volumes (handled conditionally in createOrDeleteContainerPathVolumesWebhook)
+	strategy.mutatingWebhookConfigurations = append(strategy.mutatingWebhookConfigurations, components.NewVirtLauncherPodMutatingWebhookConfiguration(config.GetNamespace()))
 
 	strategy.services = append(strategy.services, components.NewPrometheusService(config.GetNamespace()))
 	strategy.services = append(strategy.services, components.NewApiServerService(config.GetNamespace()))
@@ -624,6 +640,32 @@ func GenerateCurrentInstallStrategy(config *operatorutil.KubeVirtDeploymentConfi
 		return nil, fmt.Errorf("error generating preferences for environment %v", err)
 	}
 	strategy.preferences = preferences
+
+	if config.VirtTemplateDeploymentEnabled() {
+		resources, err := components.NewVirtTemplateResources(config)
+		if err != nil {
+			return nil, fmt.Errorf("error generating virt-template resources for environment %v", err)
+		}
+		strategy.crds = append(strategy.crds, resources.CRDs...)
+		strategy.serviceAccounts = append(strategy.serviceAccounts, resources.ServiceAccounts...)
+		strategy.roles = append(strategy.roles, resources.Roles...)
+		strategy.clusterRoles = append(strategy.clusterRoles, resources.ClusterRoles...)
+		strategy.roleBindings = append(strategy.roleBindings, resources.RoleBindings...)
+		strategy.clusterRoleBindings = append(strategy.clusterRoleBindings, resources.ClusterRoleBindings...)
+		strategy.services = append(strategy.services, resources.Services...)
+		strategy.deployments = append(strategy.deployments, resources.Deployments...)
+		strategy.validatingAdmissionPolicies = append(strategy.validatingAdmissionPolicies, resources.ValidatingAdmissionPolicies...)
+		strategy.validatingAdmissionPolicyBindings = append(strategy.validatingAdmissionPolicyBindings, resources.ValidatingAdmissionPolicyBindings...)
+		strategy.validatingWebhookConfigurations = append(strategy.validatingWebhookConfigurations, resources.ValidatingWebhookConfigurations...)
+		strategy.apiServices = append(strategy.apiServices, resources.APIServices...)
+		strategy.certificateSecrets = append(strategy.certificateSecrets, components.NewVirtTemplateCertSecrets(config.GetNamespace())...)
+	}
+
+	if config.OptOutRoleAggregationEnabled() {
+		for _, cr := range strategy.clusterRoles {
+			disableAggregateLabels(cr)
+		}
+	}
 
 	return strategy, nil
 }
@@ -915,4 +957,14 @@ func isServiceAccountExist(clientset k8coresv1.CoreV1Interface, ns string, servi
 	}
 
 	return false, err
+}
+
+const aggregateLabelPrefix = "rbac.authorization.k8s.io/aggregate-to-"
+
+func disableAggregateLabels(cr *rbacv1.ClusterRole) {
+	for key := range cr.Labels {
+		if strings.HasPrefix(key, aggregateLabelPrefix) {
+			cr.Labels[key] = "false"
+		}
+	}
 }

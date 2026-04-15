@@ -87,10 +87,7 @@ var _ = Describe("VirtualMachineInstance migration target", func() {
 		migrationSourcePasstRepairHandler *stubSourcePasstRepairHandler
 	)
 
-	const (
-		host                           = "master"
-		migratableNetworkBindingPlugin = "mig_plug"
-	)
+	const host = "master"
 
 	addDomain := func(domain *api.Domain) {
 		Expect(controller.domainStore.Add(domain)).To(Succeed())
@@ -157,18 +154,15 @@ var _ = Describe("VirtualMachineInstance migration target", func() {
 
 		virtfakeClient = kubevirtfake.NewSimpleClientset()
 		ctrl := gomock.NewController(GinkgoT())
-		kv := &v1.KubeVirtConfiguration{
-			NetworkConfiguration: &v1.NetworkConfiguration{Binding: map[string]v1.InterfaceBindingPlugin{
-				migratableNetworkBindingPlugin: {Migration: &v1.InterfaceBindingMigration{}},
-			}},
-			DeveloperConfiguration: &v1.DeveloperConfiguration{
-				FeatureGates: []string{featuregate.PasstIPStackMigration},
-			},
-		}
 		k8sfakeClient := fake.NewSimpleClientset()
 		virtClient = kubecli.NewMockKubevirtClient(ctrl)
 		virtClient.EXPECT().CoreV1().Return(k8sfakeClient.CoreV1()).AnyTimes()
 		virtClient.EXPECT().VirtualMachineInstance(metav1.NamespaceDefault).Return(virtfakeClient.KubevirtV1().VirtualMachineInstances(metav1.NamespaceDefault)).AnyTimes()
+		kv := &v1.KubeVirtConfiguration{
+			DeveloperConfiguration: &v1.DeveloperConfiguration{
+				FeatureGates: []string{featuregate.PasstBinding},
+			},
+		}
 		config, _, _ := testutils.NewFakeClusterConfigUsingKVConfig(kv)
 
 		Expect(os.MkdirAll(filepath.Join(vmiShareDir, "dev"), 0755)).To(Succeed())
@@ -184,7 +178,6 @@ var _ = Describe("VirtualMachineInstance migration target", func() {
 
 		mockIsolationDetector := isolation.NewMockPodIsolationDetector(ctrl)
 		mockIsolationDetector.EXPECT().Detect(gomock.Any()).Return(mockIsolationResult, nil).AnyTimes()
-		mockIsolationDetector.EXPECT().AdjustResources(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 
 		migrationProxy := migrationproxy.NewMigrationProxyManager(tlsConfig, tlsConfig, tlsConfig, config)
 		launcherClientManager := &launcherclients.MockLauncherClientManager{
@@ -299,7 +292,7 @@ var _ = Describe("VirtualMachineInstance migration target", func() {
 				AllowPostCopy:            true,
 				AllowWorkloadDisruption:  true,
 				AllowAutoConverge:        false,
-				ParallelMigrationThreads: nil,
+				ParallelMigrationThreads: pointer.P(parallelMultifdMigrationThreads),
 			}
 			client.EXPECT().MigrateVirtualMachine(vmi, expectedOptions)
 			sanityExecute()
@@ -556,7 +549,6 @@ var _ = Describe("VirtualMachineInstance migration target", func() {
 				testutils.ExpectEvent(recorder, VMIMigrating)
 			},
 				Entry("if CPU is limited", false, k8sv1.ResourceList{k8sv1.ResourceCPU: resource.MustParse("4")}),
-				Entry("if post-copy is enabled", true, k8sv1.ResourceList{}),
 			)
 		})
 	})

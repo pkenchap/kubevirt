@@ -7,6 +7,8 @@ import (
 
 	"kubevirt.io/kubevirt/tests/decorators"
 	"kubevirt.io/kubevirt/tests/events"
+	"kubevirt.io/kubevirt/tests/libkubevirt"
+	kvconfig "kubevirt.io/kubevirt/tests/libkubevirt/config"
 	"kubevirt.io/kubevirt/tests/libvmops"
 	"kubevirt.io/kubevirt/tests/watcher"
 
@@ -801,6 +803,180 @@ var _ = Describe(SIG("VirtualMachineSnapshot Tests", func() {
 					}
 				})
 			})
+
+			Context("online live updates", Serial, func() {
+				BeforeEach(func() {
+					virtClient = kubevirt.Client()
+					updateStrategy := &v1.KubeVirtWorkloadUpdateStrategy{
+						WorkloadUpdateMethods: []v1.WorkloadUpdateMethod{v1.WorkloadUpdateMethodLiveMigrate},
+					}
+					rolloutStrategy := pointer.P(v1.VMRolloutStrategyLiveUpdate)
+					err := kvconfig.RegisterKubevirtConfigChange(
+						kvconfig.WithWorkloadUpdateStrategy(updateStrategy),
+						kvconfig.WithVMRolloutStrategy(rolloutStrategy),
+					)
+					Expect(err).ToNot(HaveOccurred())
+
+					currentKv := libkubevirt.GetCurrentKv(virtClient)
+					kvconfig.WaitForConfigToBePropagatedToComponent(
+						"kubevirt.io=virt-controller",
+						currentKv.ResourceVersion,
+						kvconfig.ExpectResourceVersionToBeLessEqualThanConfigVersion,
+						time.Minute)
+				})
+
+				It("should include cpu and memory hotplug in vm snapshot", func() {
+					var vmi *v1.VirtualMachineInstance
+					vm = renderVMWithRegistryImportDataVolume(cd.ContainerDiskFedoraTestTooling, snapshotStorageClass)
+					guest := resource.MustParse("1Gi")
+					vm.Spec.Template.Spec.Domain.Memory = &v1.Memory{
+						Guest: &guest,
+					}
+					vm.Spec.Template.Spec.Domain.CPU = &v1.CPU{
+						Sockets: 1,
+						Cores:   1,
+						Threads: 1,
+					}
+					vm, vmi = createAndStartVM(vm)
+					Eventually(matcher.ThisVMI(vmi), 12*time.Minute, 2*time.Second).Should(matcher.HaveConditionTrue(v1.VirtualMachineInstanceAgentConnected))
+					Expect(console.LoginToFedora(vmi)).To(Succeed())
+
+					By("Performing CPU hotplug")
+					patchData, err := patch.GenerateTestReplacePatch("/spec/template/spec/domain/cpu/sockets", 1, 2)
+					Expect(err).NotTo(HaveOccurred())
+					_, err = virtClient.VirtualMachine(vm.Namespace).Patch(context.Background(), vm.Name, types.JSONPatchType, patchData, metav1.PatchOptions{})
+					Expect(err).ToNot(HaveOccurred())
+
+					By("Waiting for hot change CPU condition to appear")
+					Eventually(ThisVMI(vmi), 1*time.Minute, 2*time.Second).Should(HaveConditionTrue(v1.VirtualMachineInstanceVCPUChange))
+
+					By("Ensuring the vm doesn't have a RestartRequired condition")
+					vm, err = virtClient.VirtualMachine(vm.Namespace).Get(context.Background(), vm.Name, metav1.GetOptions{})
+					Expect(err).NotTo(HaveOccurred())
+
+					By("Performing Memory hotplug")
+					newGuestMemory := resource.MustParse("2Gi")
+					patchData, err = patch.GenerateTestReplacePatch("/spec/template/spec/domain/memory/guest", guest.String(), newGuestMemory.String())
+					Expect(err).NotTo(HaveOccurred())
+					_, err = virtClient.VirtualMachine(vm.Namespace).Patch(context.Background(), vm.Name, types.JSONPatchType, patchData, metav1.PatchOptions{})
+					Expect(err).ToNot(HaveOccurred())
+
+					By("Waiting for hot change memory condition to appear")
+					Eventually(ThisVMI(vmi), 1*time.Minute, 2*time.Second).Should(HaveConditionTrue(v1.VirtualMachineInstanceMemoryChange))
+
+					By("Ensuring the vm doesn't have a RestartRequired condition")
+					vm, err = virtClient.VirtualMachine(vm.Namespace).Get(context.Background(), vm.Name, metav1.GetOptions{})
+					Expect(err).NotTo(HaveOccurred())
+
+					By("Create Snapshot")
+					snapshot = libstorage.NewSnapshot(vm.Name, vm.Namespace)
+					_, err = virtClient.VirtualMachineSnapshot(snapshot.Namespace).Create(context.Background(), snapshot, metav1.CreateOptions{})
+					Expect(err).ToNot(HaveOccurred())
+
+					snapshot = libstorage.WaitSnapshotSucceeded(virtClient, vm.Namespace, snapshot.Name)
+					expectedIndications := []snapshotv1.Indication{snapshotv1.VMSnapshotGuestAgentIndication, snapshotv1.VMSnapshotOnlineSnapshotIndication}
+					Expect(snapshot.Status.Indications).To(Equal(expectedIndications))
+
+					Expect(err).ToNot(HaveOccurred())
+					contentName := *snapshot.Status.VirtualMachineSnapshotContentName
+					content, err := virtClient.VirtualMachineSnapshotContent(vm.Namespace).Get(context.Background(), contentName, metav1.GetOptions{})
+					Expect(err).ToNot(HaveOccurred())
+					contentVMTemplate := content.Spec.Source.VirtualMachine.Spec.Template
+					Expect(contentVMTemplate.Spec.Domain.CPU.Sockets).To(BeNumerically("==", 2))
+					Expect(contentVMTemplate.Spec.Domain.Memory.Guest.Cmp(newGuestMemory)).To(BeZero())
+				})
+
+				It("should include volume migration in vm snapshot", func() {
+					var vmi *v1.VirtualMachineInstance
+					vm = renderVMWithRegistryImportDataVolume(cd.ContainerDiskFedoraTestTooling, snapshotStorageClass)
+
+					dv := libdv.NewDataVolume(
+						libdv.WithName("test"),
+						libdv.WithBlankImageSource(),
+						libdv.WithStorage(
+							libdv.StorageWithStorageClass(snapshotStorageClass),
+							libdv.StorageWithVolumeSize("1Gi"),
+						),
+					)
+					libstorage.AddDataVolumeTemplate(vm, dv)
+					libstorage.AddDataVolume(vm, dv.Name, dv)
+
+					vm, vmi = createAndStartVM(vm)
+					Eventually(matcher.ThisVMI(vmi), 12*time.Minute, 2*time.Second).Should(matcher.HaveConditionTrue(v1.VirtualMachineInstanceAgentConnected))
+					Expect(console.LoginToFedora(vmi)).To(Succeed())
+
+					dvLiveMigrate := libdv.NewDataVolume(
+						libdv.WithName("test-live-migrate"),
+						libdv.WithBlankImageSource(),
+						libdv.WithStorage(
+							libdv.StorageWithStorageClass(snapshotStorageClass),
+							libdv.StorageWithVolumeSize("1Gi"),
+						),
+					)
+					dvLiveMigrate, err = virtClient.CdiClient().CdiV1beta1().DataVolumes(testsuite.GetTestNamespace(nil)).Create(context.Background(), dvLiveMigrate, metav1.CreateOptions{})
+					Expect(err).ToNot(HaveOccurred())
+
+					By("Performing volume migration")
+					patchData, err := patch.New(
+						patch.WithReplace("/spec/template/spec/volumes/1/dataVolume/name", dvLiveMigrate.Name),
+						patch.WithReplace("/spec/dataVolumeTemplates/1/metadata/name", dvLiveMigrate.Name),
+						patch.WithReplace("/spec/updateVolumesStrategy", v1.UpdateVolumesStrategyMigration),
+					).GeneratePayload()
+					Expect(err).ToNot(HaveOccurred())
+					_, err = virtClient.VirtualMachine(vm.Namespace).Patch(context.Background(), vm.Name, types.JSONPatchType, patchData, metav1.PatchOptions{})
+					Expect(err).ToNot(HaveOccurred())
+
+					By("Waiting for volume live migrate condition to appear")
+					Eventually(ThisVMI(vmi), 1*time.Minute, 2*time.Second).Should(HaveConditionTrue(v1.VirtualMachineInstanceVolumesChange))
+
+					By("Ensuring the vm doesn't have a RestartRequired condition")
+					vm, err = virtClient.VirtualMachine(vm.Namespace).Get(context.Background(), vm.Name, metav1.GetOptions{})
+					Expect(err).NotTo(HaveOccurred())
+
+					By("Create Snapshot")
+					snapshot = libstorage.NewSnapshot(vm.Name, vm.Namespace)
+					_, err = virtClient.VirtualMachineSnapshot(snapshot.Namespace).Create(context.Background(), snapshot, metav1.CreateOptions{})
+					Expect(err).ToNot(HaveOccurred())
+
+					snapshot = libstorage.WaitSnapshotSucceeded(virtClient, vm.Namespace, snapshot.Name)
+					expectedIndications := []snapshotv1.Indication{snapshotv1.VMSnapshotGuestAgentIndication, snapshotv1.VMSnapshotOnlineSnapshotIndication}
+					Expect(snapshot.Status.Indications).To(Equal(expectedIndications))
+
+					updatedVM, err := virtClient.VirtualMachine(vm.Namespace).Get(context.Background(), vm.Name, metav1.GetOptions{})
+					Expect(err).ToNot(HaveOccurred())
+					Expect(err).ToNot(HaveOccurred())
+					contentName := *snapshot.Status.VirtualMachineSnapshotContentName
+					content, err := virtClient.VirtualMachineSnapshotContent(vm.Namespace).Get(context.Background(), contentName, metav1.GetOptions{})
+					Expect(err).ToNot(HaveOccurred())
+					contentVMTemplate := content.Spec.Source.VirtualMachine.Spec.Template
+					Expect(contentVMTemplate.Spec.Volumes).To(ConsistOf(updatedVM.Spec.Template.Spec.Volumes))
+
+					for _, vol := range updatedVM.Spec.Template.Spec.Volumes {
+						found := false
+						for _, vb := range content.Spec.VolumeBackups {
+							if vol.DataVolume.Name == vb.PersistentVolumeClaim.Name {
+								found = true
+								Expect(vol.Name).To(Equal(vb.VolumeName))
+
+								pvc, err := virtClient.CoreV1().PersistentVolumeClaims(vm.Namespace).Get(context.Background(), vol.DataVolume.Name, metav1.GetOptions{})
+								Expect(err).ToNot(HaveOccurred())
+								Expect(pvc.Spec).To(Equal(vb.PersistentVolumeClaim.Spec))
+
+								Expect(vb.VolumeSnapshotName).ToNot(BeNil())
+								vs, err := virtClient.
+									KubernetesSnapshotClient().
+									SnapshotV1().
+									VolumeSnapshots(vm.Namespace).
+									Get(context.Background(), *vb.VolumeSnapshotName, metav1.GetOptions{})
+								Expect(err).ToNot(HaveOccurred())
+								Expect(vs.Status.Error).To(BeNil())
+								Expect(*vs.Status.ReadyToUse).To(BeTrue())
+							}
+						}
+						Expect(found).To(BeTrue())
+					}
+				})
+			})
 		})
 
 		Context("With more complicated VM", func() {
@@ -1076,58 +1252,6 @@ var _ = Describe(SIG("VirtualMachineSnapshot Tests", func() {
 
 				Expect(snapshot.Status.CreationTime).To(BeNil())
 			})
-		})
-
-		It("[QUARANTINE]vmsnapshot should update error if vmsnapshotcontent is unready to use and error", decorators.Quarantine, func() {
-			vm = renderVMWithRegistryImportDataVolume(cd.ContainerDiskAlpine, snapshotStorageClass)
-			vm.Spec.RunStrategy = virtpointer.P(v1.RunStrategyAlways)
-			vm, err = virtClient.VirtualMachine(vm.Namespace).Create(context.Background(), vm, metav1.CreateOptions{})
-			Expect(err).ToNot(HaveOccurred())
-
-			Eventually(ThisVM(vm)).WithTimeout(300 * time.Second).WithPolling(time.Second).Should(BeReady())
-
-			for _, dvt := range vm.Spec.DataVolumeTemplates {
-				waitDataVolumePopulated(vm.Namespace, dvt.Name)
-			}
-			// Delete DV and wait pvc get deletionTimestamp
-			// when pvc is deleting snapshot is not possible
-			volumeName := vm.Spec.DataVolumeTemplates[0].Name
-			By("Deleting Data volume")
-			err = virtClient.CdiClient().CdiV1beta1().DataVolumes(vm.Namespace).Delete(context.Background(), volumeName, metav1.DeleteOptions{})
-			Expect(err).ToNot(HaveOccurred())
-			Eventually(func() *metav1.Time {
-				pvc, err := virtClient.CoreV1().PersistentVolumeClaims(vm.Namespace).Get(context.Background(), volumeName, metav1.GetOptions{})
-				Expect(err).ToNot(HaveOccurred())
-				return pvc.DeletionTimestamp
-			}, 30*time.Second, time.Second).ShouldNot(BeNil())
-
-			By("Creating VMSnapshot")
-			snapshot = libstorage.NewSnapshot(vm.Name, vm.Namespace)
-
-			_, err = virtClient.VirtualMachineSnapshot(snapshot.Namespace).Create(context.Background(), snapshot, metav1.CreateOptions{})
-			Expect(err).ToNot(HaveOccurred())
-
-			Eventually(func() *snapshotv1.VirtualMachineSnapshotStatus {
-				snapshot, err = virtClient.VirtualMachineSnapshot(vm.Namespace).Get(context.Background(), snapshot.Name, metav1.GetOptions{})
-				Expect(err).ToNot(HaveOccurred())
-				return snapshot.Status
-			}, time.Minute, 2*time.Second).Should(gstruct.PointTo(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
-				"Conditions": ContainElements(
-					gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
-						"Type":   Equal(snapshotv1.ConditionReady),
-						"Status": Equal(corev1.ConditionFalse),
-						"Reason": Equal("Not ready")}),
-					gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
-						"Type":   Equal(snapshotv1.ConditionProgressing),
-						"Status": Equal(corev1.ConditionFalse),
-						"Reason": Equal("In error state")}),
-				),
-				"Phase": Equal(snapshotv1.InProgress),
-				"Error": gstruct.PointTo(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
-					"Message": gstruct.PointTo(ContainSubstring("Failed to create snapshot content with error")),
-				})),
-				"CreationTime": BeNil(),
-			})))
 		})
 
 		It("snapshot create before source wait for volume bound, then continues and succeeds", func() {
@@ -1424,7 +1548,7 @@ var _ = Describe(SIG("VirtualMachineSnapshot Tests", func() {
 				snapshot = libstorage.WaitSnapshotSucceeded(virtClient, vm.Namespace, snapshot.Name)
 				Expect(snapshot.Status.SnapshotVolumes.IncludedVolumes).Should(HaveLen(2))
 				Expect(snapshot.Status.SnapshotVolumes.IncludedVolumes[0]).Should(Equal("snapshotablevolume"))
-				Expect(snapshot.Status.SnapshotVolumes.IncludedVolumes[1]).Should(Equal(fmt.Sprintf("persistent-state-for-%s", vm.Name)))
+				Expect(snapshot.Status.SnapshotVolumes.IncludedVolumes[1]).To(HavePrefix("persistent-state-for-"))
 			})
 		})
 

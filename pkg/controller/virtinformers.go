@@ -39,7 +39,6 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
-	resourcev1 "k8s.io/api/resource/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	extclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
@@ -58,7 +57,7 @@ import (
 	"kubevirt.io/api/core"
 	kubev1 "kubevirt.io/api/core/v1"
 	v1 "kubevirt.io/api/core/v1"
-	exportv1 "kubevirt.io/api/export/v1beta1"
+	exportv1 "kubevirt.io/api/export/v1"
 	instancetypeapi "kubevirt.io/api/instancetype"
 	instancetypev1beta1 "kubevirt.io/api/instancetype/v1beta1"
 	"kubevirt.io/api/migrations"
@@ -176,6 +175,9 @@ type KubeInformerFactory interface {
 
 	// Watches for the kubevirt export CA config map
 	KubeVirtExportCAConfigMap() cache.SharedIndexInformer
+
+	// Watches for the kubevirt backup CA config map
+	KubeVirtBackupCAConfigMap() cache.SharedIndexInformer
 
 	// Watches for changes in kubevirt leases
 	Leases() cache.SharedIndexInformer
@@ -334,14 +336,6 @@ type KubeInformerFactory interface {
 	Pod() cache.SharedIndexInformer
 
 	ResourceQuota() cache.SharedIndexInformer
-
-	ResourceClaim() cache.SharedIndexInformer
-
-	DummyResourceClaim() cache.SharedIndexInformer
-
-	ResourceSlice() cache.SharedIndexInformer
-
-	DummyResourceSlice() cache.SharedIndexInformer
 
 	K8SInformerFactory() informers.SharedInformerFactory
 }
@@ -741,12 +735,26 @@ func GetVirtualMachineExportInformerIndexers() cache.Indexers {
 
 			return nil, nil
 		},
+		"virtualmachinebackup": func(obj interface{}) ([]string, error) {
+			export, ok := obj.(*exportv1.VirtualMachineExport)
+			if !ok {
+				return nil, unexpectedObjectError
+			}
+
+			if export.Spec.Source.APIGroup != nil &&
+				*export.Spec.Source.APIGroup == backupv1.SchemeGroupVersion.Group &&
+				export.Spec.Source.Kind == "VirtualMachineBackup" {
+				return []string{fmt.Sprintf("%s/%s", export.Namespace, export.Spec.Source.Name)}, nil
+			}
+
+			return nil, nil
+		},
 	}
 }
 
 func (f *kubeInformerFactory) VirtualMachineExport() cache.SharedIndexInformer {
 	return f.getInformer("vmExportInformer", func() cache.SharedIndexInformer {
-		lw := cache.NewListWatchFromClient(f.clientSet.GeneratedKubeVirtClient().ExportV1beta1().RESTClient(), "virtualmachineexports", k8sv1.NamespaceAll, fields.Everything())
+		lw := cache.NewListWatchFromClient(f.clientSet.GeneratedKubeVirtClient().ExportV1().RESTClient(), "virtualmachineexports", k8sv1.NamespaceAll, fields.Everything())
 		return cache.NewSharedIndexInformer(lw, &exportv1.VirtualMachineExport{}, f.defaultResync, GetVirtualMachineExportInformerIndexers())
 	})
 }
@@ -1074,6 +1082,15 @@ func (f *kubeInformerFactory) KubeVirtExportCAConfigMap() cache.SharedIndexInfor
 	return f.getInformer("extensionsKubeVirtExportCAConfigMapInformer", func() cache.SharedIndexInformer {
 		restClient := f.clientSet.CoreV1().RESTClient()
 		fieldSelector := fields.OneTermEqualSelector("metadata.name", "kubevirt-export-ca")
+		lw := cache.NewListWatchFromClient(restClient, "configmaps", f.kubevirtNamespace, fieldSelector)
+		return cache.NewSharedIndexInformer(lw, &k8sv1.ConfigMap{}, f.defaultResync, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	})
+}
+
+func (f *kubeInformerFactory) KubeVirtBackupCAConfigMap() cache.SharedIndexInformer {
+	return f.getInformer("extensionsKubeVirtBackupCAConfigMapInformer", func() cache.SharedIndexInformer {
+		restClient := f.clientSet.CoreV1().RESTClient()
+		fieldSelector := fields.OneTermEqualSelector("metadata.name", "kubevirt-backup-ca")
 		lw := cache.NewListWatchFromClient(restClient, "configmaps", f.kubevirtNamespace, fieldSelector)
 		return cache.NewSharedIndexInformer(lw, &k8sv1.ConfigMap{}, f.defaultResync, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
 	})
@@ -1555,34 +1572,6 @@ func (f *kubeInformerFactory) ResourceQuota() cache.SharedIndexInformer {
 	return f.getInformer("resourceQuotaInformer", func() cache.SharedIndexInformer {
 		lw := cache.NewListWatchFromClient(f.clientSet.CoreV1().RESTClient(), "resourcequotas", k8sv1.NamespaceAll, fields.Everything())
 		return cache.NewSharedIndexInformer(lw, &k8sv1.ResourceQuota{}, f.defaultResync, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
-	})
-}
-
-func (f *kubeInformerFactory) ResourceClaim() cache.SharedIndexInformer {
-	return f.getInformer("resourceClaimInformer", func() cache.SharedIndexInformer {
-		lw := cache.NewListWatchFromClient(f.clientSet.ResourceV1().RESTClient(), "resourceclaims", k8sv1.NamespaceAll, fields.Everything())
-		return cache.NewSharedIndexInformer(lw, &resourcev1.ResourceClaim{}, f.defaultResync, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
-	})
-}
-
-func (f *kubeInformerFactory) DummyResourceClaim() cache.SharedIndexInformer {
-	return f.getInformer("fakeResourceClaimInformer", func() cache.SharedIndexInformer {
-		informer, _ := testutils.NewFakeInformerFor(&resourcev1.ResourceClaim{})
-		return informer
-	})
-}
-
-func (f *kubeInformerFactory) ResourceSlice() cache.SharedIndexInformer {
-	return f.getInformer("resourceSliceInformer", func() cache.SharedIndexInformer {
-		lw := cache.NewListWatchFromClient(f.clientSet.ResourceV1().RESTClient(), "resourceslices", k8sv1.NamespaceAll, fields.Everything())
-		return cache.NewSharedIndexInformer(lw, &resourcev1.ResourceSlice{}, f.defaultResync, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
-	})
-}
-
-func (f *kubeInformerFactory) DummyResourceSlice() cache.SharedIndexInformer {
-	return f.getInformer("fakeResourceSliceInformer", func() cache.SharedIndexInformer {
-		informer, _ := testutils.NewFakeInformerFor(&resourcev1.ResourceSlice{})
-		return informer
 	})
 }
 

@@ -43,6 +43,7 @@ import (
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
 
+	"kubevirt.io/kubevirt/pkg/hypervisor"
 	"kubevirt.io/kubevirt/pkg/libvmi"
 	"kubevirt.io/kubevirt/pkg/virt-controller/services"
 	"kubevirt.io/kubevirt/tests/flags"
@@ -63,6 +64,8 @@ const (
 	defaultKWOKNodeDeleteTimeout     = 10 * time.Minute
 	defaultMachineType               = "q35"
 	defaultVirtAPIReplicaCount       = 2
+	ArchAMD64                        = "amd64"
+	ArchS390x                        = "s390x"
 )
 
 const HostPathBase = "/tmp/hostImages"
@@ -103,6 +106,10 @@ func SynchronizedBeforeTestSetup() []byte {
 	}
 
 	if flags.DeployTestingInfrastructureFlag {
+		manifests := GetListOfManifests()
+		Expect(manifests).NotTo(BeEmpty(),
+			fmt.Sprintf("-deploy-testing-infra: no *.yaml found (resolved from -path-to-testing-infra-manifests=%q; see testsuite/manifest.go)",
+				flags.PathToTestingInfrastrucureManifests))
 		WipeTestingInfrastructure()
 		DeployTestingInfrastructure()
 	}
@@ -227,7 +234,9 @@ func EnsureKVMPresent() {
 				virtHandlerNode, err := virtClient.CoreV1().Nodes().Get(context.Background(), pod.Spec.NodeName, metav1.GetOptions{})
 				ExpectWithOffset(1, err).ToNot(HaveOccurred())
 
-				kvmAllocatable, ok1 := virtHandlerNode.Status.Allocatable[services.KvmDevice]
+				kvmLauncherResources := hypervisor.NewLauncherHypervisorResources(v1.KvmHypervisorName)
+				kvmAllocatable, ok1 := virtHandlerNode.Status.Allocatable[services.ConstructHypervisorResourceName(kvmLauncherResources)]
+
 				vhostNetAllocatable, ok2 := virtHandlerNode.Status.Allocatable[services.VhostNetDevice]
 				ready = ready && ok1 && ok2
 				ready = ready && (kvmAllocatable.Value() > 0) && (vhostNetAllocatable.Value() > 0)
@@ -370,7 +379,7 @@ func getKWOKNodeCount() int {
 
 func deployOrWipeTestingInfrastrucure(actionOnObject func(unstructured.Unstructured) error) {
 	// Deploy / delete test infrastructure / dependencies
-	manifests := GetListOfManifests(flags.PathToTestingInfrastrucureManifests)
+	manifests := GetListOfManifests()
 	for _, manifest := range manifests {
 		objects := ReadManifestYamlFile(manifest)
 		for _, obj := range objects {

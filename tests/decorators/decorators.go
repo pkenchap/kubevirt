@@ -72,9 +72,12 @@ var (
 	GuestAgentProbes                     = Label("guest-agent-probes")
 	Passt                                = Label("passt")
 	ImageVolume                          = Label("ImageVolume")
+	RebootPolicy                         = Label("RebootPolicy")
 
 	/* Storage classes */
 
+	// RequiresRWXFilesystemStorage requires a storage class with ReadWriteMany Filesystem storage support
+	RequiresRWXFilesystemStorage = Label("rwxfs")
 	// RequiresSnapshotStorageClass requires a storage class with support for snapshots
 	RequiresSnapshotStorageClass = Label("RequiresSnapshotStorageClass")
 	// RequiresWFFCStorageClass requires a storage class with support for WFFC bindingMode

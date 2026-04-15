@@ -26,8 +26,6 @@ import (
 	"strings"
 	"time"
 
-	k8sversion "k8s.io/apimachinery/pkg/version"
-
 	expect "github.com/google/goexpect"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -35,6 +33,7 @@ import (
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sversion "k8s.io/apimachinery/pkg/version"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
@@ -92,7 +91,7 @@ var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 					Expect(err).ToNot(HaveOccurred())
 
 					By("Waiting until the VirtualMachineInstance is gone")
-					libwait.WaitForVirtualMachineToDisappearWithTimeout(vmi, 120)
+					Expect(libwait.WaitForVirtualMachineToDisappearWithTimeout(vmi, 120*time.Second)).To(Succeed())
 				}
 			})
 		})
@@ -206,21 +205,6 @@ var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 			})
 		})
 	})
-	Describe("Bogus container disk path", func() {
-		Context("that points to outside of the volume", func() {
-			//TODO this could be unit test
-			It("should be rejected on VMI creation", func() {
-				vmi := libvmifact.NewAlpine()
-				vmi.Spec.Volumes[0].ContainerDisk.Path = "../test"
-				By("Starting the VirtualMachineInstance")
-				_, err := virtClient.RestClient().Post().Resource("virtualmachineinstances").Namespace(testsuite.GetTestNamespace(vmi)).Body(vmi).Do(context.Background()).Get()
-				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(ContainSubstring("admission webhook"))
-				Expect(err.Error()).To(ContainSubstring("denied the request"))
-				Expect(err.Error()).To(ContainSubstring("must be an absolute path to a file without relative components"))
-			})
-		})
-	})
 
 	Describe("Simulate an upgrade from a version where ImageVolume was disabled to a version where it is enabled", Serial, decorators.ImageVolume, decorators.NoFlakeCheck, func() {
 		BeforeEach(func() {
@@ -236,12 +220,13 @@ var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 			}
 		})
 
-		DescribeTable("Migration from a source launcher with the bind mount workaround to a target launcher without the bind mount workaround should succeed when ", func(vmi *v1.VirtualMachineInstance) {
+		DescribeTable("Migration from a source launcher with the bind mount workaround to a target launcher without the bind mount workaround should succeed when", func(vmi *v1.VirtualMachineInstance, loginTo console.LoginToFunction) {
 			config.DisableFeatureGate(featuregate.ImageVolume)
 			vmi = libvmops.RunVMIAndExpectLaunch(vmi, libvmops.StartupTimeoutSecondsSmall)
 			By("Fetching virt-launcher pod without ImageVolume")
 			sourcePod, err := libpod.GetPodByVirtualMachineInstance(vmi, vmi.Namespace)
-			Expect(sourcePod.Spec.InitContainers).ToNot(BeEmpty(), "without ImageVolume should include container-disk-binary init container to copy the container-disk binary")
+			Expect(sourcePod.Spec.InitContainers).To(ContainElement(HaveField("Name", "container-disk-binary")),
+				"without ImageVolume should include container-disk-binary init container to copy the container-disk binary")
 			config.EnableFeatureGate(featuregate.ImageVolume)
 			By("Starting new migration and waiting for it to succeed")
 			migration := libmigration.New(vmi.Name, vmi.Namespace)
@@ -255,26 +240,30 @@ var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 			Expect(err).ToNot(HaveOccurred())
 			targetPod, err := libpod.GetPodByVirtualMachineInstance(vmi, vmi.Namespace)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(targetPod.Spec.InitContainers).To(BeEmpty(), "with ImageVolume should not include container-disk-binary init container")
+			Expect(targetPod.Spec.InitContainers).ToNot(ContainElement(HaveField("Name", "container-disk-binary")),
+				"with ImageVolume should not include container-disk-binary init container")
 
 			By("Expecting to be able to login")
-			Expect(console.LoginToAlpine(vmi)).To(Succeed())
+			Expect(loginTo(vmi)).To(Succeed())
 		},
 			Entry("using simple Alpine vmi",
 				libvmifact.NewAlpine(
 					libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding()),
 					libvmi.WithNetwork(v1.DefaultPodNetwork()),
 				),
+				console.LoginToAlpine,
 			),
-			Entry("using  Alpine vmi with custom location", decorators.Periodic,
-				libvmifact.NewAlpine(
+			Entry("using Cirros vmi with custom location", decorators.Periodic,
+				libvmifact.NewCirros(
 					libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding()),
 					libvmi.WithNetwork(v1.DefaultPodNetwork()),
 					overrideCustomLocation,
 				),
+				console.LoginToCirros,
 			),
-			Entry("using  Alpine vmi with kernel boot", decorators.Periodic,
+			Entry("using Alpine vmi with kernel boot", decorators.Periodic,
 				newAlpineWithKernelBoot(),
+				console.LoginToAlpine,
 			),
 		)
 	})

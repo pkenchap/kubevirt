@@ -7,8 +7,11 @@ cmd/virtctl
 cmd/virt-exportserver
 cmd/virt-operator
 pkg/controller/testing
+pkg/downwardmetrics/scraper
 pkg/instancetype
 pkg/libvmi
+pkg/monitoring/metrics
+pkg/monitoring/rules
 pkg/network/admitter
 pkg/network/controllers
 pkg/network/deviceinfo
@@ -27,6 +30,7 @@ pkg/network/netmachinery
 pkg/network/netns
 pkg/network/passt
 pkg/network/pod/annotations
+pkg/network/resources
 pkg/network/vmispec
 pkg/network/vmliveupdate
 pkg/pointer
@@ -34,7 +38,6 @@ pkg/storage/pod/annotations
 pkg/storage/reservation
 pkg/storage/velero
 pkg/tpm
-pkg/util/pdbs
 pkg/util/ratelimiter
 pkg/virt-controller/leaderelectionconfig
 pkg/virt-controller/watch/common
@@ -49,6 +52,7 @@ pkg/virtctl/create/vm
 pkg/virtctl/credentials
 pkg/virtctl/scp
 pkg/virtctl/ssh
+pkg/virtctl/template
 pkg/virtctl/testing
 pkg/virtctl/version
 pkg/virt-handler/cgroup/constants
@@ -56,12 +60,14 @@ pkg/virt-handler/ksm
 pkg/virt-handler/node-labeller/util
 pkg/virt-handler/vsock
 pkg/virt-launcher/metadata
+pkg/virt-launcher/premigration-hook-server/network
 pkg/virt-launcher/virtwrap/access-credentials
 pkg/virt-launcher/virtwrap/agent-poller
 pkg/virt-launcher/virtwrap/converter/metadata
 pkg/virt-launcher/virtwrap/converter/network
 pkg/virt-launcher/virtwrap/converter/storage
 pkg/virt-launcher/virtwrap/converter/virtio
+pkg/virt-launcher/virtwrap/network
 pkg/virt-launcher/virtwrap/statsconv/util
 tests/conformance
 tests/console
@@ -76,6 +82,7 @@ tests/libconfigmap
 tests/libdomain
 tests/libinstancetype
 tests/libkubevirt
+tests/libmonitoring
 tests/libnamespace
 tests/libnet
 tests/libnode
@@ -86,6 +93,7 @@ tests/libssh
 tests/libvmifact
 tests/libvmops
 tests/libwait
+tests/monitoring
 tests/network
 tests/numa
 tests/usb

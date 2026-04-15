@@ -139,9 +139,40 @@ cc_library(
     }),
     linkstatic = 1,
     strip_include_prefix = select({
-        "@io_bazel_rules_go//go/platform:linux_arm64": "/rpm/libvirt-libs_aarch64/usr/include/",
-        "@io_bazel_rules_go//go/platform:linux_s390x": "/rpm/libvirt-libs_s390x/usr/include/",
-        "//conditions:default": "/rpm/libvirt-libs_x86_64/usr/include/",
+        # CentOS Stream 10 combinations
+        "//rpm:x86_64_cs10": "/rpm/libvirt-libs_x86_64_cs10/usr/include/",
+        "//rpm:aarch64_cs10": "/rpm/libvirt-libs_aarch64_cs10/usr/include/",
+        "//rpm:s390x_cs10": "/rpm/libvirt-libs_s390x_cs10/usr/include/",
+        # CentOS Stream 9 combinations (default)
+        "//rpm:aarch64_cs9": "/rpm/libvirt-libs_aarch64_cs9/usr/include/",
+        "//rpm:s390x_cs9": "/rpm/libvirt-libs_s390x_cs9/usr/include/",
+        "//conditions:default": "/rpm/libvirt-libs_x86_64_cs9/usr/include/",
+    }),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "libnbd-libs",
+    srcs = select({
+        "@io_bazel_rules_go//go/platform:linux_arm64": ["//rpm:libnbd-libs_aarch64/usr/lib64"],
+        "@io_bazel_rules_go//go/platform:linux_s390x": ["//rpm:libnbd-libs_s390x/usr/lib64"],
+        "//conditions:default": ["//rpm:libnbd-libs_x86_64/usr/lib64"],
+    }),
+    hdrs = select({
+        "@io_bazel_rules_go//go/platform:linux_arm64": ["//rpm:libnbd-libs_aarch64/usr/include"],
+        "@io_bazel_rules_go//go/platform:linux_s390x": ["//rpm:libnbd-libs_s390x/usr/include"],
+        "//conditions:default": ["//rpm:libnbd-libs_x86_64/usr/include"],
+    }),
+    linkstatic = 1,
+    strip_include_prefix = select({
+        # CentOS Stream 10 combinations
+        "//rpm:x86_64_cs10": "/rpm/libnbd-libs_x86_64_cs10/usr/include/",
+        "//rpm:aarch64_cs10": "/rpm/libnbd-libs_aarch64_cs10/usr/include/",
+        "//rpm:s390x_cs10": "/rpm/libnbd-libs_s390x_cs10/usr/include/",
+        # CentOS Stream 9 combinations (default)
+        "//rpm:aarch64_cs9": "/rpm/libnbd-libs_aarch64_cs9/usr/include/",
+        "//rpm:s390x_cs9": "/rpm/libnbd-libs_s390x_cs9/usr/include/",
+        "//conditions:default": "/rpm/libnbd-libs_x86_64_cs9/usr/include/",
     }),
     visibility = ["//visibility:public"],
 )
@@ -335,7 +366,7 @@ oci_push(
 oci_push(
     name = "push-fedora-with-test-tooling-container-disk",
     image = "//containerimages:fedora-with-test-tooling",
-    repository = "quay.io/fedora-with-test-tooling-container-disk",
+    repository = "quay.io/kubevirt/fedora-with-test-tooling-container-disk",
 )
 
 oci_push(
@@ -348,6 +379,12 @@ oci_push(
     name = "push-fedora-realtime-container-disk",
     image = "//containerimages:fedora-realtime",
     repository = "quay.io/kubevirt/fedora-realtime-container-disk",
+)
+
+oci_push(
+    name = "push-s390x-guestless-kernel",
+    image = "//containerimages:s390x-guestless-kernel",
+    repository = "quay.io/kubevirt/s390x-guestless-kernel",
 )
 
 # testing images
@@ -364,9 +401,28 @@ oci_push(
 )
 
 oci_push(
+    name = "push-test-helpers",
+    testonly = True,
+    image = "//cmd/test-helpers:test-helpers-image",
+    repository = "quay.io/kubevirt/test-helpers",
+)
+
+oci_push(
     name = "push-winrmcli",
     image = "//images/winrmcli:winrmcli-image",
     repository = "quay.io/kubevirt/winrmcli",
+)
+
+oci_push(
+    name = "push-virt-template-apiserver",
+    image = "//images/virt-template:virt-template-apiserver-image",
+    repository = "quay.io/kubevirt/virt-template-apiserver",
+)
+
+oci_push(
+    name = "push-virt-template-controller",
+    image = "//images/virt-template:virt-template-controller-image",
+    repository = "quay.io/kubevirt/virt-template-controller",
 )
 
 genrule(

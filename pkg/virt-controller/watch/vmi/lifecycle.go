@@ -26,11 +26,13 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	k8sv1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -57,6 +59,7 @@ import (
 	"kubevirt.io/kubevirt/pkg/virt-controller/watch/common"
 	"kubevirt.io/kubevirt/pkg/virt-controller/watch/descheduler"
 	"kubevirt.io/kubevirt/pkg/virt-controller/watch/topology"
+	"kubevirt.io/kubevirt/pkg/virtiofs"
 )
 
 func (c *Controller) sync(vmi *virtv1.VirtualMachineInstance, pod *k8sv1.Pod, dataVolumes []*cdiv1.DataVolume) (common.SyncError, *k8sv1.Pod) {
@@ -136,6 +139,14 @@ func (c *Controller) sync(vmi *virtv1.VirtualMachineInstance, pod *k8sv1.Pod, da
 			return common.NewSyncError(fmt.Errorf("PVC pending"), controller.BackendStorageNotReadyReason), pod
 		}
 
+		// Block pod creation if VMI uses ContainerPath volumes but feature gate is disabled
+		containerPathVolumes := virtiofs.GetContainerPathVolumesWithFilesystems(vmi)
+		if len(containerPathVolumes) > 0 && !c.clusterConfig.ContainerPathVolumesEnabled() {
+			err := fmt.Errorf("VMI has ContainerPath volumes but the ContainerPathVolumes feature gate is disabled")
+			c.recorder.Eventf(vmi, k8sv1.EventTypeWarning, virtv1.ContainerPathVolumesDisabledReason, "Cannot create pod: %v", err)
+			return common.NewSyncError(err, virtv1.ContainerPathVolumesDisabledReason), pod
+		}
+
 		var templatePod *k8sv1.Pod
 		if isWaitForFirstConsumer {
 			log.Log.V(3).Object(vmi).Infof("Scheduling temporary pod for WaitForFirstConsumer DV")
@@ -177,6 +188,18 @@ func (c *Controller) sync(vmi *virtv1.VirtualMachineInstance, pod *k8sv1.Pod, da
 		err := c.cleanupWaitForFirstConsumerTemporaryPods(vmi, pod)
 		if err != nil {
 			return common.NewSyncError(fmt.Errorf("failed to clean up temporary pods: %v", err), controller.FailedHotplugSyncReason), pod
+		}
+	}
+
+	// Check if pod is missing expected virtiofs containers for ContainerPath volumes.
+	// This can happen if the feature gate was disabled after the VMI was created,
+	// causing the pod mutating webhook to not inject the required containers.
+	if !isTempPod(pod) {
+		missingContainers := virtiofs.MissingContainerPathContainers(vmi, pod)
+		if len(missingContainers) > 0 {
+			err := fmt.Errorf("pod is missing virtiofs containers for ContainerPath volumes: %v", missingContainers)
+			c.recorder.Eventf(vmi, k8sv1.EventTypeWarning, virtv1.MissingVirtiofsContainersReason, "Pod sync error: %v", err)
+			return common.NewSyncError(err, virtv1.MissingVirtiofsContainersReason), pod
 		}
 	}
 
@@ -292,6 +315,13 @@ func (c *Controller) updateStatus(vmi *virtv1.VirtualMachineInstance, pod *k8sv1
 		c.backendStorage.UpdateVolumeStatus(vmiCopy, pvc)
 	}
 
+	if c.clusterConfig.VmiMemoryOverheadReportEnabled() && vmiPodExists {
+		c.updateMemoryOverheadStatusFromPod(vmiCopy, pod)
+	}
+
+	migrationTargetFailed := vmiCopy.IsMigrationTarget() &&
+		vmiCopy.Status.MigrationState != nil && vmiCopy.Status.MigrationState.Failed
+
 	switch {
 	case vmi.IsUnprocessed():
 		if vmiPodExists {
@@ -300,15 +330,13 @@ func (c *Controller) updateStatus(vmi *virtv1.VirtualMachineInstance, pod *k8sv1
 			vmiCopy.Status.Phase = virtv1.Failed
 		} else if vmi.IsMigrationTarget() && !vmi.IsMigrationTargetNodeLabelSet() {
 			vmiCopy.Status.Phase = virtv1.WaitingForSync
+			if err := c.addTopologyHints(vmi, vmiCopy); err != nil {
+				return err
+			}
 		} else {
 			vmiCopy.Status.Phase = virtv1.Pending
-			if vmi.Status.TopologyHints == nil {
-				if topologyHints, tscRequirement, err := c.topologyHinter.TopologyHintsForVMI(vmi); err != nil && tscRequirement == topology.RequiredForBoot {
-					c.recorder.Eventf(vmi, k8sv1.EventTypeWarning, controller.FailedGatherhingClusterTopologyHints, err.Error())
-					return common.NewSyncError(err, controller.FailedGatherhingClusterTopologyHints)
-				} else if topologyHints != nil {
-					vmiCopy.Status.TopologyHints = topologyHints
-				}
+			if err := c.addTopologyHints(vmi, vmiCopy); err != nil {
+				return err
 			}
 			if hasWffcDataVolume {
 				condition := virtv1.VirtualMachineInstanceCondition{
@@ -479,14 +507,14 @@ func (c *Controller) updateStatus(vmi *virtv1.VirtualMachineInstance, pod *k8sv1
 			c.syncVolumesUpdate(vmiCopy)
 		}
 
-		c.syncMigrationRequiredCondition(vmiCopy)
+		c.syncMigrationRequiredCondition(vmiCopy, pod)
 
 		c.checkEphemeralHotplugVolumes(vmiCopy)
 
 	case vmi.IsScheduled():
-		if !vmiPodExists {
-			if vmiCopy.IsDecentralizedMigration() && vmiCopy.IsMigrationTarget() {
-				log.Log.Object(vmi).V(2).Infof("setting VMI to WaitingForSync while scheduled because pod does not exist")
+		if !vmiPodExists || (vmiCopy.IsMigrationTarget() && controller.PodIsDown(pod)) || migrationTargetFailed {
+			if vmiCopy.IsMigrationTarget() {
+				log.Log.Object(vmi).V(2).Infof("setting VMI to WaitingForSync while scheduled because pod does not exist, is down, or migration failed")
 				vmiCopy.Status.Phase = virtv1.WaitingForSync
 				if vmiCopy.Status.MigrationState != nil {
 					vmiCopy.Status.MigrationState.Failed = true
@@ -514,7 +542,7 @@ func (c *Controller) updateStatus(vmi *virtv1.VirtualMachineInstance, pod *k8sv1
 				// if there's no owner VM around still, then remove the VM controller's finalizer if it exists
 				controller.RemoveFinalizer(vmiCopy, virtv1.VirtualMachineControllerFinalizer)
 			}
-		} else if vmiPodExists {
+		} else if vmiPodExists && !migrationTargetFailed && !(vmiCopy.IsMigrationTarget() && controller.PodIsDown(pod)) {
 			vmiCopy.Status.Phase = virtv1.Scheduling
 		}
 	default:
@@ -577,6 +605,18 @@ func (c *Controller) updateStatus(vmi *virtv1.VirtualMachineInstance, pod *k8sv1
 		}
 	}
 
+	return nil
+}
+
+func (c *Controller) addTopologyHints(vmi *virtv1.VirtualMachineInstance, vmiCopy *virtv1.VirtualMachineInstance) error {
+	if vmi.Status.TopologyHints == nil {
+		if topologyHints, tscRequirement, err := c.topologyHinter.TopologyHintsForVMI(vmi); err != nil && tscRequirement == topology.RequiredForBoot {
+			c.recorder.Eventf(vmi, k8sv1.EventTypeWarning, controller.FailedGatherhingClusterTopologyHints, err.Error())
+			return common.NewSyncError(err, controller.FailedGatherhingClusterTopologyHints)
+		} else if topologyHints != nil {
+			vmiCopy.Status.TopologyHints = topologyHints
+		}
+	}
 	return nil
 }
 
@@ -718,17 +758,27 @@ func (c *Controller) syncDynamicAnnotationsAndLabelsToPod(vmi *virtv1.VirtualMac
 
 	dynamicLabels := []string{virtv1.NodeNameLabel, virtv1.OutdatedLauncherImageLabel}
 	dynamicLabels = append(dynamicLabels, c.additionalLauncherLabelsSync...)
+
+	generatedAnnotations, err := c.storageAnnotationsGenerator.Generate(vmi)
+	if err != nil {
+		return pod, fmt.Errorf("failed to generate storage annotations: %v", err)
+	}
+
 	dynamicAnnotations := []string{descheduler.EvictPodAnnotationKeyAlpha, descheduler.EvictPodAnnotationKeyAlphaPreferNoEviction}
 	dynamicAnnotations = append(dynamicAnnotations, c.additionalLauncherAnnotationsSync...)
+	dynamicAnnotations = append(dynamicAnnotations, c.storageAnnotationsGenerator.ManagedAnnotationKeys()...)
 
 	syncMap(
 		dynamicLabels,
 		vmi.Labels, newPodLabels, pod.ObjectMeta.Labels, "labels",
 	)
 
+	annotationsToSync := maps.Clone(vmi.Annotations)
+	maps.Copy(annotationsToSync, generatedAnnotations)
+
 	syncMap(
 		dynamicAnnotations,
-		vmi.Annotations, newPodAnnotations, pod.ObjectMeta.Annotations, "annotations",
+		annotationsToSync, newPodAnnotations, pod.ObjectMeta.Annotations, "annotations",
 	)
 
 	if patchSet.IsEmpty() {
@@ -1070,6 +1120,26 @@ func (c *Controller) requireMemoryHotplug(vmi *virtv1.VirtualMachineInstance) bo
 	return vmi.Spec.Domain.Memory.Guest.Value() != vmi.Status.Memory.GuestRequested.Value()
 }
 
+func (c *Controller) updateMemoryOverheadStatusFromPod(vmi *virtv1.VirtualMachineInstance, pod *k8sv1.Pod) {
+	if pod == nil || pod.Annotations == nil {
+		return
+	}
+	overheadStr, exists := pod.Annotations[virtv1.MemoryOverheadAnnotationBytes]
+	if !exists {
+		return
+	}
+	overheadBytes, err := strconv.ParseInt(overheadStr, 10, 64)
+	if err != nil {
+		log.Log.Object(vmi).Warningf("Failed to parse memory overhead annotation: %v", err)
+		return
+	}
+	overhead := resource.NewQuantity(overheadBytes, resource.BinarySI)
+	if vmi.Status.Memory == nil {
+		vmi.Status.Memory = &virtv1.MemoryStatus{}
+	}
+	vmi.Status.Memory.MemoryOverhead = overhead
+}
+
 func (c *Controller) syncMemoryHotplug(vmi *virtv1.VirtualMachineInstance) {
 	syncHotplugCondition(vmi, virtv1.VirtualMachineInstanceMemoryChange)
 	// store additionalGuestMemoryOverheadRatio
@@ -1082,14 +1152,14 @@ func (c *Controller) syncMemoryHotplug(vmi *virtv1.VirtualMachineInstance) {
 	}
 }
 
-func (c *Controller) syncMigrationRequiredCondition(vmi *virtv1.VirtualMachineInstance) {
+func (c *Controller) syncMigrationRequiredCondition(vmi *virtv1.VirtualMachineInstance, pod *k8sv1.Pod) {
 	const pendingMigrationReEvalPeriod = 10 * time.Second
 
 	if migrations.IsMigrating(vmi) {
 		return
 	}
 
-	result := c.netMigrationEvaluator.Evaluate(vmi)
+	result := c.netMigrationEvaluator.Evaluate(vmi, pod)
 
 	cm := controller.NewVirtualMachineInstanceConditionManager()
 	existingCondition := cm.GetCondition(vmi, virtv1.VirtualMachineInstanceMigrationRequired)

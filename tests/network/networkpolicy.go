@@ -203,7 +203,7 @@ var _ = Describe(SIG("[rfe_id:150][crit:high][vendor:cnv-qe@redhat.com][level:co
 						assertIPsNotEmptyForVMI(clientVMIAlternativeNamespace)
 					})
 
-					It("[test_id:1517] should success to reach clientVMI from clientVMIAlternativeNamespace", func() {
+					It("[test_id:1517] should success to reach clientVMI from clientVMIAlternativeNamespace", decorators.WgS390x, func() {
 						By("Connect clientVMI from clientVMIAlternativeNamespace")
 						assertPingSucceed(clientVMIAlternativeNamespace, clientVMI)
 					})

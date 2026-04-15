@@ -20,12 +20,21 @@
 package cgroup
 
 import (
+	"os"
+	"path"
+	"path/filepath"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	runc_cgroups "github.com/opencontainers/runc/libcontainer/cgroups"
 	runc_configs "github.com/opencontainers/runc/libcontainer/configs"
 	"github.com/opencontainers/runc/libcontainer/devices"
 	"go.uber.org/mock/gomock"
+
+	v1 "kubevirt.io/api/core/v1"
+
+	"kubevirt.io/kubevirt/pkg/safepath"
+	"kubevirt.io/kubevirt/pkg/virt-handler/isolation"
 )
 
 var _ = Describe("cgroup manager", func() {
@@ -194,4 +203,80 @@ var _ = Describe("cgroup manager", func() {
 			},
 		),
 	)
+})
+
+var _ = Describe("GetMiscCapacity", func() {
+	var originalMiscCapacityPath string
+	var tempDir string
+
+	BeforeEach(func() {
+		tempDir = GinkgoT().TempDir()
+		originalMiscCapacityPath = miscCapacityPath
+		miscCapacityPath = path.Join(tempDir, "misc.capacity")
+	})
+
+	AfterEach(func() {
+		miscCapacityPath = originalMiscCapacityPath
+	})
+
+	DescribeTable("should return correct capacity",
+		func(fileContent string, key string, expectedCapacity int, expectError bool) {
+			if fileContent != "" {
+				err := os.WriteFile(path.Join(tempDir, "misc.capacity"), []byte(fileContent), 0644)
+				Expect(err).ToNot(HaveOccurred())
+			}
+			capacity, err := GetMiscCapacity(key)
+			Expect(capacity).To(Equal(expectedCapacity))
+			if expectError {
+				Expect(err).To(HaveOccurred())
+			} else {
+				Expect(err).ToNot(HaveOccurred())
+			}
+		},
+		Entry("returns capacity for matching key",
+			"tdx 10\nsev 5\n", "tdx", 10, false,
+		),
+		Entry("produces error when key not found",
+			"tdx 10\nsev 5\n", "nonexistent", 0, true,
+		),
+		Entry("produces error for malformed line",
+			"tdx\n", "tdx", 0, true,
+		),
+		Entry("produces error for non-numeric capacity",
+			"tdx abc\n", "tdx", 0, true,
+		),
+	)
+})
+
+var _ = Describe("generateDeviceRulesForVMI", func() {
+	var (
+		ctrl    *gomock.Controller
+		tempDir string
+	)
+
+	BeforeEach(func() {
+		ctrl = gomock.NewController(GinkgoT())
+		tempDir = GinkgoT().TempDir()
+		Expect(os.MkdirAll(filepath.Join(tempDir, "dev"), 0755)).To(Succeed())
+	})
+
+	newMockIsolationWithMountRoot := func() isolation.IsolationResult {
+		mountRoot, err := safepath.NewPathNoFollow(tempDir)
+		Expect(err).ToNot(HaveOccurred())
+
+		mockIso := isolation.NewMockIsolationResult(ctrl)
+		mockIso.EXPECT().MountRoot().Return(mountRoot, nil)
+		return mockIso
+	}
+
+	It("should skip hypervisor device rule when emulation is allowed and device is missing", func() {
+		rules, err := generateDeviceRulesForVMI(&v1.VirtualMachineInstance{}, newMockIsolationWithMountRoot(), "", "kvm", true)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(rules).To(BeEmpty())
+	})
+
+	It("should fail when hypervisor device is missing and emulation is not allowed", func() {
+		_, err := generateDeviceRulesForVMI(&v1.VirtualMachineInstance{}, newMockIsolationWithMountRoot(), "", "kvm", false)
+		Expect(err).To(HaveOccurred())
+	})
 })

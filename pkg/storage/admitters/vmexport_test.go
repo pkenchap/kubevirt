@@ -32,7 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 
 	v1 "kubevirt.io/api/core/v1"
-	exportv1 "kubevirt.io/api/export/v1beta1"
+	exportv1 "kubevirt.io/api/export/v1"
 
 	"kubevirt.io/kubevirt/pkg/testutils"
 	"kubevirt.io/kubevirt/pkg/virt-api/webhooks"
@@ -43,54 +43,11 @@ var _ = Describe("Validating VirtualMachineExport Admitter", func() {
 	apiGroup := "v1"
 	snapshotApiGroup := "snapshot.kubevirt.io"
 	kubevirtApiGroup := "kubevirt.io"
+	backupApiGroup := "backup.kubevirt.io"
 
-	config, _, kvStore := testutils.NewFakeClusterConfigUsingKVConfig(&v1.KubeVirtConfiguration{})
+	config, _, _ := testutils.NewFakeClusterConfigUsingKVConfig(&v1.KubeVirtConfiguration{})
 
-	Context("With feature gate disabled", func() {
-		It("should reject anything", func() {
-			export := &exportv1.VirtualMachineExport{
-				Spec: exportv1.VirtualMachineExportSpec{},
-			}
-
-			ar := createExportAdmissionReview(export)
-			resp := createTestVMExportAdmitter(config).Admit(context.Background(), ar)
-			Expect(resp.Allowed).To(BeFalse())
-			Expect(resp.Result.Message).Should(Equal("vm export feature gate not enabled"))
-		})
-	})
-
-	Context("With feature gate enabled", func() {
-		enableFeatureGate := func(featureGate string) {
-			testutils.UpdateFakeKubeVirtClusterConfig(kvStore, &v1.KubeVirt{
-				Spec: v1.KubeVirtSpec{
-					Configuration: v1.KubeVirtConfiguration{
-						DeveloperConfiguration: &v1.DeveloperConfiguration{
-							FeatureGates: []string{featureGate},
-						},
-					},
-				},
-			})
-		}
-		disableFeatureGates := func() {
-			testutils.UpdateFakeKubeVirtClusterConfig(kvStore, &v1.KubeVirt{
-				Spec: v1.KubeVirtSpec{
-					Configuration: v1.KubeVirtConfiguration{
-						DeveloperConfiguration: &v1.DeveloperConfiguration{
-							FeatureGates: make([]string, 0),
-						},
-					},
-				},
-			})
-		}
-
-		BeforeEach(func() {
-			enableFeatureGate("VMExport")
-		})
-
-		AfterEach(func() {
-			disableFeatureGates()
-		})
-
+	Context("VMExport", func() {
 		It("should reject invalid request resource", func() {
 			ar := &admissionv1.AdmissionReview{
 				Request: &admissionv1.AdmissionRequest{
@@ -127,6 +84,14 @@ var _ = Describe("Validating VirtualMachineExport Admitter", func() {
 			}
 		}
 
+		createBlankVMBackupObjectRef := func() corev1.TypedLocalObjectReference {
+			return corev1.TypedLocalObjectReference{
+				APIGroup: &backupApiGroup,
+				Kind:     vmBackupKind,
+				Name:     "",
+			}
+		}
+
 		DescribeTable("it should reject blank names", func(objectRefFunc func() corev1.TypedLocalObjectReference, errorString string) {
 			export := &exportv1.VirtualMachineExport{
 				Spec: exportv1.VirtualMachineExportSpec{
@@ -141,6 +106,7 @@ var _ = Describe("Validating VirtualMachineExport Admitter", func() {
 			Entry("persistent volume claim", createBlankPVCObjectRef, "PVC name must not be empty"),
 			Entry("virtual machine snapshot", createBlankVMSnapshotObjectRef, "VMSnapshot name must not be empty"),
 			Entry("virtual machine", createBlankVMObjectRef, "Virtual Machine name must not be empty"),
+			Entry("virtual machine backup", createBlankVMBackupObjectRef, "VirtualMachineBackup name must not be empty"),
 		)
 
 		It("should reject unknown kind", func() {
@@ -256,6 +222,7 @@ var _ = Describe("Validating VirtualMachineExport Admitter", func() {
 			Entry("persistent volume claim", "invalid", pvc),
 			Entry("virtual machine snapshot", "invalid", vmSnapshotKind),
 			Entry("virtual machine", "invalid", vmKind),
+			Entry("virtual machine backup", "invalid", vmBackupKind),
 		)
 	})
 })

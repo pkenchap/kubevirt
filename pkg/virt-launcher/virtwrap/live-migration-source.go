@@ -21,6 +21,7 @@ package virtwrap
 
 import (
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -36,16 +37,15 @@ import (
 	"kubevirt.io/client-go/log"
 
 	hostdisk "kubevirt.io/kubevirt/pkg/host-disk"
+	hotplugdisk "kubevirt.io/kubevirt/pkg/hotplug-disk"
 	osdisk "kubevirt.io/kubevirt/pkg/os/disk"
 	"kubevirt.io/kubevirt/pkg/pointer"
+	storagetypes "kubevirt.io/kubevirt/pkg/storage/types"
 	virtutil "kubevirt.io/kubevirt/pkg/util"
 	"kubevirt.io/kubevirt/pkg/util/migrations"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
 	migrationproxy "kubevirt.io/kubevirt/pkg/virt-handler/migration-proxy"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
-
-	hotplugdisk "kubevirt.io/kubevirt/pkg/hotplug-disk"
-	storagetypes "kubevirt.io/kubevirt/pkg/storage/types"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/cli"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/vcpu"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/cpudedicated"
@@ -55,6 +55,7 @@ import (
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/stats"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/statsconv"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/util"
+	"kubevirt.io/kubevirt/pkg/vmitrait"
 )
 
 const liveMigrationFailed = "Live migration failed."
@@ -259,7 +260,7 @@ func getDiskTargetsForMigration(dom cli.VirDomain, vmi *v1.VirtualMachineInstanc
 	// This method collects all VMI disks that needs to be copied during live migration
 	// and returns a list of its target device names.
 	// Shared volues are being excluded.
-	copyDisks := []string{}
+	var copyDisks []string
 	migrationVols := classifyVolumesForMigration(vmi)
 	disks, err := util.GetAllDomainDisks(dom)
 	if err != nil {
@@ -312,12 +313,12 @@ func (l *LibvirtDomainManager) initializeMigrationMetadata(vmi *v1.VirtualMachin
 		if migrationMetadata.EndTimestamp == nil {
 			// don't stop on currently executing migrations
 			return true, nil
-		} else {
-			// Don't allow the same migration UID to be executed twice.
-			// Migration attempts are like pods. One shot.
-			return false, fmt.Errorf("migration job %v already executed, finished at %v, failed: %t, abortStatus: %s",
-				migrationMetadata.UID, *migrationMetadata.EndTimestamp, migrationMetadata.Failed, migrationMetadata.AbortStatus)
 		}
+
+		// Don't allow the same migration UID to be executed twice.
+		// Migration attempts are like pods. One shot.
+		return false, fmt.Errorf("migration job %v already executed, finished at %v, failed: %t, abortStatus: %s",
+			migrationMetadata.UID, *migrationMetadata.EndTimestamp, migrationMetadata.Failed, migrationMetadata.AbortStatus)
 	}
 
 	now := metav1.Now()
@@ -338,7 +339,7 @@ func (l *LibvirtDomainManager) cancelMigration(vmi *v1.VirtualMachineInstance) e
 	}
 
 	if err := l.setMigrationAbortStatus(v1.MigrationAbortInProgress); err != nil {
-		if err == domainerrors.MigrationAbortInProgressError {
+		if errors.Is(err, domainerrors.MigrationAbortInProgressError) {
 			return nil
 		}
 		return err
@@ -438,7 +439,7 @@ func (m *migrationMonitor) shouldTriggerTimeout(elapsed int64) bool {
 }
 
 func (m *migrationMonitor) shouldAssistMigrationToComplete(elapsed int64) bool {
-	return m.shouldTriggerTimeout(elapsed) && m.options.AllowWorkloadDisruption
+	return m.options.AllowWorkloadDisruption && m.shouldTriggerTimeout(elapsed)
 }
 
 func (m *migrationMonitor) isMigrationProgressing() bool {
@@ -521,18 +522,40 @@ func (m *migrationMonitor) processInflightMigration(dom cli.VirDomain, stats *li
 		// then it would result in that active state being lost.
 
 	case m.shouldAssistMigrationToComplete(elapsed) && !m.isPausedMigration():
-		if m.options.AllowPostCopy {
+		if m.options.AllowPostCopy && !virtutil.IsVFIOVMI(m.vmi) {
 			logger.Info("Starting post copy mode for migration")
 			// if a migration has stalled too long, post copy will be
-			// triggered when allowPostCopy is enabled
+			// triggered when allowPostCopy is enabled (post-copy is not supported with VFIO devices)
 			err := dom.MigrateStartPostCopy(0)
 			if err != nil {
 				logger.Reason(err).Error("failed to start post migration")
 				return nil
 			}
 			m.l.updateVMIMigrationMode(v1.MigrationPostCopy)
-		} else {
+		} else if virtutil.IsVFIOVMI(m.vmi) {
+			logger.Info("Setting large max downtime to trigger migration switchover")
+			// TODO: once the VGPULiveMigration featuregate graduates
+			//  (and even possibly other VFIO live migration featuregates)
+			//  we should consider merging this with the "else" case below.
+			// Setting a very high max downtime causes QEMU to
+			//  trigger its internal switchover, which pauses vCPUs and
+			//  transitions VFIO devices to _STOP_COPY. This is more
+			//  correct than dom.Suspend() which only pauses vCPUs but
+			//  leaves VFIO devices in _RUNNING with perpetual dirty
+			//  page reporting.
+			maxDowntimeSec := m.acceptableCompletionTime * 2
+			// qemu doesn't allow max downtime larger than 2000s
+			err := dom.MigrateSetMaxDowntime(min(uint64(maxDowntimeSec)*1000, 2_000_000), 0)
+			if err != nil {
+				logger.Reason(err).Error("Setting max downtime failed.")
+				return nil
+			}
+			logger.Infof("Set max downtime to %ds for %s", maxDowntimeSec, m.vmi.GetObjectMeta().GetName())
 
+			m.acceptableCompletionTime = maxDowntimeSec
+			m.l.paused.add(m.vmi.UID)
+			m.l.updateVMIMigrationMode(v1.MigrationPaused)
+		} else {
 			logger.Info("Pausing the guest to allow migration to complete")
 			// if a migration has stalled too long, the guest will be paused
 			// to complete the migration when allowPostCopy is disabled
@@ -551,9 +574,10 @@ func (m *migrationMonitor) processInflightMigration(dom cli.VirDomain, stats *li
 		}
 
 	case !m.isMigrationProgressing():
-		// check if the migration is still progressing
-		// a stuck migration will get terminated when post copy
-		// isn't enabled
+		// The migration is completely stuck.
+		// It usually indicates a problem with the network or qemu's connection handling.
+		// In this case, we abort the migration directly without trying to pause/post-copy,
+		// since the problem is highly unlikely to be caused by a high dirty rate.
 		err := dom.AbortJob()
 		if err != nil {
 			logger.Reason(err).Error("failed to abort migration")
@@ -570,7 +594,6 @@ func (m *migrationMonitor) processInflightMigration(dom cli.VirDomain, stats *li
 		// if the total migration time exceeds an acceptable
 		// limit, then the migration will get aborted, but
 		// only if post copy migration hasn't been enabled
-
 		err := dom.AbortJob()
 		if err != nil {
 			logger.Reason(err).Error("failed to abort migration")
@@ -627,9 +650,9 @@ func (m *migrationMonitor) startMonitor() {
 				abortStatus = v1.MigrationAbortSucceeded
 			}
 			// Improve the error message when the volume migration fails because the destination size is smaller then the source volume
-			if len(vmi.Status.MigratedVolumes) > 0 && strings.Contains(m.migrationFailedWithError.Error(),
+			if len(vmi.Status.MigratedVolumes) > 0 && strings.Contains(standardizeSpaces(m.migrationFailedWithError.Error()),
 				"has to be smaller or equal to the actual size of the containing file") {
-				m.l.setMigrationResult(true, fmt.Sprintf("Volume migration cannot be performed because the destination volume is smaller then the source volume: %v",
+				m.l.setMigrationResult(true, fmt.Sprintf("Volume migration cannot be performed because the destination volume is smaller than the source volume: %v",
 					m.migrationFailedWithError), abortStatus)
 				return
 			}
@@ -637,26 +660,26 @@ func (m *migrationMonitor) startMonitor() {
 			return
 		}
 
-		stats := completedJobInfo
-		if stats == nil {
-			stats, err = dom.GetJobStats(0)
+		jobStats := completedJobInfo
+		if jobStats == nil {
+			jobStats, err = dom.GetJobStats(0)
 			if err != nil {
 				logger.Reason(err).Warning("failed to get domain job info, will retry")
 				continue
 			}
 		}
 
-		if stats.DataRemainingSet {
-			m.remainingData = stats.DataRemaining
+		if jobStats.DataRemainingSet {
+			m.remainingData = jobStats.DataRemaining
 		}
 
 		migrationUID := vmi.Status.MigrationState.MigrationUID
 		if vmi.Status.MigrationState.SourceState != nil {
 			migrationUID = vmi.Status.MigrationState.SourceState.MigrationUID
 		}
-		switch stats.Type {
+		switch jobStats.Type {
 		case libvirt.DOMAIN_JOB_UNBOUNDED:
-			aborted := m.processInflightMigration(dom, stats)
+			aborted := m.processInflightMigration(dom, jobStats)
 			if aborted != nil {
 				logger.Errorf("Live migration abort detected with reason: %s", aborted.message)
 				m.l.setMigrationResult(true, aborted.message, aborted.abortStatus)
@@ -664,7 +687,7 @@ func (m *migrationMonitor) startMonitor() {
 			}
 			logInterval++
 			if logInterval%monitorLogInterval == 0 {
-				logMigrationInfo(logger, string(migrationUID), stats)
+				logMigrationInfo(logger, string(migrationUID), jobStats)
 			}
 		case libvirt.DOMAIN_JOB_NONE:
 			completedJobInfo = m.determineNonRunningMigrationStatus(dom)
@@ -707,12 +730,12 @@ func (l *LibvirtDomainManager) asyncMigrationAbort(vmi *v1.VirtualMachineInstanc
 			return
 		}
 		defer dom.Free()
-		stats, err := dom.GetJobInfo()
+		jobInfo, err := dom.GetJobInfo()
 		if err != nil {
 			log.Log.Object(vmi).Reason(err).Error("failed to get domain job info")
 			return
 		}
-		if stats.Type == libvirt.DOMAIN_JOB_UNBOUNDED {
+		if jobInfo.Type == libvirt.DOMAIN_JOB_UNBOUNDED {
 			err := dom.AbortJob()
 			if err != nil {
 				log.Log.Object(vmi).Reason(err).Error("failed to cancel migration")
@@ -829,23 +852,40 @@ func init() {
 // getDiskVirtualSize return the size of a local volume to migrate.
 // See suggestion in: https://issues.redhat.com/browse/RHEL-4607
 func getDiskVirtualSize(disk *libvirtxml.DomainDisk) (int64, error) {
-	var path string
-	if disk.Source == nil {
-		return -1, fmt.Errorf("empty source for the disk")
-	}
-	switch {
-	case disk.Source.File != nil:
-		path = disk.Source.File.File
-	case disk.Source.Block != nil:
-		path = disk.Source.Block.Dev
-	default:
-		return -1, fmt.Errorf("not path set")
+	path, err := getDiskPathFromSource(disk.Source)
+	if err != nil {
+		return -1, err
 	}
 	info, err := osdisk.GetDiskInfo(path)
 	if err != nil {
 		return -1, err
 	}
 	return info.VirtualSize, nil
+}
+
+func getDiskPathFromSource(source *libvirtxml.DomainDiskSource) (string, error) {
+	var path string
+	if source == nil {
+		return "", fmt.Errorf("empty source for the disk")
+	}
+
+	if source.DataStore != nil {
+		if source.DataStore.Source == nil {
+			return "", fmt.Errorf("disk has initialized datastore with no source")
+		}
+		source = source.DataStore.Source
+	}
+
+	switch {
+	case source.File != nil:
+		path = source.File.File
+	case source.Block != nil:
+		path = source.Block.Dev
+	default:
+		return "", fmt.Errorf("no path set")
+	}
+
+	return path, nil
 }
 
 func getDiskName(disk *libvirtxml.DomainDisk) string {
@@ -1027,7 +1067,7 @@ func (l *LibvirtDomainManager) migrateHelper(vmi *v1.VirtualMachineInstance, opt
 
 	// initiate the live migration
 	var dstURI string
-	if virtutil.IsNonRootVMI(vmi) {
+	if vmitrait.IsNonRoot(vmi) {
 		dstURI = fmt.Sprintf("qemu+unix:///session?socket=%s", migrationproxy.SourceUnixFile(l.virtShareDir, string(vmi.UID)))
 	} else {
 		dstURI = fmt.Sprintf("qemu+unix:///system?socket=%s", migrationproxy.SourceUnixFile(l.virtShareDir, string(vmi.UID)))
@@ -1103,9 +1143,6 @@ func shouldConfigureParallelMigration(options *cmdclient.MigrationOptions) (shou
 	if options == nil {
 		return
 	}
-	if options.AllowPostCopy {
-		return
-	}
 	if options.ParallelMigrationThreads == nil {
 		return
 	}
@@ -1113,4 +1150,8 @@ func shouldConfigureParallelMigration(options *cmdclient.MigrationOptions) (shou
 	shouldConfigure = true
 	threadsCount = int(*options.ParallelMigrationThreads)
 	return
+}
+
+func standardizeSpaces(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }

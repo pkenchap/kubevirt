@@ -21,28 +21,37 @@ package cbt
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"fmt"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/certificate"
 	"k8s.io/client-go/util/workqueue"
 
 	backupv1 "kubevirt.io/api/backup/v1alpha1"
 	v1 "kubevirt.io/api/core/v1"
+	exportv1 "kubevirt.io/api/export/v1"
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
 
 	"kubevirt.io/kubevirt/pkg/apimachinery/patch"
+	"kubevirt.io/kubevirt/pkg/certificates/bootstrap"
+	"kubevirt.io/kubevirt/pkg/certificates/triple"
+	"kubevirt.io/kubevirt/pkg/certificates/triple/cert"
 	"kubevirt.io/kubevirt/pkg/controller"
 	hotplugdisk "kubevirt.io/kubevirt/pkg/hotplug-disk"
 	"kubevirt.io/kubevirt/pkg/pointer"
+	migrations "kubevirt.io/kubevirt/pkg/util/migrations"
+	kvtls "kubevirt.io/kubevirt/pkg/util/tls"
 )
 
 const (
@@ -50,24 +59,42 @@ const (
 
 	backupInitializingEvent         = "VirtualMachineBackupInitializing"
 	backupInitiatedEvent            = "VirtualMachineBackupInitiated"
+	backupPreparingVMExportEvent    = "VirtualMachineBackupPreparingExport"
+	backupExportInitiatedEvent      = "VirtualMachineBackupExportInitiated"
+	backupExportReadyEvent          = "VirtualMachineBackupExportReady"
+	backupAbortingEvent             = "VirtualMachineBackupAborting"
 	backupCompletedEvent            = "VirtualMachineBackupCompletedSuccessfully"
 	backupCompletedWithWarningEvent = "VirtualMachineBackupCompletedWithWarning"
+	backupFailedEvent               = "VirtualMachineBackupFailed"
 
-	backupInitializing = "Backup is initializing"
-	backupInProgress   = "Backup is in progress"
-	backupDeleting     = "Backup is deleting"
-	backupCompleted    = "Successfully completed VirtualMachineBackup"
-
+	backupInitializing                   = "Backup is initializing"
+	backupInProgress                     = "Backup is in progress"
+	backupPreparingVMExport              = "Backup export is being initialized"
+	backupExportInitiated                = "Backup export has been initiated, waiting for export links"
+	backupExportReady                    = "Backup export is ready to pull"
+	backupAborting                       = "Backup is aborting"
+	backupDeleting                       = "Backup is being deleted"
+	backupCompleted                      = "Successfully completed VirtualMachineBackup"
+	backupFailed                         = "Backup has failed: %s"
 	backupCompletedWithWarningMsg        = "Completed VirtualMachineBackup, warning: %s"
 	vmNotFoundMsg                        = "VM %s/%s doesnt exist"
-	vmNotRunningMsg                      = "vm %s is not running, can not do backup"
+	vmNotRunningMsg                      = "vm %s is not running, cannot do backup"
 	vmNoVolumesToBackupMsg               = "vm %s has no volumes to backup"
 	vmNoChangedBlockTrackingMsg          = "vm %s has no ChangedBlockTracking, cannot start backup"
 	backupTrackerNotFoundMsg             = "BackupTracker %s does not exist"
+	trackerCheckpointRedefinitionPending = "Waiting for checkpoint redefinition on tracker %s"
 	invalidBackupModeMsg                 = "invalid backup mode: %s"
 	backupSourceNameEmptyMsg             = "Source name is empty"
-	backupDeletingMsg                    = "Backup is being deleted"
-	backupDeletingBeforeVMICompletionMsg = "Backup is being deleted before VMI completion, waiting for completion"
+	vmMigrationInProgressMsg             = "vm %s is currently migrating, waiting for migration to complete before starting backup"
+
+	failedExportCreate             = "failed to create backup export: %w"
+	backupTTLExpiredMsg            = "pull mode backup TTL has expired"
+	exportExistsWithDifferentOwner = "VMExport %s already exists but is not owned by backup %s"
+	defaultPullModeDurationTTL     = 2 * time.Hour
+
+	caDefaultPath = "/etc/virt-controller/backupca"
+	caCertFile    = caDefaultPath + "/tls.crt"
+	caKeyFile     = caDefaultPath + "/tls.key"
 )
 
 var (
@@ -81,9 +108,13 @@ type VMBackupController struct {
 	vmStore               cache.Store
 	vmiStore              cache.Store
 	pvcStore              cache.Store
+	vmExportStore         cache.Store
 	recorder              record.EventRecorder
 	backupQueue           workqueue.TypedRateLimitingInterface[string]
+	trackerQueue          workqueue.TypedRateLimitingInterface[string]
 	hasSynced             func() bool
+	caCertManager         certificate.Manager
+	exportCaManager       kvtls.ClientCAManager
 }
 
 func NewVMBackupController(client kubecli.KubevirtClient,
@@ -92,24 +123,35 @@ func NewVMBackupController(client kubecli.KubevirtClient,
 	vmInformer cache.SharedIndexInformer,
 	vmiInformer cache.SharedIndexInformer,
 	pvcInformer cache.SharedIndexInformer,
+	vmExportInformer cache.SharedIndexInformer,
+	cmInformer cache.SharedIndexInformer,
 	recorder record.EventRecorder,
+	kubevirtNamespace string,
 ) (*VMBackupController, error) {
 	c := &VMBackupController{
 		backupQueue: workqueue.NewTypedRateLimitingQueueWithConfig(
 			workqueue.DefaultTypedControllerRateLimiter[string](),
 			workqueue.TypedRateLimitingQueueConfig[string]{Name: "virt-controller-vmbackup"},
 		),
+		trackerQueue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.DefaultTypedControllerRateLimiter[string](),
+			workqueue.TypedRateLimitingQueueConfig[string]{Name: "virt-controller-vmbackup-tracker"},
+		),
 		backupInformer:        backupInformer,
 		backupTrackerInformer: backupTrackerInformer,
 		vmStore:               vmInformer.GetStore(),
 		vmiStore:              vmiInformer.GetStore(),
 		pvcStore:              pvcInformer.GetStore(),
+		vmExportStore:         vmExportInformer.GetStore(),
 		recorder:              recorder,
 		client:                client,
+		exportCaManager:       kvtls.NewCAManager(cmInformer.GetStore(), kubevirtNamespace, "kubevirt-export-ca"),
 	}
 
+	initCert(c)
+
 	c.hasSynced = func() bool {
-		return backupInformer.HasSynced() && backupTrackerInformer.HasSynced() && vmInformer.HasSynced() && vmiInformer.HasSynced() && pvcInformer.HasSynced()
+		return backupInformer.HasSynced() && backupTrackerInformer.HasSynced() && vmInformer.HasSynced() && vmiInformer.HasSynced() && pvcInformer.HasSynced() && vmExportInformer.HasSynced()
 	}
 
 	_, err := backupInformer.AddEventHandler(
@@ -141,7 +183,23 @@ func NewVMBackupController(client kubecli.KubevirtClient,
 		return nil, err
 	}
 
+	_, err = vmExportInformer.AddEventHandler(
+		cache.ResourceEventHandlerFuncs{
+			AddFunc:    c.handleVMExport,
+			UpdateFunc: func(oldObj, newObj interface{}) { c.handleUpdateVMExport(oldObj, newObj) },
+			DeleteFunc: c.handleVMExport,
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	return c, nil
+}
+
+var initCert = func(ctrl *VMBackupController) {
+	ctrl.caCertManager = bootstrap.NewFileCertificateManager(caCertFile, caKeyFile)
+	go ctrl.caCertManager.Start()
 }
 
 func (ctrl *VMBackupController) handleBackup(obj interface{}) {
@@ -221,6 +279,14 @@ func (ctrl *VMBackupController) handleBackupTracker(obj interface{}) {
 	}
 
 	key := cacheKeyFunc(tracker.Namespace, tracker.Name)
+
+	// Enqueue tracker for checkpoint redefinition if needed
+	if trackerNeedsCheckpointRedefinition(tracker) {
+		log.Log.V(3).Infof("enqueued tracker %q for checkpoint redefinition", key)
+		ctrl.trackerQueue.Add(key)
+	}
+
+	// Enqueue related backups
 	backupKeys, err := ctrl.backupInformer.GetIndexer().IndexKeys("backupTracker", key)
 	if err != nil {
 		return
@@ -230,9 +296,67 @@ func (ctrl *VMBackupController) handleBackupTracker(obj interface{}) {
 	}
 }
 
+func (ctrl *VMBackupController) handleVMExport(obj interface{}) {
+	if unknown, ok := obj.(cache.DeletedFinalStateUnknown); ok && unknown.Obj != nil {
+		obj = unknown.Obj
+	}
+
+	if vmExport, ok := obj.(*exportv1.VirtualMachineExport); ok {
+		key := getOwnerVMBackupKey(vmExport)
+		_, exists, err := ctrl.backupInformer.GetStore().GetByKey(key)
+		if err != nil {
+			utilruntime.HandleError(err)
+			return
+		}
+		if exists {
+			log.Log.V(3).Infof("Adding VMBackup due to VMExport creation: %s", key)
+			ctrl.backupQueue.Add(key)
+		}
+	}
+}
+
+func (ctrl *VMBackupController) handleUpdateVMExport(oldObj, newObj interface{}) {
+	ovmExport, ok := oldObj.(*exportv1.VirtualMachineExport)
+	if !ok {
+		return
+	}
+
+	nvmExport, ok := newObj.(*exportv1.VirtualMachineExport)
+	if !ok {
+		return
+	}
+
+	if equality.Semantic.DeepEqual(ovmExport.Status, nvmExport.Status) {
+		return
+	}
+
+	key := getOwnerVMBackupKey(nvmExport)
+	_, exists, err := ctrl.backupInformer.GetStore().GetByKey(key)
+	if err != nil {
+		utilruntime.HandleError(err)
+		return
+	}
+	if exists {
+		log.Log.V(3).Infof("Adding VMBackup due to VMExport update: %s", key)
+		ctrl.backupQueue.Add(key)
+	}
+}
+
+func getOwnerVMBackupKey(obj metav1.Object) string {
+	ownerRef := metav1.GetControllerOf(obj)
+	var key string
+	if ownerRef != nil {
+		if ownerRef.Kind == backupv1.VirtualMachineBackupGroupVersionKind.Kind && ownerRef.APIVersion == backupv1.VirtualMachineBackupGroupVersionKind.GroupVersion().String() {
+			key = controller.NamespacedKey(obj.GetNamespace(), ownerRef.Name)
+		}
+	}
+	return key
+}
+
 func (ctrl *VMBackupController) Run(threadiness int, stopCh <-chan struct{}) error {
 	defer utilruntime.HandleCrash()
 	defer ctrl.backupQueue.ShutDown()
+	defer ctrl.trackerQueue.ShutDown()
 
 	log.Log.Info("Starting backup controller.")
 	defer log.Log.Info("Shutting down backup controller.")
@@ -246,6 +370,7 @@ func (ctrl *VMBackupController) Run(threadiness int, stopCh <-chan struct{}) err
 
 	for range threadiness {
 		go wait.Until(ctrl.runWorker, time.Second, stopCh)
+		go wait.Until(ctrl.runTrackerWorker, time.Second, stopCh)
 	}
 
 	<-stopCh
@@ -277,11 +402,13 @@ func (ctrl *VMBackupController) Execute() bool {
 }
 
 type SyncInfo struct {
-	err            error
-	reason         string
-	event          string
-	checkpointName string
-	backupType     backupv1.BackupType
+	err             error
+	reason          string
+	event           string
+	checkpointName  *string
+	backupType      backupv1.BackupType
+	includedVolumes []backupv1.BackupVolumeInfo
+	caCert          *string
 }
 
 func syncInfoError(err error) *SyncInfo {
@@ -331,10 +458,14 @@ func (ctrl *VMBackupController) execute(key string) error {
 
 func (ctrl *VMBackupController) sync(backup *backupv1.VirtualMachineBackup) *SyncInfo {
 	logger := log.Log.With("VirtualMachineBackup", backup.Name)
+	backupDeleting := isBackupDeleting(backup)
 	// If backup is done and not being deleted, nothing to do
-	if IsBackupDone(backup.Status) && !isBackupDeleting(backup) {
-		logger.V(4).Info("Backup is already done, skipping reconciliation")
-		return nil
+	if IsBackupDone(backup.Status) {
+		if !backupDeleting {
+			logger.V(4).Info("Backup is already done, skipping reconciliation")
+			return nil
+		}
+		return ctrl.removeBackupFinalizer(backup)
 	}
 
 	backupTracker, syncInfo := ctrl.getBackupTracker(backup)
@@ -348,20 +479,115 @@ func (ctrl *VMBackupController) sync(backup *backupv1.VirtualMachineBackup) *Syn
 		return syncInfoError(errSourceNameEmpty)
 	}
 
-	if isBackupDeleting(backup) {
-		logger.V(3).Info(backupDeletingMsg)
-		return ctrl.deletionCleanup(backup, sourceName)
+	sourceExists, err := ctrl.sourceVMExists(backup, sourceName)
+	if err != nil {
+		return syncInfoError(err)
+	}
+	vmi, vmiExists, err := ctrl.vmiFromSource(backup, sourceName)
+	if err != nil {
+		return syncInfoError(err)
 	}
 
-	vmi, syncInfo := ctrl.verifyBackupSource(backup, sourceName)
-	if syncInfo != nil {
-		return syncInfo
+	if isBackupInitializing(backup.Status) {
+		if backupDeleting {
+			logger.V(3).Infof("Backup deleting during initialization")
+			if !vmiExists {
+				return ctrl.removeBackupFinalizer(backup)
+			}
+			done, syncInfo := ctrl.cleanup(backup, vmi)
+			if syncInfo != nil {
+				return syncInfo
+			}
+			if !done {
+				return syncInfoError(fmt.Errorf("ongoing cleanup for backup deletion"))
+			}
+			return &SyncInfo{
+				event:  backupFailedEvent,
+				reason: fmt.Sprintf(backupFailed, "backup was deleted during initialization"),
+			}
+		}
+
+		if !sourceExists {
+			return &SyncInfo{
+				event:  backupInitializingEvent,
+				reason: fmt.Sprintf(vmNotFoundMsg, backup.Namespace, sourceName),
+			}
+		}
+		if !vmiExists {
+			return &SyncInfo{
+				event:  backupInitializingEvent,
+				reason: fmt.Sprintf(vmNotRunningMsg, sourceName),
+			}
+		}
+		if syncInfo := ctrl.verifyVMIEligibleForBackup(vmi, backup.Name); syncInfo != nil {
+			return syncInfo
+		}
+
+		// If the tracker needs checkpoint redefinition, wait for it to complete.
+		if trackerNeedsCheckpointRedefinition(backupTracker) {
+			logger.Infof(trackerCheckpointRedefinitionPending, backupTracker.Name)
+			return &SyncInfo{
+				event:  backupInitializingEvent,
+				reason: fmt.Sprintf(trackerCheckpointRedefinitionPending, backupTracker.Name),
+			}
+		}
+
+		if migrations.IsMigrating(vmi) {
+			logger.Infof(vmMigrationInProgressMsg, vmi.Name)
+			return &SyncInfo{
+				event:  backupInitializingEvent,
+				reason: fmt.Sprintf(vmMigrationInProgressMsg, vmi.Name),
+			}
+		}
+
+		return ctrl.handleBackupInitiation(backup, vmi, backupTracker, logger)
 	}
 
-	if !isBackupInitializing(backup.Status) || vmi == nil {
-		return ctrl.checkBackupCompletion(backup, vmi, backupTracker)
+	if isBackupProgressing(backup.Status) {
+		if !vmiExists {
+			return &SyncInfo{
+				event:  backupFailedEvent,
+				reason: fmt.Sprintf(backupFailed, "VMI was deleted during backup"),
+			}
+		}
+
+		if !hasVMIBackupStatus(vmi) {
+			logger.V(3).Infof("VMI backup status was lost while progressing")
+			done, syncInfo := ctrl.cleanup(backup, vmi)
+			if syncInfo != nil {
+				return syncInfo
+			}
+			if !done {
+				return syncInfoError(fmt.Errorf("ongoing cleanup for backup deletion"))
+			}
+			return &SyncInfo{
+				event:  backupFailedEvent,
+				reason: fmt.Sprintf(backupFailed, "VMI backup status was lost"),
+			}
+		}
+
+		if syncInfo := ctrl.validateVMIHealth(backup, vmi); syncInfo != nil {
+			return syncInfo
+		}
+
+		if backupDeleting {
+			backupStatus := vmi.Status.ChangedBlockTracking.BackupStatus
+			if !backupStatus.Completed && backupStatus.BackupName == backup.Name {
+				if syncInfo := ctrl.handleAbort(backup, vmi); syncInfo != nil {
+					return syncInfo
+				}
+			}
+		} else if isPullMode(backup) {
+			if syncInfo := ctrl.handlePullMode(backup, vmi); syncInfo != nil {
+				return syncInfo
+			}
+		}
 	}
 
+	return ctrl.checkBackupCompletion(backup, vmi, backupTracker)
+}
+
+func (ctrl *VMBackupController) handleBackupInitiation(backup *backupv1.VirtualMachineBackup, vmi *v1.VirtualMachineInstance, backupTracker *backupv1.VirtualMachineBackupTracker, logger *log.FilteredLogger) *SyncInfo {
 	backup, err := ctrl.addBackupFinalizer(backup)
 	if err != nil {
 		err = fmt.Errorf("failed to add finalizer: %w", err)
@@ -369,7 +595,7 @@ func (ctrl *VMBackupController) sync(backup *backupv1.VirtualMachineBackup) *Syn
 		return syncInfoError(err)
 	}
 
-	if err = ctrl.updateSourceBackupInProgress(vmi, backup.Name); err != nil {
+	if err = ctrl.updateSourceBackupInProgress(vmi, backup.Name, backup.CreationTimestamp); err != nil {
 		err = fmt.Errorf("failed to update source backup in progress: %w", err)
 		logger.Error(err.Error())
 		return syncInfoError(err)
@@ -386,9 +612,9 @@ func (ctrl *VMBackupController) sync(backup *backupv1.VirtualMachineBackup) *Syn
 		backup.Spec.Mode = pointer.P(backupv1.PushMode)
 	}
 	switch *backup.Spec.Mode {
-	case backupv1.PushMode:
+	case backupv1.PushMode, backupv1.PullMode:
 		pvcName := backup.Spec.PvcName
-		syncInfo = ctrl.verifyBackupTargetPVC(pvcName, backup.Namespace)
+		syncInfo := ctrl.verifyBackupTargetPVC(pvcName, backup.Namespace)
 		if syncInfo != nil {
 			return syncInfo
 		}
@@ -398,8 +624,8 @@ func (ctrl *VMBackupController) sync(backup *backupv1.VirtualMachineBackup) *Syn
 		if !attached {
 			return ctrl.attachBackupTargetPVC(vmi, *pvcName, volumeName)
 		}
-		backupOptions.Mode = backupv1.PushMode
-		backupOptions.PushPath = pointer.P(hotplugdisk.GetVolumeMountDir(volumeName))
+		backupOptions.Mode = *backup.Spec.Mode
+		backupOptions.TargetPath = pointer.P(hotplugdisk.GetVolumeMountDir(volumeName))
 	default:
 		logger.Errorf(invalidBackupModeMsg, *backup.Spec.Mode)
 		return syncInfoError(fmt.Errorf(invalidBackupModeMsg, *backup.Spec.Mode))
@@ -428,6 +654,282 @@ func (ctrl *VMBackupController) sync(backup *backupv1.VirtualMachineBackup) *Syn
 	}
 }
 
+func (ctrl *VMBackupController) handleAbort(backup *backupv1.VirtualMachineBackup, vmi *v1.VirtualMachineInstance) *SyncInfo {
+	if isBackupAborting(backup.Status) {
+		return nil
+	}
+
+	backupOptions := &backupv1.BackupOptions{
+		BackupName:      backup.Name,
+		Cmd:             backupv1.Abort,
+		BackupStartTime: &backup.CreationTimestamp,
+	}
+
+	if err := ctrl.client.VirtualMachineInstance(vmi.Namespace).Backup(context.Background(), vmi.Name, backupOptions); err != nil {
+		return syncInfoError(err)
+	}
+
+	return &SyncInfo{
+		event:  backupAbortingEvent,
+		reason: backupAborting,
+	}
+}
+
+func (ctrl *VMBackupController) validateVMIHealth(backup *backupv1.VirtualMachineBackup, vmi *v1.VirtualMachineInstance) *SyncInfo {
+	if !vmi.IsRunning() || vmi.DeletionTimestamp != nil {
+		done, syncInfo := ctrl.cleanup(backup, vmi)
+		if syncInfo != nil {
+			return syncInfo
+		}
+		if !done {
+			return syncInfoError(fmt.Errorf("not done cleaning backup for failed VMI: %s", vmi.Name))
+		}
+		return &SyncInfo{
+			event:  backupFailedEvent,
+			reason: fmt.Sprintf(backupFailed, "VMI is not in a running state"),
+		}
+	}
+	return nil
+}
+
+func (ctrl *VMBackupController) handlePullMode(backup *backupv1.VirtualMachineBackup, vmi *v1.VirtualMachineInstance) *SyncInfo {
+	if isPullBackupTTLExpired(backup) {
+		return ctrl.handlePullModeTTLExpiry(backup, vmi)
+	}
+
+	if !isBackupExportInitialized(backup.Status) {
+		if syncInfo := ctrl.handlePrepareBackupExport(backup, vmi); syncInfo != nil {
+			return syncInfo
+		}
+	}
+
+	if !isBackupExportReady(backup.Status) {
+		if syncInfo := ctrl.waitForBackupExportReady(backup, vmi); syncInfo != nil {
+			return syncInfo
+		}
+	}
+
+	if isBackupExportReady(backup.Status) {
+		if syncInfo := ctrl.validateExportHealth(backup); syncInfo != nil {
+			return syncInfo
+		}
+	}
+
+	return nil
+}
+
+func (ctrl *VMBackupController) handlePrepareBackupExport(backup *backupv1.VirtualMachineBackup, vmi *v1.VirtualMachineInstance) *SyncInfo {
+	syncInfo, vmExport := ctrl.getOrCreateBackupExport(vmi, backup)
+	if syncInfo != nil {
+		return syncInfo
+	}
+	if vmExport.Status == nil || vmExport.Status.ServiceName == "" {
+		// Service name not yet set by export controller, retry later
+		return nil
+	}
+	ca, err := ctrl.exportCaManager.GetCurrentRaw()
+	if err != nil {
+		return syncInfoError(err)
+	}
+	keyPair, err := ctrl.generateBackupTunnelCert(backup)
+	if err != nil {
+		return syncInfoError(err)
+	}
+	exportAddr := fmt.Sprintf("%s.%s.svc", vmExport.Status.ServiceName, vmExport.Namespace)
+	serverName := fmt.Sprintf("%s.cluster.local", exportAddr)
+	backupOptions := &backupv1.BackupOptions{
+		BackupName:       backup.Name,
+		Cmd:              backupv1.Export,
+		BackupStartTime:  &backup.CreationTimestamp,
+		Mode:             *backup.Spec.Mode,
+		ExportServerAddr: &exportAddr,
+		ExportServerName: &serverName,
+		BackupKey:        pointer.P(string(cert.EncodePrivateKeyPEM(keyPair.Key))),
+		BackupCert:       pointer.P(string(cert.EncodeCertPEM(keyPair.Cert))),
+		CACert:           pointer.P(string(ca)),
+	}
+	if err := ctrl.client.VirtualMachineInstance(vmi.Namespace).Backup(context.Background(), vmi.Name, backupOptions); err != nil {
+		return syncInfoError(err)
+	}
+	return &SyncInfo{
+		event:  backupExportInitiatedEvent,
+		reason: backupExportInitiated,
+	}
+}
+
+func (ctrl *VMBackupController) getOrCreateBackupExport(vmi *v1.VirtualMachineInstance, backup *backupv1.VirtualMachineBackup) (*SyncInfo, *exportv1.VirtualMachineExport) {
+	objKey := cacheKeyFunc(backup.Namespace, backup.Name)
+	obj, exists, err := ctrl.vmExportStore.GetByKey(objKey)
+	if err != nil {
+		err = fmt.Errorf("error getting VMExport from store: %w", err)
+		log.Log.Error(err.Error())
+		return syncInfoError(err), nil
+	}
+	if exists {
+		vmExport := obj.(*exportv1.VirtualMachineExport)
+		if !metav1.IsControlledBy(vmExport, backup) {
+			return syncInfoError(fmt.Errorf(exportExistsWithDifferentOwner, vmExport.Name, backup.Name)), nil
+		}
+		return nil, vmExport
+	}
+
+	return ctrl.createBackupExport(backup, vmi), nil
+}
+
+func (ctrl *VMBackupController) createBackupExport(backup *backupv1.VirtualMachineBackup, vmi *v1.VirtualMachineInstance) *SyncInfo {
+	vmExport := &exportv1.VirtualMachineExport{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      backup.Name,
+			Namespace: backup.Namespace,
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(backup, backupv1.SchemeGroupVersion.WithKind(backupv1.VirtualMachineBackupGroupVersionKind.Kind)),
+			},
+		},
+		Spec: exportv1.VirtualMachineExportSpec{
+			TokenSecretRef: &backup.Spec.TokenSecretRef,
+			TTLDuration:    getPullBackupRemainingTTL(backup),
+			Source: corev1.TypedLocalObjectReference{
+				APIGroup: pointer.P(backupv1.VirtualMachineBackupGroupVersionKind.Group),
+				Kind:     backupv1.VirtualMachineBackupGroupVersionKind.Kind,
+				Name:     backup.Name,
+			},
+		},
+	}
+
+	_, err := ctrl.client.VirtualMachineExport(backup.Namespace).Create(context.Background(), vmExport, metav1.CreateOptions{})
+	if err != nil {
+		return syncInfoError(fmt.Errorf(failedExportCreate, err))
+	}
+
+	return &SyncInfo{
+		event:  backupPreparingVMExportEvent,
+		reason: backupPreparingVMExport,
+	}
+}
+
+func (ctrl *VMBackupController) waitForBackupExportReady(backup *backupv1.VirtualMachineBackup, vmi *v1.VirtualMachineInstance) *SyncInfo {
+	objKey := cacheKeyFunc(backup.Namespace, backup.Name)
+	obj, exists, err := ctrl.vmExportStore.GetByKey(objKey)
+	if err != nil {
+		err = fmt.Errorf("error getting VMExport from store: %w", err)
+		log.Log.Error(err.Error())
+		return syncInfoError(err)
+	}
+	if !exists {
+		return syncInfoError(fmt.Errorf("associated export does not exist"))
+	}
+	vmExport := obj.(*exportv1.VirtualMachineExport)
+
+	if vmExport.Status == nil || vmExport.Status.Phase != exportv1.Ready {
+		return nil
+	}
+
+	if len(backup.Status.IncludedVolumes) == 0 {
+		return nil
+	}
+
+	links := vmExport.Status.Links
+	hasInternalLinks := links != nil && links.Internal != nil && len(links.Internal.Backups) > 0
+	hasExternalLinks := links != nil && links.External != nil && len(links.External.Backups) > 0
+
+	if !hasInternalLinks && !hasExternalLinks {
+		return syncInfoError(fmt.Errorf("associated export ready but has no backup links"))
+	}
+
+	iterableLinks := links.External
+	if !hasExternalLinks {
+		iterableLinks = links.Internal
+	}
+
+	if iterableLinks.Cert == "" {
+		return syncInfoError(fmt.Errorf("associated export ready but has no cert exposed"))
+	}
+
+	syncInfo := &SyncInfo{
+		event:  backupExportReadyEvent,
+		reason: backupExportReady,
+		caCert: &iterableLinks.Cert,
+	}
+	endpointMap := make(map[string][]exportv1.VirtualMachineExportBackupEndpoint)
+	for _, backupEndpoint := range iterableLinks.Backups {
+		endpointMap[backupEndpoint.Name] = backupEndpoint.Endpoints
+	}
+	for _, volume := range backup.Status.IncludedVolumes {
+		if endpoints, ok := endpointMap[volume.VolumeName]; ok {
+			for _, link := range endpoints {
+				switch link.Endpoint {
+				case exportv1.Data:
+					volume.DataEndpoint = link.Url
+				case exportv1.Map:
+					volume.MapEndpoint = link.Url
+				}
+			}
+		}
+		syncInfo.includedVolumes = append(syncInfo.includedVolumes, volume)
+	}
+	return syncInfo
+}
+
+func (ctrl *VMBackupController) validateExportHealth(backup *backupv1.VirtualMachineBackup) *SyncInfo {
+	objKey := cacheKeyFunc(backup.Namespace, backup.Name)
+	_, exists, err := ctrl.vmExportStore.GetByKey(objKey)
+	if err != nil {
+		return syncInfoError(fmt.Errorf("error getting VMExport from store: %w", err))
+	}
+
+	if exists {
+		return nil
+	}
+
+	return &SyncInfo{
+		event:  backupPreparingVMExportEvent,
+		reason: backupPreparingVMExport,
+	}
+}
+
+func (ctrl *VMBackupController) generateBackupTunnelCert(backup *backupv1.VirtualMachineBackup) (*triple.KeyPair, error) {
+	caCert := ctrl.caCertManager.Current()
+	caKeyPair := &triple.KeyPair{
+		Key:  caCert.PrivateKey.(*ecdsa.PrivateKey),
+		Cert: caCert.Leaf,
+	}
+	keyPair, err := triple.NewClientKeyPair(
+		caKeyPair,
+		fmt.Sprintf("kubevirt.io:system:client:%s", backup.UID),
+		nil,
+		getPullBackupRemainingTTL(backup).Duration,
+	)
+	return keyPair, err
+}
+
+func (ctrl *VMBackupController) handlePullModeTTLExpiry(backup *backupv1.VirtualMachineBackup, vmi *v1.VirtualMachineInstance) *SyncInfo {
+	if hasVMIBackupStatus(vmi) && !vmi.Status.ChangedBlockTracking.BackupStatus.Completed {
+		if syncInfo := ctrl.handleAbort(backup, vmi); syncInfo != nil {
+			if syncInfo.reason != "" {
+				syncInfo.reason = fmt.Sprintf("%s: %s", backupTTLExpiredMsg, syncInfo.reason)
+			}
+			return syncInfo
+		}
+		return nil
+	}
+	return nil
+}
+
+func (ctrl *VMBackupController) cleanupBackupExport(backup *backupv1.VirtualMachineBackup) *SyncInfo {
+	objKey := cacheKeyFunc(backup.Namespace, backup.Name)
+	_, exists, err := ctrl.vmExportStore.GetByKey(objKey)
+	if err != nil {
+		return syncInfoError(fmt.Errorf("error getting VMExport from store during TTL expiry: %w", err))
+	}
+	if exists {
+		if err := ctrl.client.VirtualMachineExport(backup.Namespace).Delete(context.Background(), backup.Name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+			return syncInfoError(fmt.Errorf("failed to delete VMExport during TTL expiry: %w", err))
+		}
+		return nil
+	}
+	return nil
+}
+
 func (ctrl *VMBackupController) updateStatus(backup *backupv1.VirtualMachineBackup, syncInfo *SyncInfo, logger *log.FilteredLogger) error {
 	backupOut := backup.DeepCopy()
 
@@ -438,7 +940,6 @@ func (ctrl *VMBackupController) updateStatus(backup *backupv1.VirtualMachineBack
 	}
 
 	if syncInfo != nil {
-		// TODO: Handle failure and abort events (backupFailedEvent, backupAbortedEvent)
 		switch syncInfo.event {
 		case backupInitializingEvent:
 			updateBackupCondition(backupOut, newInitializingCondition(corev1.ConditionTrue, syncInfo.reason))
@@ -450,17 +951,51 @@ func (ctrl *VMBackupController) updateStatus(backup *backupv1.VirtualMachineBack
 			if syncInfo.backupType != "" {
 				backupOut.Status.Type = syncInfo.backupType
 			}
-		case backupCompletedEvent, backupCompletedWithWarningEvent:
-			if syncInfo.event == backupCompletedWithWarningEvent {
+		case backupPreparingVMExportEvent:
+			updateBackupCondition(backupOut, newProgressingCondition(corev1.ConditionTrue, syncInfo.reason))
+			updateBackupCondition(backupOut, newExportInitiatedCondition(corev1.ConditionFalse, syncInfo.reason))
+			updateBackupCondition(backupOut, newExportReadyCondition(corev1.ConditionFalse, syncInfo.reason))
+		case backupExportInitiatedEvent:
+			updateBackupCondition(backupOut, newProgressingCondition(corev1.ConditionTrue, syncInfo.reason))
+			updateBackupCondition(backupOut, newExportInitiatedCondition(corev1.ConditionTrue, syncInfo.reason))
+			updateBackupCondition(backupOut, newExportReadyCondition(corev1.ConditionFalse, syncInfo.reason))
+			updateBackupCondition(backupOut, newDoneCondition(corev1.ConditionFalse, syncInfo.reason))
+		case backupExportReadyEvent:
+			updateBackupCondition(backupOut, newProgressingCondition(corev1.ConditionTrue, syncInfo.reason))
+			updateBackupCondition(backupOut, newExportInitiatedCondition(corev1.ConditionTrue, syncInfo.reason))
+			updateBackupCondition(backupOut, newExportReadyCondition(corev1.ConditionTrue, syncInfo.reason))
+			updateBackupCondition(backupOut, newDoneCondition(corev1.ConditionFalse, syncInfo.reason))
+			if syncInfo.caCert != nil {
+				backupOut.Status.EndpointCert = syncInfo.caCert
+			}
+		case backupAbortingEvent:
+			updateBackupCondition(backupOut, newProgressingCondition(corev1.ConditionTrue, syncInfo.reason))
+			updateBackupCondition(backupOut, newAbortingCondition(corev1.ConditionTrue, syncInfo.reason))
+			eventSev := corev1.EventTypeNormal
+			if isPushMode(backup) {
+				eventSev = corev1.EventTypeWarning
+			}
+			ctrl.recorder.Eventf(backupOut, eventSev, backupAbortingEvent, syncInfo.reason)
+		case backupCompletedEvent, backupCompletedWithWarningEvent, backupFailedEvent:
+			switch syncInfo.event {
+			case backupFailedEvent:
+				ctrl.recorder.Eventf(backupOut, corev1.EventTypeWarning, backupFailedEvent, syncInfo.reason)
+			case backupCompletedWithWarningEvent:
 				ctrl.recorder.Eventf(backupOut, corev1.EventTypeWarning, backupCompletedWithWarningEvent, syncInfo.reason)
-			} else {
+			case backupCompletedEvent:
 				ctrl.recorder.Eventf(backupOut, corev1.EventTypeNormal, backupCompletedEvent, syncInfo.reason)
 			}
 			updateBackupCondition(backupOut, newProgressingCondition(corev1.ConditionFalse, syncInfo.reason))
 			updateBackupCondition(backupOut, newDoneCondition(corev1.ConditionTrue, syncInfo.reason))
-			if syncInfo.checkpointName != "" {
-				backupOut.Status.CheckpointName = pointer.P(syncInfo.checkpointName)
+			if isBackupAborting(backup.Status) {
+				updateBackupCondition(backupOut, newAbortingCondition(corev1.ConditionFalse, syncInfo.reason))
 			}
+		}
+		if len(syncInfo.includedVolumes) > 0 {
+			backupOut.Status.IncludedVolumes = syncInfo.includedVolumes
+		}
+		if syncInfo.checkpointName != nil {
+			backupOut.Status.CheckpointName = syncInfo.checkpointName
 		}
 	}
 
@@ -576,33 +1111,27 @@ func (ctrl *VMBackupController) getVMI(namespace, sourceName string) (*v1.Virtua
 	return obj.(*v1.VirtualMachineInstance), exists, nil
 }
 
-func (ctrl *VMBackupController) verifyBackupSource(backup *backupv1.VirtualMachineBackup, sourceName string) (*v1.VirtualMachineInstance, *SyncInfo) {
+func (ctrl *VMBackupController) sourceVMExists(backup *backupv1.VirtualMachineBackup, sourceName string) (bool, error) {
 	objKey := cacheKeyFunc(backup.Namespace, sourceName)
 	_, exists, err := ctrl.vmStore.GetByKey(objKey)
 	if err != nil {
 		err = fmt.Errorf("failed to get VM from store: %w", err)
 		log.Log.With("VirtualMachineBackup", backup.Name).Error(err.Error())
-		return nil, syncInfoError(err)
 	}
+	return exists, err
+}
 
-	if !exists {
-		return nil, &SyncInfo{
-			event:  backupInitializingEvent,
-			reason: fmt.Sprintf(vmNotFoundMsg, backup.Namespace, sourceName),
-		}
-	}
+func (ctrl *VMBackupController) vmiFromSource(backup *backupv1.VirtualMachineBackup, sourceName string) (*v1.VirtualMachineInstance, bool, error) {
 	vmi, exists, err := ctrl.getVMI(backup.Namespace, sourceName)
 	if err != nil {
 		err = fmt.Errorf("failed to get VMI from store: %w", err)
 		log.Log.With("VirtualMachineBackup", backup.Name).Error(err.Error())
-		return nil, syncInfoError(err)
 	}
-	if !exists {
-		return nil, &SyncInfo{
-			event:  backupInitializingEvent,
-			reason: fmt.Sprintf(vmNotRunningMsg, sourceName),
-		}
-	}
+
+	return vmi, exists, err
+}
+
+func (ctrl *VMBackupController) verifyVMIEligibleForBackup(vmi *v1.VirtualMachineInstance, backupName string) *SyncInfo {
 	hasEligibleVolumes := false
 	for _, volume := range vmi.Spec.Volumes {
 		if IsCBTEligibleVolume(&volume) {
@@ -611,20 +1140,19 @@ func (ctrl *VMBackupController) verifyBackupSource(backup *backupv1.VirtualMachi
 		}
 	}
 	if !hasEligibleVolumes {
-		return nil, &SyncInfo{
+		return &SyncInfo{
 			event:  backupInitializingEvent,
-			reason: fmt.Sprintf(vmNoVolumesToBackupMsg, sourceName),
+			reason: fmt.Sprintf(vmNoVolumesToBackupMsg, vmi.Name),
 		}
 	}
 	if vmi.Status.ChangedBlockTracking == nil || vmi.Status.ChangedBlockTracking.State != v1.ChangedBlockTrackingEnabled {
-		log.Log.With("VirtualMachineBackup", backup.Name).Errorf(vmNoChangedBlockTrackingMsg, sourceName)
-		return nil, &SyncInfo{
+		log.Log.With("VirtualMachineBackup", backupName).Errorf(vmNoChangedBlockTrackingMsg, vmi.Name)
+		return &SyncInfo{
 			event:  backupInitializingEvent,
-			reason: fmt.Sprintf(vmNoChangedBlockTrackingMsg, sourceName),
+			reason: fmt.Sprintf(vmNoChangedBlockTrackingMsg, vmi.Name),
 		}
 	}
-
-	return vmi, nil
+	return nil
 }
 
 func (ctrl *VMBackupController) removeSourceBackupInProgress(vmi *v1.VirtualMachineInstance) *SyncInfo {
@@ -649,7 +1177,7 @@ func (ctrl *VMBackupController) removeSourceBackupInProgress(vmi *v1.VirtualMach
 	return nil
 }
 
-func (ctrl *VMBackupController) updateSourceBackupInProgress(vmi *v1.VirtualMachineInstance, backupName string) error {
+func (ctrl *VMBackupController) updateSourceBackupInProgress(vmi *v1.VirtualMachineInstance, backupName string, creationTimestamp metav1.Time) error {
 	if hasVMIBackupStatus(vmi) {
 		if vmi.Status.ChangedBlockTracking.BackupStatus.BackupName != backupName {
 			return fmt.Errorf("another backup %s is already in progress, cannot start backup %s",
@@ -658,8 +1186,13 @@ func (ctrl *VMBackupController) updateSourceBackupInProgress(vmi *v1.VirtualMach
 		return nil
 	}
 
+	var startTimestamp *metav1.Time
+	if !creationTimestamp.IsZero() {
+		startTimestamp = creationTimestamp.DeepCopy()
+	}
 	backupStatus := &v1.VirtualMachineInstanceBackupStatus{
-		BackupName: backupName,
+		BackupName:     backupName,
+		StartTimestamp: startTimestamp,
 	}
 
 	patchSet := patch.New(
@@ -685,19 +1218,25 @@ func (ctrl *VMBackupController) updateSourceBackupInProgress(vmi *v1.VirtualMach
 }
 
 func (ctrl *VMBackupController) checkBackupCompletion(backup *backupv1.VirtualMachineBackup, vmi *v1.VirtualMachineInstance, backupTracker *backupv1.VirtualMachineBackupTracker) *SyncInfo {
-	// If VMI backup status is missing, perform cleanup
-	if !hasVMIBackupStatus(vmi) {
-		_, syncInfo := ctrl.cleanup(backup, vmi)
-		return syncInfo
+	if vmi == nil {
+		return &SyncInfo{
+			event:  backupFailedEvent,
+			reason: fmt.Sprintf(backupFailed, "unexpected state: VMI is nil"),
+		}
 	}
-
 	backupStatus := vmi.Status.ChangedBlockTracking.BackupStatus
 	if !backupStatus.Completed {
+		if len(backupStatus.Volumes) > 0 && len(backup.Status.IncludedVolumes) == 0 {
+			return &SyncInfo{
+				includedVolumes: backupStatus.Volumes,
+				checkpointName:  backupStatus.CheckpointName,
+			}
+		}
 		return nil
 	}
 
 	// Update BackupTracker with the new checkpoint if applicable
-	if backupTracker != nil && backupStatus.CheckpointName != nil {
+	if backupTracker != nil && backupStatus.CheckpointName != nil && !backupStatus.Failed {
 		if err := ctrl.updateBackupTracker(backup.Namespace, backupTracker, backupStatus); err != nil {
 			log.Log.Object(backup).Reason(err).Error("Failed to update BackupTracker")
 			return syncInfoError(err)
@@ -713,29 +1252,46 @@ func (ctrl *VMBackupController) checkBackupCompletion(backup *backupv1.VirtualMa
 		return nil
 	}
 
-	// TODO: Handle backup failure (backupStatus.Failed) and abort status (backupStatus.AbortStatus)
-
-	// Check if backup completed with a warning message
-	if backupStatus.BackupMsg != nil {
-		log.Log.Object(backup).Infof(backupCompletedWithWarningMsg, *backupStatus.BackupMsg)
-		syncInfo = &SyncInfo{
-			event:  backupCompletedWithWarningEvent,
-			reason: fmt.Sprintf(backupCompletedWithWarningMsg, *backupStatus.BackupMsg),
-		}
-	} else {
-		log.Log.Object(backup).Info("Backup completed successfully")
-		syncInfo = &SyncInfo{
-			event:  backupCompletedEvent,
-			reason: backupCompleted,
-		}
-	}
+	syncInfo = resolveCompletion(backup, backupStatus)
 
 	// We allow tracking checkpoints only if BackupTracker is specified
-	if backupTracker != nil {
-		syncInfo.checkpointName = *backupStatus.CheckpointName
+	if backupTracker != nil && !backupStatus.Failed {
+		syncInfo.checkpointName = backupStatus.CheckpointName
 	}
+	syncInfo.includedVolumes = backupStatus.Volumes
 
 	return syncInfo
+}
+
+func resolveCompletion(backup *backupv1.VirtualMachineBackup, status *v1.VirtualMachineInstanceBackupStatus) *SyncInfo {
+	fmtReason := func(base string, msg *string) string {
+		if msg == nil {
+			return fmt.Sprintf(base, "unknown, no completion message")
+		}
+		return fmt.Sprintf(base, *msg)
+	}
+
+	if status.Failed {
+		log.Log.Object(backup).Info(fmtReason(backupFailed, status.BackupMsg))
+		return &SyncInfo{
+			event:  backupFailedEvent,
+			reason: fmtReason(backupFailed, status.BackupMsg),
+		}
+	}
+
+	if status.BackupMsg != nil {
+		log.Log.Object(backup).Infof(backupCompletedWithWarningMsg, *status.BackupMsg)
+		return &SyncInfo{
+			event:  backupCompletedWithWarningEvent,
+			reason: fmtReason(backupCompletedWithWarningMsg, status.BackupMsg),
+		}
+	}
+
+	log.Log.Object(backup).Info(backupCompleted)
+	return &SyncInfo{
+		event:  backupCompletedEvent,
+		reason: backupCompleted,
+	}
 }
 
 func (ctrl *VMBackupController) updateBackupTracker(namespace string, tracker *backupv1.VirtualMachineBackupTracker, backupStatus *v1.VirtualMachineInstanceBackupStatus) error {
@@ -745,7 +1301,8 @@ func (ctrl *VMBackupController) updateBackupTracker(namespace string, tracker *b
 
 	newCheckpoint := backupv1.BackupCheckpoint{
 		Name:         *backupStatus.CheckpointName,
-		CreationTime: pointer.P(metav1.Now()),
+		CreationTime: backupStatus.StartTimestamp,
+		Volumes:      backupStatus.Volumes,
 	}
 
 	newStatus := &backupv1.VirtualMachineBackupTrackerStatus{
@@ -778,37 +1335,9 @@ func (ctrl *VMBackupController) updateBackupTracker(namespace string, tracker *b
 
 	log.Log.Infof("Successfully updated BackupTracker %s/%s with checkpoint %s",
 		namespace, tracker.Name, newCheckpoint.Name)
-	log.Log.V(3).Infof("Checkpoint details: name=%s, creationTime=%s",
-		newCheckpoint.Name, newCheckpoint.CreationTime)
+	log.Log.V(3).Infof("Checkpoint details: name=%s, creationTime=%s, volumes=%d",
+		newCheckpoint.Name, newCheckpoint.CreationTime, len(newCheckpoint.Volumes))
 
-	return nil
-}
-
-func (ctrl *VMBackupController) deletionCleanup(backup *backupv1.VirtualMachineBackup, sourceName string) *SyncInfo {
-	vmi, _, err := ctrl.getVMI(backup.Namespace, sourceName)
-	if err != nil {
-		err = fmt.Errorf("failed to get VMI during deletion cleanup: %w", err)
-		log.Log.With("VirtualMachineBackup", backup.Name).Error(err.Error())
-		return syncInfoError(err)
-	}
-
-	vmiBackupInProgress := hasVMIBackupStatus(vmi) &&
-		vmi.Status.ChangedBlockTracking.BackupStatus.BackupName == backup.Name &&
-		!vmi.Status.ChangedBlockTracking.BackupStatus.Completed
-
-	if vmiBackupInProgress {
-		log.Log.With("VirtualMachineBackup", backup.Name).V(3).Info(backupDeletingBeforeVMICompletionMsg)
-		// TODO: abort running backup on deletion instead of waiting for completion
-		return nil
-	}
-
-	done, syncInfo := ctrl.cleanup(backup, vmi)
-	if syncInfo != nil {
-		return syncInfo
-	}
-	if !done {
-		return syncInfoError(fmt.Errorf("cleanup not yet complete for deleted backup"))
-	}
 	return nil
 }
 
@@ -816,13 +1345,26 @@ func isPushMode(backup *backupv1.VirtualMachineBackup) bool {
 	return backup.Spec.Mode == nil || *backup.Spec.Mode == backupv1.PushMode
 }
 
+func isPullMode(backup *backupv1.VirtualMachineBackup) bool {
+	return backup.Spec.Mode != nil && *backup.Spec.Mode == backupv1.PullMode
+}
+
 func (ctrl *VMBackupController) cleanup(backup *backupv1.VirtualMachineBackup, vmi *v1.VirtualMachineInstance) (bool, *SyncInfo) {
-	if isPushMode(backup) {
-		volumeName := backupTargetVolumeName(backup.Name)
-		detached := ctrl.backupTargetPVCDetached(vmi, volumeName)
-		if !detached {
-			return false, ctrl.detachBackupTargetPVC(vmi, volumeName)
+	if isPullMode(backup) {
+		syncInfo := ctrl.cleanupBackupExport(backup)
+		if syncInfo != nil {
+			return false, syncInfo
 		}
+	}
+
+	volumeName := backupTargetVolumeName(backup.Name)
+	detached := ctrl.backupTargetPVCDetached(vmi, volumeName)
+	if !detached {
+		event := backupInitializingEvent
+		if isBackupProgressing(backup.Status) {
+			event = backupInitiatedEvent
+		}
+		return false, ctrl.detachBackupTargetPVC(vmi, volumeName, event)
 	}
 
 	syncInfo := ctrl.removeSourceBackupInProgress(vmi)
@@ -830,17 +1372,27 @@ func (ctrl *VMBackupController) cleanup(backup *backupv1.VirtualMachineBackup, v
 		return false, syncInfo
 	}
 
-	if isBackupDeleting(backup) {
-		if syncInfo := ctrl.removeBackupFinalizer(backup); syncInfo != nil {
-			return false, syncInfo
-		}
-	}
-
 	return true, nil
 }
 
 func isBackupInitializing(status *backupv1.VirtualMachineBackupStatus) bool {
 	return status == nil || hasCondition(status.Conditions, backupv1.ConditionInitializing)
+}
+
+func isBackupProgressing(status *backupv1.VirtualMachineBackupStatus) bool {
+	return status != nil && hasCondition(status.Conditions, backupv1.ConditionProgressing)
+}
+
+func isBackupExportInitialized(status *backupv1.VirtualMachineBackupStatus) bool {
+	return status != nil && hasCondition(status.Conditions, backupv1.ConditionExportInitiated)
+}
+
+func isBackupExportReady(status *backupv1.VirtualMachineBackupStatus) bool {
+	return status != nil && hasCondition(status.Conditions, backupv1.ConditionExportReady)
+}
+
+func isBackupAborting(status *backupv1.VirtualMachineBackupStatus) bool {
+	return status != nil && hasCondition(status.Conditions, backupv1.ConditionAborting)
 }
 
 func IsBackupDone(status *backupv1.VirtualMachineBackupStatus) bool {
@@ -887,6 +1439,18 @@ func newProgressingCondition(status corev1.ConditionStatus, reason string) backu
 	return newCondition(backupv1.ConditionProgressing, status, reason)
 }
 
+func newExportInitiatedCondition(status corev1.ConditionStatus, reason string) backupv1.Condition {
+	return newCondition(backupv1.ConditionExportInitiated, status, reason)
+}
+
+func newExportReadyCondition(status corev1.ConditionStatus, reason string) backupv1.Condition {
+	return newCondition(backupv1.ConditionExportReady, status, reason)
+}
+
+func newAbortingCondition(status corev1.ConditionStatus, reason string) backupv1.Condition {
+	return newCondition(backupv1.ConditionAborting, status, reason)
+}
+
 func newDeletingCondition(status corev1.ConditionStatus, reason string) backupv1.Condition {
 	return newCondition(backupv1.ConditionDeleting, status, reason)
 }
@@ -921,4 +1485,35 @@ func isBackupDeleting(backup *backupv1.VirtualMachineBackup) bool {
 
 func hasVMIBackupStatus(vmi *v1.VirtualMachineInstance) bool {
 	return vmi != nil && vmi.Status.ChangedBlockTracking != nil && vmi.Status.ChangedBlockTracking.BackupStatus != nil
+}
+
+func getPullBackupTTL(backup *backupv1.VirtualMachineBackup) *metav1.Duration {
+	ttl := &metav1.Duration{Duration: defaultPullModeDurationTTL}
+	if backup.Spec.TTLDuration != nil {
+		ttl = backup.Spec.TTLDuration
+	}
+	return ttl
+}
+
+func getPullBackupRemainingTTL(backup *backupv1.VirtualMachineBackup) *metav1.Duration {
+	totalTTL := getPullBackupTTL(backup)
+	creationTime := backup.CreationTimestamp.Time
+
+	if creationTime.IsZero() {
+		return totalTTL
+	}
+
+	elapsed := time.Since(creationTime)
+	remaining := totalTTL.Duration - elapsed
+
+	if remaining <= 0 {
+		return &metav1.Duration{Duration: 0}
+	}
+
+	return &metav1.Duration{Duration: remaining}
+}
+
+func isPullBackupTTLExpired(backup *backupv1.VirtualMachineBackup) bool {
+	ttl := getPullBackupTTL(backup)
+	return time.Since(backup.CreationTimestamp.Time) >= ttl.Duration
 }

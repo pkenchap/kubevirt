@@ -36,6 +36,7 @@ import (
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -52,6 +53,7 @@ import (
 
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 
+	backupv1 "kubevirt.io/api/backup/v1alpha1"
 	virtv1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/api/migrations/v1alpha1"
 	"kubevirt.io/client-go/kubecli"
@@ -73,6 +75,8 @@ const (
 	successfulUpdatePodDisruptionBudgetReason = "SuccessfulUpdate"
 	failedUpdatePodDisruptionBudgetReason     = "FailedUpdate"
 	failedGetAttractionPodsFmt                = "failed to get attachment pods: %v"
+	migrationBlockedByBackupAbortingMsgFmt    = "Aborting backup %s for system-critical migration"
+	migrationBlockedByBackupWaitingMsgFmt     = "Waiting for backup %s to complete"
 )
 
 const vmiPodIndex = "vmiPodIndex"
@@ -649,6 +653,8 @@ func (c *Controller) updateStatus(migration *virtv1.VirtualMachineInstanceMigrat
 		}
 	}
 
+	updateDecentralizedMigrationCondition(vmi, migrationCopy, conditionManager)
+
 	controller.SetVMIMigrationPhaseTransitionTimestamp(migration, migrationCopy)
 	controller.SetSourcePod(migrationCopy, vmi, c.podIndexer)
 	if err := c.setSynchronizationAddressStatus(migrationCopy); err != nil {
@@ -667,6 +673,26 @@ func (c *Controller) updateStatus(migration *virtv1.VirtualMachineInstanceMigrat
 		if err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func updateDecentralizedMigrationCondition(vmi *virtv1.VirtualMachineInstance, migrationCopy *virtv1.VirtualMachineInstanceMigration, conditionManager *controller.VirtualMachineInstanceMigrationConditionManager) error {
+	if vmiCondition := controller.NewVirtualMachineInstanceConditionManager().GetCondition(vmi, virtv1.VirtualMachineInstanceDecentralizedLiveMigrationFailure); vmiCondition != nil {
+		condition := virtv1.VirtualMachineInstanceMigrationCondition{
+			Type:          virtv1.VirtualMachineInstanceDecentralizedMigrationBlocked,
+			Reason:        vmiCondition.Reason,
+			Message:       vmiCondition.Message,
+			Status:        k8sv1.ConditionTrue,
+			LastProbeTime: v1.Now(),
+		}
+		if !conditionManager.HasCondition(migrationCopy, virtv1.VirtualMachineInstanceDecentralizedMigrationBlocked) {
+			migrationCopy.Status.Conditions = append(migrationCopy.Status.Conditions, condition)
+		} else {
+			conditionManager.UpdateCondition(migrationCopy, &condition)
+		}
+	} else {
+		conditionManager.RemoveCondition(migrationCopy, virtv1.VirtualMachineInstanceDecentralizedMigrationBlocked)
 	}
 	return nil
 }
@@ -723,6 +749,9 @@ func (c *Controller) processMigrationPhase(
 			log.Log.Object(migration).Error("Migration object ont eligible for migration because another job is in progress")
 		}
 	case virtv1.MigrationPending:
+		if hasOngoingBackup, err := c.handleVMBackup(migrationCopy, vmi); hasOngoingBackup || err != nil {
+			return err
+		}
 
 		if hasUtilityVolumes, err := c.handleUtilityVolumes(migrationCopy, vmi); err != nil || hasUtilityVolumes {
 			return err
@@ -1086,14 +1115,12 @@ func (c *Controller) handleMigrationBackoff(key string, vmi *virtv1.VirtualMachi
 
 func (c *Controller) handleMarkMigrationFailedOnVMI(migration *virtv1.VirtualMachineInstanceMigration, vmi *virtv1.VirtualMachineInstance) error {
 
-	// Mark Migration Done on VMI if virt handler never started it.
-	// Once virt-handler starts the migration, it's up to handler
-	// to finalize it.
-
 	vmiCopy := vmi.DeepCopy()
 
 	now := v1.NewTime(time.Now())
-	vmiCopy.Status.MigrationState.StartTimestamp = &now
+	if vmiCopy.Status.MigrationState.StartTimestamp == nil {
+		vmiCopy.Status.MigrationState.StartTimestamp = &now
+	}
 	vmiCopy.Status.MigrationState.EndTimestamp = &now
 	vmiCopy.Status.MigrationState.Failed = true
 	vmiCopy.Status.MigrationState.Completed = true
@@ -1159,7 +1186,7 @@ func (c *Controller) updateTargetPodNetworkInfo(vmi *virtv1.VirtualMachineInstan
 
 func (c *Controller) handleTargetPodHandoff(migration *virtv1.VirtualMachineInstanceMigration, vmi *virtv1.VirtualMachineInstance, pod *k8sv1.Pod) error {
 
-	if vmi.IsMigrationSynchronized(migration) && vmi.Status.MigrationState.MigrationUID == migration.UID {
+	if vmi.IsMigrationSynchronized(migration) && vmi.Status.MigrationState != nil && vmi.Status.MigrationState.MigrationUID == migration.UID {
 		// already handed off
 		return nil
 	}
@@ -1175,6 +1202,11 @@ func (c *Controller) handleTargetPodHandoff(migration *virtv1.VirtualMachineInst
 	vmiCopy.Status.MigrationState.TargetNode = pod.Spec.NodeName
 	vmiCopy.Status.MigrationState.SourceNode = vmi.Status.NodeName
 	vmiCopy.Status.MigrationState.TargetPod = pod.Name
+
+	// Set target memory overhead from pod annotation
+	if c.clusterConfig.VmiMemoryOverheadReportEnabled() {
+		c.updateTargetMemoryOverheadFromPod(vmiCopy, pod)
+	}
 
 	if migration.IsDecentralized() {
 		vmiCopy.Status.MigrationState.TargetState.MigrationUID = migration.UID
@@ -1253,6 +1285,23 @@ func (c *Controller) handleTargetPodHandoff(migration *virtv1.VirtualMachineInst
 	log.Log.Object(vmi).Infof("Handed off migration %s/%s to target virt-handler.", migration.Namespace, migration.Name)
 	c.recorder.Eventf(migration, k8sv1.EventTypeNormal, controller.SuccessfulHandOverPodReason, "Migration target pod is ready for preparation by virt-handler.")
 	return nil
+}
+
+func (c *Controller) updateTargetMemoryOverheadFromPod(vmi *virtv1.VirtualMachineInstance, pod *k8sv1.Pod) {
+	if pod == nil || pod.Annotations == nil {
+		return
+	}
+	overheadStr, exists := pod.Annotations[virtv1.MemoryOverheadAnnotationBytes]
+	if !exists {
+		return
+	}
+	overheadBytes, err := strconv.ParseInt(overheadStr, 10, 64)
+	if err != nil {
+		log.Log.Object(vmi).Warningf("Failed to parse memory overhead annotation: %v", err)
+		return
+	}
+	overhead := resource.NewQuantity(overheadBytes, resource.BinarySI)
+	vmi.Status.MigrationState.TargetMemoryOverhead = overhead
 }
 
 func (c *Controller) markMigrationAbortInVmiStatus(migration *virtv1.VirtualMachineInstanceMigration, vmi *virtv1.VirtualMachineInstance) error {
@@ -1373,7 +1422,8 @@ func (c *Controller) handleBackendStorage(migration *virtv1.VirtualMachineInstan
 	if migration.Status.MigrationState == nil {
 		migration.Status.MigrationState = &virtv1.VirtualMachineInstanceMigrationState{}
 	}
-	if !vmi.IsDecentralizedMigration() || vmi.IsMigrationSource() {
+	// Set source PVC when: not decentralized, or VMI is source for this migration, or a previous decentralized migration completed (so next migration can run MigrationHandoff).
+	if !vmi.IsDecentralizedMigration() || vmi.IsMigrationSource() || vmi.IsMigrationCompleted() {
 		migration.Status.MigrationState.SourcePersistentStatePVCName = backendstorage.CurrentPVCName(vmi)
 		if migration.Status.MigrationState.SourcePersistentStatePVCName == "" {
 			return fmt.Errorf("no backend-storage PVC found in VMI volume status")
@@ -1528,6 +1578,76 @@ func (c *Controller) getCatchAllPendingTimeoutSeconds(migration *virtv1.VirtualM
 	}
 
 	return int64(newTimeout)
+}
+
+func (c *Controller) handleVMBackup(migration *virtv1.VirtualMachineInstanceMigration, vmi *virtv1.VirtualMachineInstance) (bool, error) {
+	conditionManager := controller.NewVirtualMachineInstanceMigrationConditionManager()
+	if !migrationsutil.IsBackupInProgress(vmi) {
+		if conditionManager.HasCondition(migration, virtv1.VirtualMachineInstanceMigrationBlockedByBackup) {
+			conditionManager.RemoveCondition(migration, virtv1.VirtualMachineInstanceMigrationBlockedByBackup)
+		}
+		return false, nil
+	}
+
+	if migration.Spec.Priority != nil && *migration.Spec.Priority == virtv1.PrioritySystemCritical {
+		if !conditionManager.HasCondition(migration, virtv1.VirtualMachineInstanceMigrationBlockedByBackup) {
+			if err := c.abortBackupForCriticalMigration(migration, vmi); err != nil {
+				return true, err
+			}
+		}
+		c.setBlockedByBackupCondition(migration, fmt.Sprintf(migrationBlockedByBackupAbortingMsgFmt, vmi.Status.ChangedBlockTracking.BackupStatus.BackupName))
+	} else {
+		c.setBlockedByBackupCondition(migration, fmt.Sprintf(migrationBlockedByBackupWaitingMsgFmt, vmi.Status.ChangedBlockTracking.BackupStatus.BackupName))
+	}
+
+	migrationKey, err := controller.KeyFunc(migration)
+	if err != nil {
+		return true, err
+	}
+
+	if c.clusterConfig.MigrationPriorityQueueEnabled() {
+		priority := migrationsutil.PriorityFromMigration(migration)
+		delay := getRequeueDelayForPriority(*priority)
+		c.Queue.AddWithOpts(priorityqueue.AddOpts{Priority: priority, After: delay}, migrationKey)
+	} else {
+		c.Queue.AddWithOpts(priorityqueue.AddOpts{Priority: pointer.P(migrationsutil.QueuePriorityPending), After: 5 * time.Second}, migrationKey)
+	}
+
+	return true, nil
+}
+
+func (c *Controller) abortBackupForCriticalMigration(migration *virtv1.VirtualMachineInstanceMigration, vmi *virtv1.VirtualMachineInstance) error {
+	backupStatus := vmi.Status.ChangedBlockTracking.BackupStatus
+	if backupStatus == nil {
+		return nil
+	}
+	backupOptions := &backupv1.BackupOptions{
+		BackupName:      backupStatus.BackupName,
+		Cmd:             backupv1.Abort,
+		BackupStartTime: backupStatus.StartTimestamp,
+	}
+	err := c.clientset.VirtualMachineInstance(vmi.Namespace).Backup(context.Background(), vmi.Name, backupOptions)
+	if err != nil {
+		log.Log.Object(vmi).Reason(err).Error("failed to abort backup for critical migration")
+		c.recorder.Eventf(migration, k8sv1.EventTypeWarning, "BackupAbortFailed",
+			"Failed to abort backup %s for critical migration: %v", backupStatus.BackupName, err)
+		return err
+	}
+	c.recorder.Eventf(migration, k8sv1.EventTypeNormal, "BackupAbortedForMigration",
+		migrationBlockedByBackupAbortingMsgFmt, backupStatus.BackupName)
+	return nil
+}
+
+func (c *Controller) setBlockedByBackupCondition(migration *virtv1.VirtualMachineInstanceMigration, message string) {
+	conditionManager := controller.NewVirtualMachineInstanceMigrationConditionManager()
+	condition := virtv1.VirtualMachineInstanceMigrationCondition{
+		Type:          virtv1.VirtualMachineInstanceMigrationBlockedByBackup,
+		Status:        k8sv1.ConditionTrue,
+		LastProbeTime: v1.Now(),
+		Reason:        "BackupInProgress",
+		Message:       message,
+	}
+	conditionManager.UpdateCondition(migration, &condition)
 }
 
 func (c *Controller) getUtilityVolumesTimeoutSeconds(migration *virtv1.VirtualMachineInstanceMigration) int64 {
@@ -1779,13 +1899,24 @@ func (c *Controller) sync(key string, migration *virtv1.VirtualMachineInstanceMi
 			}
 			return c.handleTargetPodHandoff(migration, vmi, pod)
 		}
-	case virtv1.MigrationPreparingTarget, virtv1.MigrationTargetReady, virtv1.MigrationFailed:
+	case virtv1.MigrationPreparingTarget, virtv1.MigrationTargetReady:
 		if migration.IsLocalOrDecentralizedTarget() && (!targetPodExists || controller.PodIsDown(pod)) &&
 			vmi.IsMigrationSynchronized(migration) &&
 			len(vmi.Status.MigrationState.TargetDirectMigrationNodePorts) == 0 &&
 			vmi.Status.MigrationState.StartTimestamp == nil &&
 			!vmi.Status.MigrationState.Failed &&
 			!vmi.Status.MigrationState.Completed {
+
+			err = c.handleMarkMigrationFailedOnVMI(migration, vmi)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	case virtv1.MigrationFailed:
+		if migration.IsLocalOrDecentralizedTarget() &&
+			vmi.IsMigrationSynchronized(migration) &&
+			vmi.Status.MigrationState.EndTimestamp == nil {
 
 			err = c.handleMarkMigrationFailedOnVMI(migration, vmi)
 			if err != nil {
@@ -2147,7 +2278,7 @@ func (c *Controller) garbageCollectFinalizedMigrations(vmi *virtv1.VirtualMachin
 		}
 	}
 
-	// only keep the oldest 5 finalized migration objects
+	// only keep the most recent 5 finalized migration objects
 	garbageCollectionCount := len(finalizedMigrations) - defaultFinalizedMigrationGarbageCollectionBuffer
 
 	if garbageCollectionCount <= 0 {

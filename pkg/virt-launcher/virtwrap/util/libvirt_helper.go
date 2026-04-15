@@ -16,8 +16,6 @@ import (
 	"syscall"
 	"time"
 
-	"kubevirt.io/kubevirt/pkg/virt-controller/services"
-
 	"golang.org/x/sys/unix"
 	k8sv1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -289,6 +287,14 @@ func (l LibvirtWrapper) StartVirtqemud(stopChan chan struct{}) {
 	}()
 }
 
+// GetQemuLogPath returns the path to the QEMU log file for a domain
+func GetQemuLogPath(domainName string, nonRoot bool) string {
+	if nonRoot {
+		return filepath.Join("/var", "run", "kubevirt-private", "libvirt", "qemu", "log", fmt.Sprintf("%s.log", domainName))
+	}
+	return filepath.Join("/var", "log", "libvirt", "qemu", fmt.Sprintf("%s.log", domainName))
+}
+
 func startVirtlogdLogging(stopChan chan struct{}, domainName string, nonRoot bool) {
 	for {
 		cmd := exec.Command("/usr/sbin/virtlogd", "-f", "/etc/libvirt/virtlogd.conf")
@@ -302,10 +308,7 @@ func startVirtlogdLogging(stopChan chan struct{}, domainName string, nonRoot boo
 		}
 
 		go func() {
-			logfile := fmt.Sprintf("/var/log/libvirt/qemu/%s.log", domainName)
-			if nonRoot {
-				logfile = filepath.Join("/var", "run", "kubevirt-private", "libvirt", "qemu", "log", fmt.Sprintf("%s.log", domainName))
-			}
+			logfile := GetQemuLogPath(domainName, nonRoot)
 
 			// It can take a few seconds to the log file to be created
 			for {
@@ -471,7 +474,7 @@ func configureQemuConf(qemuFilename string) (err error) {
 		}
 	}
 
-	if pathsStr, ok := os.LookupEnv(services.ENV_VAR_SHARED_FILESYSTEM_PATHS); ok {
+	if pathsStr, ok := os.LookupEnv(util.ENV_VAR_SHARED_FILESYSTEM_PATHS); ok {
 		paths := strings.Split(pathsStr, ":")
 		formatted := strings.Join(paths, "\", \"")
 		sharedFsEntry := fmt.Sprintf("shared_filesystems = [ \"%s\" ]\n", formatted)
@@ -523,10 +526,10 @@ func (l LibvirtWrapper) SetupLibvirt(customLogFilters *string) (err error) {
 	}
 
 	var libvirtLogVerbosityEnvVar *string
-	if envVarValue, envVarDefined := os.LookupEnv(services.ENV_VAR_VIRT_LAUNCHER_LOG_VERBOSITY); envVarDefined {
+	if envVarValue, envVarDefined := os.LookupEnv(util.ENV_VAR_VIRT_LAUNCHER_LOG_VERBOSITY); envVarDefined {
 		libvirtLogVerbosityEnvVar = &envVarValue
 	}
-	_, libvirtDebugLogsEnvVarDefined := os.LookupEnv(services.ENV_VAR_LIBVIRT_DEBUG_LOGS)
+	_, libvirtDebugLogsEnvVarDefined := os.LookupEnv(util.ENV_VAR_LIBVIRT_DEBUG_LOGS)
 
 	if logFilters, enableDebugLogs := getLibvirtLogFilters(customLogFilters, libvirtLogVerbosityEnvVar, libvirtDebugLogsEnvVarDefined); enableDebugLogs {
 		virtqemudConf, err := os.OpenFile(runtimeVirtqemudConfPath, os.O_APPEND|os.O_WRONLY, 0644)
@@ -564,14 +567,14 @@ func getLibvirtLogFilters(customLogFilters, libvirtLogVerbosityEnvVar *string, l
 	if libvirtLogVerbosityEnvVar != nil {
 		libvirtLogVerbosity, err = strconv.Atoi(*libvirtLogVerbosityEnvVar)
 		if err != nil {
-			log.Log.Infof("cannot apply %s value %s - must be a number", services.ENV_VAR_VIRT_LAUNCHER_LOG_VERBOSITY, *libvirtLogVerbosityEnvVar)
+			log.Log.Infof("cannot apply %s value %s - must be a number", util.ENV_VAR_VIRT_LAUNCHER_LOG_VERBOSITY, *libvirtLogVerbosityEnvVar)
 			libvirtLogVerbosity = -1
 		}
 	} else {
 		libvirtLogVerbosity = -1
 	}
 
-	const verbosityThreshold = services.EXT_LOG_VERBOSITY_THRESHOLD
+	const verbosityThreshold = util.EXT_LOG_VERBOSITY_THRESHOLD
 
 	if libvirtLogVerbosity < verbosityThreshold {
 		if libvirtDebugLogsEnvVarDefined {

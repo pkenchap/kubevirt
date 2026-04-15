@@ -37,6 +37,7 @@ import (
 	"kubevirt.io/kubevirt/pkg/controller"
 	diskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
 	hostdisk "kubevirt.io/kubevirt/pkg/host-disk"
+	"kubevirt.io/kubevirt/pkg/hypervisor"
 	"kubevirt.io/kubevirt/pkg/libvmi"
 	"kubevirt.io/kubevirt/pkg/safepath"
 	"kubevirt.io/kubevirt/pkg/util"
@@ -46,6 +47,7 @@ import (
 	migrationproxy "kubevirt.io/kubevirt/pkg/virt-handler/migration-proxy"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virtiofs"
+	"kubevirt.io/kubevirt/pkg/vmitrait"
 )
 
 const (
@@ -109,6 +111,8 @@ type BaseController struct {
 	netStat                     netstat
 	recorder                    record.EventRecorder
 	hasSynced                   func() bool
+	hypervisorNodeInfo          hypervisor.HypervisorNodeInformation
+	hypervisorRuntime           hypervisor.VirtRuntime
 }
 
 func NewBaseController(
@@ -125,6 +129,8 @@ func NewBaseController(
 	migrationProxy migrationproxy.ProxyManager,
 	virtLauncherFSRunDirPattern string,
 	netStat netstat,
+	hypervisorNodeInfo hypervisor.HypervisorNodeInformation,
+	hypervisorRuntime hypervisor.VirtRuntime,
 ) (*BaseController, error) {
 
 	c := &BaseController{
@@ -142,6 +148,8 @@ func NewBaseController(
 		virtLauncherFSRunDirPattern: virtLauncherFSRunDirPattern,
 		netStat:                     netStat,
 		hasSynced:                   func() bool { return domainInformer.HasSynced() && vmiInformer.HasSynced() },
+		hypervisorNodeInfo:          hypervisorNodeInfo,
+		hypervisorRuntime:           hypervisorRuntime,
 	}
 
 	return c, nil
@@ -200,7 +208,7 @@ func (c *BaseController) claimDeviceOwnership(virtLauncherRootMount *safepath.Pa
 	softwareEmulation := c.clusterConfig.AllowEmulation()
 	devicePath, err := safepath.JoinNoFollow(virtLauncherRootMount, filepath.Join("dev", deviceName))
 	if err != nil {
-		if softwareEmulation && deviceName == "kvm" {
+		if softwareEmulation && deviceName == c.hypervisorNodeInfo.GetHypervisorDevice() {
 			return nil
 		}
 		return err
@@ -260,9 +268,9 @@ func (c *BaseController) setupDevicesOwnerships(vmi *v1.VirtualMachineInstance, 
 		return err
 	}
 
-	err = c.claimDeviceOwnership(virtLauncherRootMount, "kvm")
-	if err != nil {
-		return fmt.Errorf("failed to set up file ownership for /dev/kvm: %v", err)
+	hypervisorDevice := c.hypervisorNodeInfo.GetHypervisorDevice()
+	if err := c.claimDeviceOwnership(virtLauncherRootMount, hypervisorDevice); err != nil {
+		return fmt.Errorf("failed to set up file ownership for /dev/%s: %v", hypervisorDevice, err)
 	}
 
 	if util.IsAutoAttachVSOCK(vmi) {
@@ -279,7 +287,7 @@ func (c *BaseController) setupDevicesOwnerships(vmi *v1.VirtualMachineInstance, 
 		return err
 	}
 
-	if util.IsNonRootVMI(vmi) {
+	if vmitrait.IsNonRoot(vmi) {
 		if err := c.nonRootSetup(vmi); err != nil {
 			return err
 		}

@@ -62,8 +62,6 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/flowcontrol"
 
-	"kubevirt.io/kubevirt/pkg/virt-controller/watch/dra"
-
 	"kubevirt.io/kubevirt/pkg/util/ratelimiter"
 
 	"kubevirt.io/kubevirt/pkg/virt-controller/watch/topology"
@@ -72,7 +70,7 @@ import (
 	"kubevirt.io/kubevirt/pkg/monitoring/profiler"
 
 	backupv1 "kubevirt.io/api/backup/v1alpha1"
-	exportv1 "kubevirt.io/api/export/v1beta1"
+	exportv1 "kubevirt.io/api/export/v1"
 	poolv1 "kubevirt.io/api/pool/v1beta1"
 	snapshotv1 "kubevirt.io/api/snapshot/v1beta1"
 	"kubevirt.io/client-go/kubecli"
@@ -81,6 +79,7 @@ import (
 
 	"kubevirt.io/kubevirt/pkg/certificates/bootstrap"
 	"kubevirt.io/kubevirt/pkg/controller"
+	netresources "kubevirt.io/kubevirt/pkg/network/resources"
 	clusterutil "kubevirt.io/kubevirt/pkg/util/cluster"
 
 	instancetypecontroller "kubevirt.io/kubevirt/pkg/instancetype/controller/vm"
@@ -146,22 +145,19 @@ var (
 type VirtControllerApp struct {
 	service.ServiceListen
 
-	clientSet             kubecli.KubevirtClient
-	templateService       *services.TemplateService
-	restClient            *clientrest.RESTClient
-	informerFactory       controller.KubeInformerFactory
-	kvPodInformer         cache.SharedIndexInformer
-	resourceClaimInformer cache.SharedIndexInformer
-	resourceSliceInformer cache.SharedIndexInformer
+	clientSet       kubecli.KubevirtClient
+	templateService *services.TemplateService
+	restClient      *clientrest.RESTClient
+	informerFactory controller.KubeInformerFactory
+	kvPodInformer   cache.SharedIndexInformer
 
 	nodeInformer   cache.SharedIndexInformer
 	nodeController *node.Controller
 
-	vmiCache            cache.Store
-	vmiController       *vmi.Controller
-	draStatusController *dra.DRAStatusController
-	vmiInformer         cache.SharedIndexInformer
-	vmiRecorder         record.EventRecorder
+	vmiCache      cache.Store
+	vmiController *vmi.Controller
+	vmiInformer   cache.SharedIndexInformer
+	vmiRecorder   record.EventRecorder
 
 	namespaceInformer cache.SharedIndexInformer
 	namespaceStore    cache.Store
@@ -198,6 +194,7 @@ type VirtControllerApp struct {
 	workloadUpdateController *workloadupdater.WorkloadUpdateController
 
 	caExportConfigMapInformer    cache.SharedIndexInformer
+	caBackupConfigMapInformer    cache.SharedIndexInformer
 	exportRouteConfigMapInformer cache.SharedInformer
 	exportServiceInformer        cache.SharedIndexInformer
 	exportController             *export.VMExportController
@@ -258,7 +255,6 @@ type VirtControllerApp struct {
 	// number of threads for each controller
 	nodeControllerThreads             int
 	vmiControllerThreads              int
-	draStatusControllerThreads        int
 	rsControllerThreads               int
 	poolControllerThreads             int
 	vmControllerThreads               int
@@ -275,8 +271,9 @@ type VirtControllerApp struct {
 	additionalLauncherLabelsSync      []string
 	backupControllerThreads           int
 
-	promCertFilePath         string
-	promKeyFilePath          string
+	promCertFilePath string
+	promKeyFilePath  string
+
 	nodeTopologyUpdater      topology.NodeTopologyUpdater
 	nodeTopologyUpdatePeriod time.Duration
 	reloadableRateLimiter    *ratelimiter.ReloadableRateLimiter
@@ -378,15 +375,6 @@ func Execute() {
 
 	app.vmiInformer = app.informerFactory.VMI()
 	app.kvPodInformer = app.informerFactory.KubeVirtPod()
-	if app.isDRAEnabled {
-		app.resourceClaimInformer = app.informerFactory.ResourceClaim()
-		app.resourceSliceInformer = app.informerFactory.ResourceSlice()
-		log.Log.Infof("One of DRA FG detected, DRA integration enabled")
-	} else {
-		app.resourceClaimInformer = app.informerFactory.DummyResourceClaim()
-		app.resourceSliceInformer = app.informerFactory.DummyResourceSlice()
-		log.Log.Infof("No DRA FG detected, DRA integration disabled")
-	}
 	app.nodeInformer = app.informerFactory.KubeVirtNode()
 	app.namespaceStore = app.informerFactory.Namespace().GetStore()
 	app.namespaceInformer = app.informerFactory.Namespace()
@@ -415,6 +403,7 @@ func Execute() {
 	app.vmRestoreInformer = app.informerFactory.VirtualMachineRestore()
 	app.storageClassInformer = app.informerFactory.StorageClass()
 	app.caExportConfigMapInformer = app.informerFactory.KubeVirtExportCAConfigMap()
+	app.caBackupConfigMapInformer = app.informerFactory.KubeVirtBackupCAConfigMap()
 	app.exportRouteConfigMapInformer = app.informerFactory.ExportRouteConfigMap()
 	app.unmanagedSecretInformer = app.informerFactory.UnmanagedSecrets()
 	app.allPodInformer = app.informerFactory.Pod()
@@ -617,9 +606,6 @@ func (vca *VirtControllerApp) onStartedLeading() func(ctx context.Context) {
 		go vca.disruptionBudgetController.Run(vca.disruptionBudgetControllerThreads, stop)
 		go vca.nodeController.Run(vca.nodeControllerThreads, stop)
 		go vca.vmiController.Run(vca.vmiControllerThreads, stop)
-		if vca.isDRAEnabled {
-			go vca.draStatusController.Run(vca.draStatusControllerThreads, stop)
-		}
 		go vca.rsController.Run(vca.rsControllerThreads, stop)
 		go vca.poolController.Run(vca.poolControllerThreads, stop)
 		go vca.vmController.Run(vca.vmControllerThreads, stop)
@@ -675,6 +661,7 @@ func (vca *VirtControllerApp) initCommon() {
 	containerdisk.SetLocalDirectoryOnly(filepath.Join(vca.ephemeralDiskDir, "container-disk-data"))
 
 	netAnnotationsGenerator := netannotations.NewGenerator(vca.clusterConfig)
+	storageAnnotationsGenerator := storageannotations.NewGenerator(vca.clusterConfig)
 
 	vca.templateService = services.NewTemplateService(vca.launcherImage,
 		vca.launcherQemuTimeout,
@@ -695,7 +682,7 @@ func (vca *VirtControllerApp) initCommon() {
 				return hooks.UnmarshalHookSidecarList(vmi)
 			}),
 		services.WithSidecarCreator(netbinding.NetBindingPluginSidecarList),
-		services.WithNetBindingPluginMemoryCalculator(netbinding.MemoryCalculator{}),
+		services.WithNetMemoryCalculator(netresources.MemoryCalculator{}),
 		services.WithAnnotationsGenerators(netAnnotationsGenerator, storageannotations.Generator{}),
 		services.WithNetTargetAnnotationsGenerator(netAnnotationsGenerator),
 	)
@@ -715,32 +702,21 @@ func (vca *VirtControllerApp) initCommon() {
 		vca.storageProfileInformer,
 		vca.cdiInformer,
 		vca.cdiConfigInformer,
+		vca.kubeVirtInformer,
 		vca.clusterConfig,
 		topologyHinter,
 		netAnnotationsGenerator,
+		storageAnnotationsGenerator,
 		netcontrollers.UpdateVMIStatus,
 		func(field *k8sfield.Path, vmiSpec *v1.VirtualMachineInstanceSpec, clusterCfg *virtconfig.ClusterConfig) []metav1.StatusCause {
 			return netadmitter.ValidateCreation(field, vmiSpec, clusterCfg)
 		},
-		netmigration.NewEvaluator(),
+		netmigration.NewEvaluator(vca.clusterConfig),
 		vca.additionalLauncherAnnotationsSync,
 		vca.additionalLauncherLabelsSync,
 	)
 	if err != nil {
 		panic(err)
-	}
-
-	if vca.isDRAEnabled {
-		draStatusRecorder := vca.newRecorder(k8sv1.NamespaceAll, "dra-status-controller")
-		vca.draStatusController, err = dra.NewDRAStatusController(
-			vca.clusterConfig,
-			vca.vmiInformer,
-			vca.kvPodInformer,
-			vca.resourceClaimInformer,
-			vca.resourceSliceInformer,
-			draStatusRecorder,
-			vca.clientSet,
-		)
 	}
 
 	recorder := vca.newRecorder(k8sv1.NamespaceAll, "node-controller")
@@ -821,6 +797,7 @@ func (vca *VirtControllerApp) initVirtualMachines() {
 		vca.clusterConfig,
 		netcontrollers.NewVMController(
 			vca.clientSet.GeneratedKubeVirtClient(),
+			vca.clusterConfig,
 		),
 		vm.NewFirmwareController(vca.clientSet.GeneratedKubeVirtClient()),
 		instancetypecontroller.New(
@@ -964,6 +941,8 @@ func (vca *VirtControllerApp) initExportController() {
 		PreferenceInformer:          vca.preferenceInformer,
 		ClusterPreferenceInformer:   vca.clusterPreferenceInformer,
 		ControllerRevisionInformer:  vca.controllerRevisionInformer,
+		VMBackupInformer:            vca.vmBackupInformer,
+		BackupCAConfigMapInformer:   vca.caBackupConfigMapInformer,
 	}
 	if err := vca.exportController.Init(); err != nil {
 		panic(err)
@@ -985,7 +964,16 @@ func (vca *VirtControllerApp) initBackupController() {
 	var err error
 	recorder := vca.newRecorder(k8sv1.NamespaceAll, "backup-controller")
 	vca.vmBackupController, err = backup.NewVMBackupController(
-		vca.clientSet, vca.vmBackupInformer, vca.vmBackupTrackerInformer, vca.vmInformer, vca.vmiInformer, vca.persistentVolumeClaimInformer, recorder,
+		vca.clientSet,
+		vca.vmBackupInformer,
+		vca.vmBackupTrackerInformer,
+		vca.vmInformer,
+		vca.vmiInformer,
+		vca.persistentVolumeClaimInformer,
+		vca.vmExportInformer,
+		vca.caExportConfigMapInformer,
+		recorder,
+		vca.kubevirtNamespace,
 	)
 	if err != nil {
 		panic(err)
@@ -1052,9 +1040,6 @@ func (vca *VirtControllerApp) AddFlags() {
 
 	flag.IntVar(&vca.vmiControllerThreads, "vmi-controller-threads", defaultVMIControllerThreads,
 		"Number of goroutines to run for vmi controller")
-
-	flag.IntVar(&vca.draStatusControllerThreads, "dra-status-controller-threads", defaultControllerThreads,
-		"Number of goroutines to run for dra status controller")
 
 	flag.IntVar(&vca.rsControllerThreads, "rs-controller-threads", defaultControllerThreads,
 		"Number of goroutines to run for replicaset controller")

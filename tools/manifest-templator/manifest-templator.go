@@ -77,9 +77,12 @@ type templateData struct {
 	VirtExportProxyImage               string
 	VirtExportServerImage              string
 	VirtSynchronizationControllerImage string
+	VirtTemplateApiserverImage         string
+	VirtTemplateControllerImage        string
 	GsImage                            string
 	PrHelperImage                      string
 	SidecarShimImage                   string
+	Hypervisor                         string
 }
 
 func main() {
@@ -111,9 +114,12 @@ func main() {
 	virtExportProxyImage := flag.String("virt-export-proxy-image", "", "custom image for virt-export-proxy. "+customImageExample)
 	virtExportServerImage := flag.String("virt-export-server-image", "", "custom image for virt-export-server. "+customImageExample)
 	virtSynchronizationControllerImage := flag.String("virt-synchronization-controller-image", "", "custom image for virt-synchronization-controller. "+customImageExample)
+	virtTemplateApiserverImage := flag.String("virt-template-apiserver-image", "", "custom image for virt-template-apiserver. "+customImageExample)
+	virtTemplateControllerImage := flag.String("virt-template-controller-image", "", "custom image for virt-template-controller. "+customImageExample)
 	gsImage := flag.String("gs-image", "", "custom image for gs. "+customImageExample)
 	prHelperImage := flag.String("pr-helper-image", "", "custom image for pr-helper. "+customImageExample)
 	sidecarShimImage := flag.String("sidecar-shim-image", "", "custom image for sidecar-shim. "+customImageExample)
+	hypervisor := flag.String("hypervisor", "", "hypervisor name (e.g., kvm or hyperv-direct).")
 
 	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
 	pflag.CommandLine.ParseErrorsWhitelist.UnknownFlags = true
@@ -161,9 +167,12 @@ func main() {
 		data.VirtExportProxyImage = *virtExportProxyImage
 		data.VirtExportServerImage = *virtExportServerImage
 		data.VirtSynchronizationControllerImage = *virtSynchronizationControllerImage
+		data.VirtTemplateApiserverImage = *virtTemplateApiserverImage
+		data.VirtTemplateControllerImage = *virtTemplateControllerImage
 		data.GsImage = *gsImage
 		data.PrHelperImage = *prHelperImage
 		data.SidecarShimImage = *sidecarShimImage
+		data.Hypervisor = *hypervisor
 		if *featureGates != "" {
 			data.FeatureGates = strings.Split(*featureGates, ",")
 		}
@@ -197,9 +206,12 @@ func main() {
 		data.VirtExportProxyImage = "{{.VirtExportProxyImage}}"
 		data.VirtExportServerImage = "{{.VirtExportServerImage}}"
 		data.VirtSynchronizationControllerImage = "{{.VirtSynchronizationControllerImage}}"
+		data.VirtTemplateApiserverImage = "{{.VirtTemplateApiserverImage}}"
+		data.VirtTemplateControllerImage = "{{.VirtTemplateControllerImage}}"
 		data.GsImage = "{{.GsImage}}"
 		data.PrHelperImage = "{{.PrHelperImage}}"
 		data.SidecarShimImage = "{{.SidecarShimImage}}"
+		data.Hypervisor = "{{.Hypervisor}}"
 	}
 
 	if *processFiles {
@@ -266,6 +278,8 @@ func getOperatorDeploymentSpec(data templateData, indentation int) string {
 		data.VirtExportProxyImage,
 		data.VirtExportServerImage,
 		data.VirtSynchronizationControllerImage,
+		data.VirtTemplateApiserverImage,
+		data.VirtTemplateControllerImage,
 		data.GsImage,
 		data.PrHelperImage,
 		data.SidecarShimImage,

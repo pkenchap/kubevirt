@@ -200,6 +200,18 @@ func haveSynchronizationControllerDeploymentsRolledOver(targetStrategy install.S
 	return true
 }
 
+func haveVirtTemplateDeploymentsRolledOver(targetStrategy install.StrategyInterface, kv *v1.KubeVirt, stores util.Stores) bool {
+	for _, deployment := range targetStrategy.VirtTemplateDeployments() {
+		if !util.DeploymentIsReady(kv, deployment, stores) {
+			log.Log.V(2).Infof("Waiting on deployment %v to roll over to latest version", deployment.GetName())
+			// not rolled out yet
+			return false
+		}
+	}
+
+	return true
+}
+
 func haveDaemonSetsRolledOver(targetStrategy install.StrategyInterface, kv *v1.KubeVirt, stores util.Stores) bool {
 	for _, daemonSet := range targetStrategy.DaemonSets() {
 		if !util.DaemonsetIsReady(kv, daemonSet, stores) {
@@ -379,15 +391,18 @@ func (r *Reconciler) Sync(queue workqueue.TypedRateLimitingInterface[string]) (b
 	apiDeploymentsRolledOver := haveApiDeploymentsRolledOver(r.targetStrategy, r.kv, r.stores)
 	controllerDeploymentsRolledOver := haveControllerDeploymentsRolledOver(r.targetStrategy, r.kv, r.stores)
 
-	exportProxyEnabled := r.exportProxyEnabled()
-	exportProxyDeploymentsRolledOver := !exportProxyEnabled || haveExportProxyDeploymentsRolledOver(r.targetStrategy, r.kv, r.stores)
+	exportProxyDeploymentsRolledOver := haveExportProxyDeploymentsRolledOver(r.targetStrategy, r.kv, r.stores)
 	synchronizationControllerEnabled := r.isFeatureGateEnabled(featuregate.DecentralizedLiveMigration)
 	synchronizationControllerDeploymentRolledOver := !synchronizationControllerEnabled || haveSynchronizationControllerDeploymentsRolledOver(r.targetStrategy, r.kv, r.stores)
+	virtTemplateDeploymentEnabled := r.virtTemplateDeploymentEnabled()
+	virtTemplateDeploymentsRolledOver := !virtTemplateDeploymentEnabled || haveVirtTemplateDeploymentsRolledOver(r.targetStrategy, r.kv, r.stores)
 
 	daemonSetsRolledOver := haveDaemonSetsRolledOver(r.targetStrategy, r.kv, r.stores)
 
 	infrastructureRolledOver := false
-	if apiDeploymentsRolledOver && controllerDeploymentsRolledOver && exportProxyDeploymentsRolledOver && daemonSetsRolledOver && synchronizationControllerDeploymentRolledOver {
+	if apiDeploymentsRolledOver && controllerDeploymentsRolledOver &&
+		exportProxyDeploymentsRolledOver && daemonSetsRolledOver &&
+		synchronizationControllerDeploymentRolledOver && virtTemplateDeploymentsRolledOver {
 		// infrastructure has rolled over and is available
 		infrastructureRolledOver = true
 	} else if (targetVersion == observedVersion) && (targetImageRegistry == observedImageRegistry) {
@@ -581,7 +596,19 @@ func (r *Reconciler) createOrRollBackSystem(apiDeploymentsRolledOver bool) (bool
 
 	// create/update ExportProxy Deployments
 	for _, deployment := range r.targetStrategy.ExportProxyDeployments() {
-		if r.exportProxyEnabled() {
+		deployment, err := r.syncDeployment(deployment)
+		if err != nil {
+			return false, err
+		}
+		err = r.syncPodDisruptionBudgetForDeployment(deployment)
+		if err != nil {
+			return false, err
+		}
+	}
+
+	// create/update Synchronization controller Deployments
+	for _, deployment := range r.targetStrategy.SynchronizationControllerDeployments() {
+		if r.isFeatureGateEnabled(featuregate.DecentralizedLiveMigration) {
 			deployment, err := r.syncDeployment(deployment)
 			if err != nil {
 				return false, err
@@ -595,9 +622,9 @@ func (r *Reconciler) createOrRollBackSystem(apiDeploymentsRolledOver bool) (bool
 		}
 	}
 
-	// create/update Synchronization controller Deployments
-	for _, deployment := range r.targetStrategy.SynchronizationControllerDeployments() {
-		if r.isFeatureGateEnabled(featuregate.DecentralizedLiveMigration) {
+	// create/update virt-template Deployments
+	for _, deployment := range r.targetStrategy.VirtTemplateDeployments() {
+		if r.virtTemplateDeploymentEnabled() {
 			deployment, err := r.syncDeployment(deployment)
 			if err != nil {
 				return false, err
@@ -1215,16 +1242,20 @@ func (r *Reconciler) isFeatureGateEnabled(featureGate string) bool {
 	return false
 }
 
-func (r *Reconciler) exportProxyEnabled() bool {
-	return r.isFeatureGateEnabled(featuregate.VMExportGate)
-}
-
 func (r *Reconciler) commonInstancetypesDeploymentEnabled() bool {
 	config := r.kv.Spec.Configuration.CommonInstancetypesDeployment
 	if config != nil && config.Enabled != nil {
 		return *config.Enabled
 	}
 	return true
+}
+
+func (r *Reconciler) virtTemplateDeploymentEnabled() bool {
+	if !r.isFeatureGateEnabled(featuregate.Template) {
+		return false
+	}
+	virtTemplateDeployment := r.kv.Spec.Configuration.VirtTemplateDeployment
+	return virtTemplateDeployment == nil || virtTemplateDeployment.Enabled == nil || *virtTemplateDeployment.Enabled
 }
 
 func getInstallStrategyAnnotations(meta *metav1.ObjectMeta) (imageTag, imageRegistry, id string, ok bool) {

@@ -184,6 +184,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 	},
 		Entry("when path is not absolute", "a/b/c", "spec.volumes[0].containerDisk must be an absolute path to a file without relative components"),
 		Entry("when path contains relative components", "/a/b/c/../d", "spec.volumes[0].containerDisk must be an absolute path to a file without relative components"),
+		Entry("when path starts with relative components", "../test", "spec.volumes[0].containerDisk must be an absolute path to a file without relative components"),
 		Entry("when path is root", "/", "spec.volumes[0].containerDisk must not point to root"),
 	)
 
@@ -1430,17 +1431,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 		})
 
 		Context("with panic devices defined", func() {
-			It("should fail when PanicDevices featuregate is disabled", func() {
-				vmi := api.NewMinimalVMI("testvm")
-				vmi.Spec.Domain.Devices.PanicDevices = []v1.PanicDevice{{Model: pointer.P(v1.Hyperv)}}
-				causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
-				Expect(causes).To(HaveLen(1))
-				Expect(causes[0].Field).To(Equal("fake.domain.devices.panicDevices"))
-				Expect(causes[0].Message).To(Equal("Panic Devices feature gate is not enabled in kubevirt-config"))
-			})
-
 			It("should allow valid panic device model", func() {
-				enableFeatureGates(featuregate.PanicDevicesGate)
 				vmi := api.NewMinimalVMI("testvm")
 				vmi.Spec.Domain.Devices.PanicDevices = []v1.PanicDevice{{Model: pointer.P(v1.Hyperv)}}
 				causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
@@ -1448,7 +1439,6 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			})
 
 			It("should reject invalid panic device model", func() {
-				enableFeatureGates(featuregate.PanicDevicesGate)
 				vmi := api.NewMinimalVMI("testvm")
 				panicDeviceModel := v1.PanicDeviceModel("bad")
 				vmi.Spec.Domain.Devices.PanicDevices = []v1.PanicDevice{{Model: &panicDeviceModel}}
@@ -1459,7 +1449,6 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			})
 
 			It("should reject panic devices on s390x architecture", func() {
-				enableFeatureGates(featuregate.PanicDevicesGate)
 				vmi := api.NewMinimalVMI("testvm")
 				vmi.Spec.Architecture = "s390x"
 				vmi.Spec.Domain.Devices.PanicDevices = []v1.PanicDevice{{Model: pointer.P(v1.Isa)}}
@@ -1557,6 +1546,19 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), spec, config)
 			Expect(causes).To(HaveLen(1))
 		})
+
+		It("should reject reservedOverhead when feature gate is disabled", func() {
+			vmi := api.NewMinimalVMI("testvm")
+			vmi.Spec.Domain.Memory = &v1.Memory{
+				ReservedOverhead: &v1.ReservedOverhead{},
+			}
+
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(causes).To(HaveLen(1))
+			Expect(causes[0].Field).To(Equal("fake.domain.memory.reservedOverhead"))
+			Expect(causes[0].Message).To(Equal("Reserved overhead memlock feature gate is not enabled in kubevirt-config"))
+		})
+
 	})
 
 	Context("with cpu pinning", func() {
@@ -2242,6 +2244,84 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			Expect(causes[0].Message).To(ContainSubstring("fake must have max one memory dump volume set"))
 		})
 
+		It("should accept containerPath volume with matching filesystem", func() {
+			vmi.Spec.Domain.Devices.Filesystems = append(vmi.Spec.Domain.Devices.Filesystems, v1.Filesystem{
+				Name:     "testcontainerpath",
+				Virtiofs: &v1.FilesystemVirtiofs{},
+			})
+			vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
+				Name: "testcontainerpath",
+				VolumeSource: v1.VolumeSource{
+					ContainerPath: &v1.ContainerPathVolumeSource{
+						Path: "/var/run/secrets/test",
+					},
+				},
+			})
+
+			causes := validateVirtualMachineInstanceSpecVolumeDisks(k8sfield.NewPath("fake"), &vmi.Spec)
+			Expect(causes).To(BeEmpty())
+		})
+
+		It("should reject containerPath volume mapped to a disk", func() {
+			vmi.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks, v1.Disk{
+				Name: "testcontainerpath",
+			})
+			vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
+				Name: "testcontainerpath",
+				VolumeSource: v1.VolumeSource{
+					ContainerPath: &v1.ContainerPathVolumeSource{
+						Path: "/var/run/secrets/test",
+					},
+				},
+			})
+
+			causes := validateVirtualMachineInstanceSpecVolumeDisks(k8sfield.NewPath("fake"), &vmi.Spec)
+			Expect(causes).To(HaveLen(2))
+			Expect(causes[0].Message).To(ContainSubstring("must be mapped to a filesystem, not a disk"))
+			Expect(causes[1].Message).To(ContainSubstring("must have a matching filesystem"))
+		})
+
+		It("should reject containerPath volume without matching filesystem", func() {
+			vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
+				Name: "testcontainerpath",
+				VolumeSource: v1.VolumeSource{
+					ContainerPath: &v1.ContainerPathVolumeSource{
+						Path: "/var/run/secrets/test",
+					},
+				},
+			})
+
+			causes := validateVirtualMachineInstanceSpecVolumeDisks(k8sfield.NewPath("fake"), &vmi.Spec)
+			Expect(causes).To(HaveLen(2))
+			Expect(causes[0].Message).To(ContainSubstring("testcontainerpath"))
+			Expect(causes[1].Message).To(ContainSubstring("must have a matching filesystem"))
+		})
+
+		DescribeTable("should reject containerPath volume with reserved path prefix",
+			func(path, expectedPrefix string) {
+				vmi.Spec.Domain.Devices.Filesystems = append(vmi.Spec.Domain.Devices.Filesystems, v1.Filesystem{
+					Name:     "testcontainerpath",
+					Virtiofs: &v1.FilesystemVirtiofs{},
+				})
+				vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
+					Name: "testcontainerpath",
+					VolumeSource: v1.VolumeSource{
+						ContainerPath: &v1.ContainerPathVolumeSource{
+							Path: path,
+						},
+					},
+				})
+
+				causes := validateVirtualMachineInstanceSpecVolumeDisks(k8sfield.NewPath("fake"), &vmi.Spec)
+				Expect(causes).To(HaveLen(1))
+				Expect(causes[0].Message).To(ContainSubstring("reserved path prefix"))
+				Expect(causes[0].Message).To(ContainSubstring(expectedPrefix))
+			},
+			Entry("kubevirt path", "/var/run/kubevirt/something", "/var/run/kubevirt"),
+			Entry("kubevirt-private path", "/var/run/kubevirt-private/secret", "/var/run/kubevirt"),
+			Entry("libvirt path", "/var/run/libvirt/socket", "/var/run/libvirt"),
+		)
+
 	})
 
 	Context("with bootloader", func() {
@@ -2362,8 +2442,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			Expect(causes[0].Message).To(Equal("Arm64 does not support bios boot, please change to uefi boot"))
 		})
 
-		// When setting UEFI default bootloader, UEFI secure bootloader would be applied which is not supported on Arm64
-		It("should reject UEFI default bootloader", func() {
+		It("should accept UEFI default bootloader", func() {
 			vmi.Spec.Domain.Firmware = &v1.Firmware{
 				Bootloader: &v1.Bootloader{
 					EFI: &v1.EFI{},
@@ -2371,12 +2450,10 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			}
 
 			causes := webhooks.ValidateVirtualMachineInstanceArm64Setting(k8sfield.NewPath("fake"), &vmi.Spec)
-			Expect(causes).To(HaveLen(1))
-			Expect(causes[0].Field).To(Equal("fake.domain.firmware.bootloader.efi.secureboot"))
-			Expect(causes[0].Message).To(Equal("UEFI secure boot is currently not supported on aarch64 Arch"))
+			Expect(causes).To(BeEmpty())
 		})
 
-		It("should reject UEFI secure bootloader", func() {
+		It("should accept UEFI secure bootloader", func() {
 			vmi.Spec.Domain.Firmware = &v1.Firmware{
 				Bootloader: &v1.Bootloader{
 					EFI: &v1.EFI{
@@ -2386,9 +2463,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			}
 
 			causes := webhooks.ValidateVirtualMachineInstanceArm64Setting(k8sfield.NewPath("fake"), &vmi.Spec)
-			Expect(causes).To(HaveLen(1))
-			Expect(causes[0].Field).To(Equal("fake.domain.firmware.bootloader.efi.secureboot"))
-			Expect(causes[0].Message).To(Equal("UEFI secure boot is currently not supported on aarch64 Arch"))
+			Expect(causes).To(BeEmpty())
 		})
 
 		DescribeTable("should validate ACPI", func(acpi *v1.ACPI, volumes []v1.Volume, expectedLen int, expectedMessage string) {
@@ -3727,6 +3802,35 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			Entry("s390x rejects none", "s390x", "none"),
 			Entry("s390x rejects invalid model", "s390x", "invalidmodel"),
 		)
+	})
+
+	Context("with RebootPolicy", func() {
+		It("should accept rebootPolicy when feature gate is enabled", func() {
+			enableFeatureGates(featuregate.RebootPolicy)
+			vmi := libvmi.New(
+				libvmi.WithArchitecture(runtime.GOARCH),
+				libvmi.WithResourceMemory("128M"),
+			)
+			vmi.Spec.Domain.RebootPolicy = pointer.P(v1.RebootPolicyTerminate)
+
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(causes).To(BeEmpty(), "should accept rebootPolicy when feature gate is enabled")
+		})
+
+		It("should reject rebootPolicy when feature gate is disabled", func() {
+			disableFeatureGates()
+			vmi := libvmi.New(
+				libvmi.WithArchitecture(runtime.GOARCH),
+				libvmi.WithResourceMemory("128M"),
+			)
+			vmi.Spec.Domain.RebootPolicy = pointer.P(v1.RebootPolicyTerminate)
+
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(causes).To(HaveLen(1))
+			Expect(causes[0].Type).To(Equal(metav1.CauseTypeFieldValueInvalid))
+			Expect(causes[0].Message).To(Equal(fmt.Sprintf("RebootPolicy is specified but the %s feature gate is not enabled", featuregate.RebootPolicy)))
+			Expect(causes[0].Field).To(Equal("fake.domain.rebootPolicy"))
+		})
 	})
 
 	Context("with DRA GPUs", func() {

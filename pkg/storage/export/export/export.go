@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,7 +45,7 @@ import (
 	"k8s.io/client-go/util/certificate"
 	"k8s.io/client-go/util/workqueue"
 	virtv1 "kubevirt.io/api/core/v1"
-	exportv1 "kubevirt.io/api/export/v1beta1"
+	exportv1 "kubevirt.io/api/export/v1"
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
@@ -61,6 +62,7 @@ import (
 	"kubevirt.io/kubevirt/pkg/storage/types"
 	storageutils "kubevirt.io/kubevirt/pkg/storage/utils"
 	kutil "kubevirt.io/kubevirt/pkg/util"
+	kvtls "kubevirt.io/kubevirt/pkg/util/tls"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	watchutil "kubevirt.io/kubevirt/pkg/virt-controller/watch/util"
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/apply"
@@ -339,6 +341,8 @@ type VMExportController struct {
 	PreferenceInformer          cache.SharedIndexInformer
 	ClusterPreferenceInformer   cache.SharedIndexInformer
 	ControllerRevisionInformer  cache.SharedIndexInformer
+	VMBackupInformer            cache.SharedIndexInformer
+	BackupCAConfigMapInformer   cache.SharedIndexInformer
 
 	Recorder record.EventRecorder
 
@@ -469,6 +473,16 @@ func (ctrl *VMExportController) Init() error {
 	if err != nil {
 		return err
 	}
+	_, err = ctrl.VMBackupInformer.AddEventHandler(
+		cache.ResourceEventHandlerFuncs{
+			AddFunc:    ctrl.handleVMBackup,
+			UpdateFunc: func(oldObj, newObj interface{}) { ctrl.handleVMBackup(newObj) },
+			DeleteFunc: ctrl.handleVMBackup,
+		},
+	)
+	if err != nil {
+		return err
+	}
 	ctrl.instancetypeHandler = instancetypeexpand.New(
 		ctrl.clusterConfig,
 		instancetypefind.NewSpecFinder(
@@ -518,6 +532,7 @@ func (ctrl *VMExportController) Run(threadiness int, stopCh <-chan struct{}) err
 		ctrl.PreferenceInformer.HasSynced,
 		ctrl.ClusterPreferenceInformer.HasSynced,
 		ctrl.ControllerRevisionInformer.HasSynced,
+		ctrl.VMBackupInformer.HasSynced,
 	) {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
@@ -672,6 +687,23 @@ func (ctrl *VMExportController) updateVMExport(vmExport *exportv1.VirtualMachine
 			return 0, fmt.Errorf("unexpected nil sourceVolumes")
 		}
 		return ctrl.handleSource(vmExport, NewVMSource(sourceVolumes))
+	}
+	if ctrl.isSourceBackup(&vmExport.Spec) {
+		vmBackup, err := ctrl.getVMBackupFromExport(vmExport)
+		if err != nil {
+			return 0, err
+		}
+		if vmBackup == nil {
+			return 0, fmt.Errorf("unexpected nil VirtualMachineBackup")
+		}
+		if vmBackup.Status == nil || vmBackup.Status.Type == "" {
+			return 0, fmt.Errorf("backup status empty")
+		}
+		caCert, exists, err := ctrl.backupCA()
+		if err != nil || !exists {
+			return 0, fmt.Errorf("could not obtain VirtualMachineBackup tunnel CA: %w", err)
+		}
+		return ctrl.handleSource(vmExport, NewVMBackupSource(vmBackup, caCert))
 	}
 
 	return 0, nil
@@ -934,7 +966,16 @@ func (ctrl *VMExportController) getExportPodName(vmExport *exportv1.VirtualMachi
 }
 
 func getExportPodVolumeName(pvc *corev1.PersistentVolumeClaim) string {
-	pvcName := strings.ReplaceAll(pvc.Name, ".", "-")
+	return getExportPodVolumeNameFromStr(pvc.Name)
+}
+
+// getExportPodVolumeNameFromStr sanitizes and hashes the PVC name to match the volume name used in the Pod.
+//
+// CRITICAL: This logic must stay strictly in sync with the volume naming logic used in 'createExportPod'.
+// If the logic in createExportPod changes (e.g. prefix or hashing algorithm), this function MUST be updated
+// to match, otherwise the export server will fail to locate the mounted volumes.
+func getExportPodVolumeNameFromStr(claimName string) string {
+	pvcName := strings.ReplaceAll(claimName, ".", "-")
 	// Using the formatted PVC name if it's under the max length.
 	if len(pvcName) <= validation.DNS1035LabelMaxLength {
 		return pvcName
@@ -1097,6 +1138,8 @@ func (ctrl *VMExportController) createExporterPodManifest(vmExport *exportv1.Vir
 		Name:  "EXPORT_SECRET_DEF_URI",
 		Value: secretManifestPath,
 	})
+
+	ctrl.appendTLSEnvVars(podManifest)
 
 	tokenSecretRef := ""
 	if vmExport.Status != nil && vmExport.Status.TokenSecretRef != nil {
@@ -1676,4 +1719,29 @@ func (ctrl *VMExportController) pvcsToSourceVolumes(pvcs ...*corev1.PersistentVo
 		})
 	}
 	return volumes
+}
+
+func (ctrl *VMExportController) appendTLSEnvVars(podManifest *corev1.Pod) {
+	kv := ctrl.clusterConfig.GetConfigFromKubeVirtCR()
+	if kv == nil || kv.Spec.Configuration.TLSConfiguration == nil {
+		return
+	}
+	tlsConfig := kv.Spec.Configuration.TLSConfiguration
+	if tlsConfig.MinTLSVersion != "" {
+		podManifest.Spec.Containers[0].Env = append(podManifest.Spec.Containers[0].Env, corev1.EnvVar{
+			Name:  "TLS_MIN_VERSION",
+			Value: strconv.FormatUint(uint64(kvtls.TLSVersion(tlsConfig.MinTLSVersion)), 10),
+		})
+	}
+	if len(tlsConfig.Ciphers) > 0 {
+		cipherJSON, err := json.Marshal(kvtls.CipherSuiteIds(tlsConfig.Ciphers))
+		if err != nil {
+			log.Log.Warningf("Failed to marshal TLS cipher suite IDs: %v", err)
+		} else {
+			podManifest.Spec.Containers[0].Env = append(podManifest.Spec.Containers[0].Env, corev1.EnvVar{
+				Name:  "TLS_CIPHER_SUITES",
+				Value: string(cipherJSON),
+			})
+		}
+	}
 }

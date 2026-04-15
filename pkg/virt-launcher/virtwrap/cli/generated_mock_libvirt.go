@@ -524,6 +524,21 @@ func (mr *MockVirDomainMockRecorder) CoreDumpWithFormat(to, format, flags any) *
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CoreDumpWithFormat", reflect.TypeOf((*MockVirDomain)(nil).CoreDumpWithFormat), to, format, flags)
 }
 
+// CreateCheckpointXML mocks base method.
+func (m *MockVirDomain) CreateCheckpointXML(xmlConfig string, flags libvirt.DomainCheckpointCreateFlags) (*libvirt.DomainCheckpoint, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "CreateCheckpointXML", xmlConfig, flags)
+	ret0, _ := ret[0].(*libvirt.DomainCheckpoint)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// CreateCheckpointXML indicates an expected call of CreateCheckpointXML.
+func (mr *MockVirDomainMockRecorder) CreateCheckpointXML(xmlConfig, flags any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateCheckpointXML", reflect.TypeOf((*MockVirDomain)(nil).CreateCheckpointXML), xmlConfig, flags)
+}
+
 // CreateWithFlags mocks base method.
 func (m *MockVirDomain) CreateWithFlags(flags libvirt.DomainCreateFlags) error {
 	m.ctrl.T.Helper()
@@ -774,6 +789,20 @@ func (mr *MockVirDomainMockRecorder) MemoryStats(nrStats, flags any) *gomock.Cal
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MemoryStats", reflect.TypeOf((*MockVirDomain)(nil).MemoryStats), nrStats, flags)
 }
 
+// MigrateSetMaxDowntime mocks base method.
+func (m *MockVirDomain) MigrateSetMaxDowntime(downtime uint64, flags uint32) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "MigrateSetMaxDowntime", downtime, flags)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// MigrateSetMaxDowntime indicates an expected call of MigrateSetMaxDowntime.
+func (mr *MockVirDomainMockRecorder) MigrateSetMaxDowntime(downtime, flags any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MigrateSetMaxDowntime", reflect.TypeOf((*MockVirDomain)(nil).MigrateSetMaxDowntime), downtime, flags)
+}
+
 // MigrateStartPostCopy mocks base method.
 func (m *MockVirDomain) MigrateStartPostCopy(flags uint32) error {
 	m.ctrl.T.Helper()
@@ -828,6 +857,21 @@ func (m *MockVirDomain) PinVcpuFlags(vcpu uint, cpuMap []bool, flags libvirt.Dom
 func (mr *MockVirDomainMockRecorder) PinVcpuFlags(vcpu, cpuMap, flags any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PinVcpuFlags", reflect.TypeOf((*MockVirDomain)(nil).PinVcpuFlags), vcpu, cpuMap, flags)
+}
+
+// QemuMonitorCommand mocks base method.
+func (m *MockVirDomain) QemuMonitorCommand(command string, flags libvirt.DomainQemuMonitorCommandFlags) (string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "QemuMonitorCommand", command, flags)
+	ret0, _ := ret[0].(string)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// QemuMonitorCommand indicates an expected call of QemuMonitorCommand.
+func (mr *MockVirDomainMockRecorder) QemuMonitorCommand(command, flags any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "QemuMonitorCommand", reflect.TypeOf((*MockVirDomain)(nil).QemuMonitorCommand), command, flags)
 }
 
 // Reboot mocks base method.

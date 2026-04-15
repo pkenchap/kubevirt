@@ -19,11 +19,12 @@
 package export
 
 import (
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,8 +55,9 @@ import (
 
 	vsv1 "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
 	framework "k8s.io/client-go/tools/cache/testing"
+	backupv1 "kubevirt.io/api/backup/v1alpha1"
 	virtv1 "kubevirt.io/api/core/v1"
-	exportv1 "kubevirt.io/api/export/v1beta1"
+	exportv1 "kubevirt.io/api/export/v1"
 	snapshotv1 "kubevirt.io/api/snapshot/v1beta1"
 	"kubevirt.io/client-go/kubecli"
 	kubevirtfake "kubevirt.io/client-go/kubevirt/fake"
@@ -64,12 +66,13 @@ import (
 	apiinstancetype "kubevirt.io/api/instancetype"
 	instancetypev1beta1 "kubevirt.io/api/instancetype/v1beta1"
 
+	"kubevirt.io/kubevirt/pkg/certificates/bootstrap"
 	"kubevirt.io/kubevirt/pkg/certificates/triple"
-	"kubevirt.io/kubevirt/pkg/certificates/triple/cert"
 	certutil "kubevirt.io/kubevirt/pkg/certificates/triple/cert"
 	virtcontroller "kubevirt.io/kubevirt/pkg/controller"
 	backendstorage "kubevirt.io/kubevirt/pkg/storage/backend-storage"
 	"kubevirt.io/kubevirt/pkg/testutils"
+	kvtls "kubevirt.io/kubevirt/pkg/util/tls"
 	"kubevirt.io/kubevirt/pkg/virt-controller/services"
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/components"
 )
@@ -77,7 +80,7 @@ import (
 const (
 	testNamespace   = "default"
 	ingressSecret   = "ingress-secret"
-	currentVersion  = "v1beta1"
+	currentVersion  = "v1"
 	vmExportName    = "test"
 	labelKey        = "label-key"
 	labelValue      = "label-value"
@@ -128,13 +131,14 @@ var _ = Describe("Export controller", func() {
 		preferenceInformer          cache.SharedIndexInformer
 		clusterPreferenceInformer   cache.SharedIndexInformer
 		controllerRevisionInformer  cache.SharedIndexInformer
+		vmBackupInformer            cache.SharedIndexInformer
 		rqInformer                  cache.SharedIndexInformer
 		nsInformer                  cache.SharedIndexInformer
 		k8sClient                   *k8sfake.Clientset
 		virtClient                  *kubecli.MockKubevirtClient
 		vmExportClient              *kubevirtfake.Clientset
 		fakeVolumeSnapshotProvider  *MockVolumeSnapshotProvider
-		fakeCertManager             *MockCertManager
+		fakeCertManager             *bootstrap.MockCertificateManager
 		mockVMExportQueue           *testutils.MockWorkQueue[string]
 		routeCache                  cache.Store
 		ingressCache                cache.Store
@@ -160,6 +164,7 @@ var _ = Describe("Export controller", func() {
 		go preferenceInformer.Run(stop)
 		go clusterPreferenceInformer.Run(stop)
 		go controllerRevisionInformer.Run(stop)
+		go vmBackupInformer.Run(stop)
 		go rqInformer.Run(stop)
 		go nsInformer.Run(stop)
 		Expect(cache.WaitForCacheSync(
@@ -182,6 +187,7 @@ var _ = Describe("Export controller", func() {
 			preferenceInformer.HasSynced,
 			clusterPreferenceInformer.HasSynced,
 			controllerRevisionInformer.HasSynced,
+			vmBackupInformer.HasSynced,
 			rqInformer.HasSynced,
 			nsInformer.HasSynced,
 		)).To(BeTrue())
@@ -213,12 +219,15 @@ var _ = Describe("Export controller", func() {
 		preferenceInformer, _ = testutils.NewFakeInformerFor(&instancetypev1beta1.VirtualMachinePreference{})
 		clusterPreferenceInformer, _ = testutils.NewFakeInformerFor(&instancetypev1beta1.VirtualMachineClusterPreference{})
 		controllerRevisionInformer, _ = testutils.NewFakeInformerFor(&appsv1.ControllerRevision{})
+		vmBackupInformer, _ = testutils.NewFakeInformerFor(&backupv1.VirtualMachineBackup{})
 		rqInformer, _ = testutils.NewFakeInformerFor(&k8sv1.ResourceQuota{})
 		nsInformer, _ = testutils.NewFakeInformerFor(&k8sv1.Namespace{})
 		fakeVolumeSnapshotProvider = &MockVolumeSnapshotProvider{
 			volumeSnapshots: []*vsv1.VolumeSnapshot{},
 		}
-		fakeCertManager = &MockCertManager{}
+		var err error
+		fakeCertManager, err = bootstrap.NewMockCertificateManager()
+		Expect(err).ToNot(HaveOccurred())
 
 		config, _, _ := testutils.NewFakeClusterConfigUsingKVConfig(&virtv1.KubeVirtConfiguration{})
 		k8sClient = k8sfake.NewSimpleClientset()
@@ -227,7 +236,7 @@ var _ = Describe("Export controller", func() {
 
 		virtClient.EXPECT().CoreV1().Return(k8sClient.CoreV1()).AnyTimes()
 		virtClient.EXPECT().VirtualMachineExport(testNamespace).
-			Return(vmExportClient.ExportV1beta1().VirtualMachineExports(testNamespace)).AnyTimes()
+			Return(vmExportClient.ExportV1().VirtualMachineExports(testNamespace)).AnyTimes()
 
 		controller = &VMExportController{
 			Client:                      virtClient,
@@ -257,6 +266,7 @@ var _ = Describe("Export controller", func() {
 			PreferenceInformer:          preferenceInformer,
 			ClusterPreferenceInformer:   clusterPreferenceInformer,
 			ControllerRevisionInformer:  controllerRevisionInformer,
+			VMBackupInformer:            vmBackupInformer,
 		}
 		initCert = func(ctrl *VMExportController) {
 			ctrl.caCertManager.Start()
@@ -823,7 +833,6 @@ var _ = Describe("Export controller", func() {
 		vmSnapshotInformer.GetStore().Add(snapshot)
 		return testVMExport
 	}
-
 	type createSourceFunc func(volumes *sourceVolumes) exportSource
 
 	DescribeTable("Should create a pod based on the name of the VMExport", func(populateExportFunc func() *exportv1.VirtualMachineExport, createSource createSourceFunc, numberOfVolumes int) {
@@ -968,6 +977,42 @@ var _ = Describe("Export controller", func() {
 			4),
 	)
 
+	It("should set TLS env vars when TLSConfiguration is set", func() {
+		ciphers := []string{"TLS_AES_256_GCM_SHA384", "TLS_AES_128_GCM_SHA256"}
+		kvObj, _, _ := kvInformer.GetStore().GetByKey(controller.KubevirtNamespace + "/kv")
+		kv := kvObj.(*virtv1.KubeVirt)
+		kv.Spec.Configuration.TLSConfiguration = &virtv1.TLSConfiguration{
+			MinTLSVersion: virtv1.VersionTLS13,
+			Ciphers:       ciphers,
+		}
+		Expect(kvInformer.GetStore().Update(kv)).To(Succeed())
+
+		expectedCipherJSON, err := json.Marshal(kvtls.CipherSuiteIds(ciphers))
+		Expect(err).ToNot(HaveOccurred())
+
+		pod, err := controller.createExporterPodManifest(createPVCVMExport(), nil, NewPVCSource(&sourceVolumes{}))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(pod.Spec.Containers[0].Env).To(ContainElements(
+			gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+				"Name":  Equal("TLS_MIN_VERSION"),
+				"Value": Equal(strconv.FormatUint(uint64(kvtls.TLSVersion(virtv1.VersionTLS13)), 10)),
+			}),
+			gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+				"Name":  Equal("TLS_CIPHER_SUITES"),
+				"Value": Equal(string(expectedCipherJSON)),
+			}),
+		))
+	})
+
+	It("should not set TLS env vars when TLSConfiguration is nil", func() {
+		pod, err := controller.createExporterPodManifest(createPVCVMExport(), nil, NewPVCSource(&sourceVolumes{}))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(pod.Spec.Containers[0].Env).ToNot(ContainElements(
+			gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{"Name": Equal("TLS_MIN_VERSION")}),
+			gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{"Name": Equal("TLS_CIPHER_SUITES")}),
+		))
+	})
+
 	DescribeTable("Volumemount names should be trimmed depending on the PVC name", func(pvcName string) {
 		testVMExport := createPVCVMExportWithName(pvcName)
 		testPVC := &k8sv1.PersistentVolumeClaim{
@@ -1030,6 +1075,32 @@ var _ = Describe("Export controller", func() {
 		Entry("PVC name within limit", "pvc-name-within-limit"),
 		Entry("PVC name exceeding limit", strings.Repeat("a", validation.DNS1035LabelMaxLength+1)),
 		Entry("PVC name with same length as limit", strings.Repeat("a", validation.DNS1035LabelMaxLength)),
+	)
+
+	DescribeTable("GetVolumeInfo should correctly resolve volume paths for various PVC names", func(pvcName string) {
+		targetName := getExportPodVolumeNameFromStr(pvcName)
+		sp := &ServerPaths{
+			Volumes: []VolumeInfo{
+				{
+					Path: "/var/run/kubevirt-export/" + targetName,
+				},
+			},
+		}
+
+		result := sp.GetVolumeInfo(pvcName)
+		Expect(result).ToNot(BeNil())
+
+		_, foundName := filepath.Split(filepath.Clean(result.Path))
+		Expect(foundName).To(Equal(targetName))
+
+		if len(pvcName) > validation.DNS1035LabelMaxLength {
+			Expect(len(foundName)).To(BeNumerically("<", 63))
+			Expect(foundName).To(HavePrefix(exportPrefix))
+		}
+	},
+		Entry("Short name", "pvc-name"),
+		Entry("Name with dots", "pvc.with.dots"),
+		Entry("Long name exceeding limit", strings.Repeat("a", validation.DNS1035LabelMaxLength+1)),
 	)
 
 	DescribeTable("service name should be sanitized", func(exportName, expectedServiceName string) {
@@ -1860,34 +1931,4 @@ func (v *MockVolumeSnapshotProvider) GetVolumeSnapshot(namespace, name string) (
 
 func (v *MockVolumeSnapshotProvider) Add(s *vsv1.VolumeSnapshot) {
 	v.volumeSnapshots = append(v.volumeSnapshots, s)
-}
-
-// A mock to implement the certificate.Manager interface for the export controller
-type MockCertManager struct {
-	crt *tls.Certificate
-}
-
-func (f *MockCertManager) Start() {
-	caKeyPair, _ := triple.NewCA("test.kubevirt.io", time.Hour)
-
-	encodedCert := cert.EncodeCertPEM(caKeyPair.Cert)
-	encodedKey := cert.EncodePrivateKeyPEM(caKeyPair.Key)
-
-	crt, err := tls.X509KeyPair(encodedCert, encodedKey)
-	Expect(err).ToNot(HaveOccurred())
-	leaf, err := cert.ParseCertsPEM(encodedCert)
-	Expect(err).ToNot(HaveOccurred())
-	crt.Leaf = leaf[0]
-	f.crt = &crt
-}
-
-func (f *MockCertManager) Stop() {
-}
-
-func (f *MockCertManager) Current() *tls.Certificate {
-	return f.crt
-}
-
-func (f *MockCertManager) ServerHealthy() bool {
-	return true
 }

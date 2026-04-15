@@ -23,9 +23,11 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/openshift/library-go/pkg/build/naming"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
@@ -36,11 +38,11 @@ import (
 )
 
 const (
-	backupTargetPVCPrefix = "backup-target-pvc"
+	backupTargetPVCSuffix = "backup-target-pvc"
 )
 
 func backupTargetVolumeName(backupName string) string {
-	return fmt.Sprintf("%s-%s", backupName, backupTargetPVCPrefix)
+	return naming.GetName(backupName, backupTargetPVCSuffix, validation.DNS1035LabelMaxLength)
 }
 
 var (
@@ -167,7 +169,7 @@ func (ctrl *VMBackupController) attachBackupTargetPVC(vmi *v1.VirtualMachineInst
 	}
 }
 
-func (ctrl *VMBackupController) detachBackupTargetPVC(vmi *v1.VirtualMachineInstance, volumeName string) *SyncInfo {
+func (ctrl *VMBackupController) detachBackupTargetPVC(vmi *v1.VirtualMachineInstance, volumeName string, event string) *SyncInfo {
 	if len(vmi.Spec.UtilityVolumes) == 0 {
 		return nil
 	}
@@ -206,7 +208,7 @@ func (ctrl *VMBackupController) detachBackupTargetPVC(vmi *v1.VirtualMachineInst
 	log.Log.Object(vmi).Infof("%s", pvcDetachMsg)
 
 	return &SyncInfo{
-		event:  backupInitiatedEvent,
+		event:  event,
 		reason: pvcDetachMsg,
 	}
 }

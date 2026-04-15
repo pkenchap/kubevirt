@@ -21,7 +21,7 @@ set -ex
 
 export TIMESTAMP=${TIMESTAMP:-1}
 
-export KUBEVIRT_DEPLOY_NP="${KUBEVIRT_DEPLOY_NP:-false}"
+export KUBEVIRT_DEPLOY_NP="${KUBEVIRT_DEPLOY_NP:-true}"
 export WORKSPACE="${WORKSPACE:-$PWD}"
 export IMAGE_PULL_POLICY="${IMAGE_PULL_POLICY:-IfNotPresent}"
 readonly ARTIFACTS_PATH="${ARTIFACTS-$WORKSPACE/exported-artifacts}"
@@ -47,11 +47,18 @@ if [ -z $TARGET ]; then
   exit 1
 fi
 
+add_feature_gate() {
+  if [ -z "$FEATURE_GATES" ]; then
+    export FEATURE_GATES="$1"
+  else
+    export FEATURE_GATES="$FEATURE_GATES,$1"
+  fi
+}
+
 export KUBEVIRT_DEPLOY_CDI=true
 if [[ ! $TARGET =~ .*kind.* ]]; then
-  export FEATURE_GATES="NodeRestriction"
+  add_feature_gate "NodeRestriction"
   export KUBEVIRT_PSA="true"
-  export KUBEVIRT_FLANNEL=true
 fi
 
 case "$TARGET" in
@@ -65,6 +72,7 @@ case "$TARGET" in
     export KUBEVIRT_DEPLOY_NET_BINDING_CNI=true
     export KUBEVIRT_DEPLOY_CDI=false
     export KUBEVIRT_DEPLOY_ISTIO=true
+    export KUBEVIRT_DEPLOY_NETWORK_RESOURCES_INJECTOR=true
     export KUBEVIRT_PROVIDER=${TARGET/-sig-network*/}
     ;;
   *sig-storage*)
@@ -77,6 +85,12 @@ case "$TARGET" in
     export KUBEVIRT_PROVIDER=${TARGET/-sig-compute-realtime/}
     export KUBEVIRT_HUGEPAGES_2M=512
     export KUBEVIRT_REALTIME_SCHEDULER=true
+    ;;
+  *sig-compute-parallel-wg-mshv-amd64*)
+    export KUBEVIRT_PROVIDER=${TARGET/-sig-compute-parallel-wg-mshv-amd64/}
+    export KUBEVIRT_COLLECT_CONTAINER_RUNTIME_DEBUG=true
+    add_feature_gate "ConfigurableHypervisor"
+    export HYPERVISOR="hyperv-direct"
     ;;
   *sig-compute-migrations-wg-arm64*)
     export KUBEVIRT_PROVIDER=${TARGET/-sig-compute-migrations-wg-arm64/}
@@ -155,6 +169,7 @@ if [[ $TARGET =~ sriov.* ]]; then
   fi
   export KUBEVIRT_DEPLOY_CDI="false"
   export KUBEVIRT_VERBOSITY=${KUBEVIRT_VERBOSITY:-"virtLauncher:3,virtHandler:3"}
+  add_feature_gate "ExternalNetResourceInjection"
 elif [[ $TARGET =~ vgpu.* ]]; then
   export KUBEVIRT_NUM_NODES=1
 else
@@ -333,12 +348,21 @@ if [ "$CI" != "true" ]; then
   make cluster-down
 fi
 
-# Create .bazelrc to use 4 jobs, remote cache and disable progress output
-cat >ci.bazelrc <<EOF
+# Create .bazelrc to use 4 jobs, remote cache and disable progress output.
+# Seed ci.bazelrc with /etc/bazel.bazelrc if it exists so the Bazel remote
+# cache configuration written by create_bazel_cache_rcs.sh during bootstrap
+# is propagated into the hack/dockerized builder container (which only sees
+# files rsync'd from the source tree).
+cp /etc/bazel.bazelrc ci.bazelrc 2>/dev/null || : >ci.bazelrc
+cat >>ci.bazelrc <<EOF
 build --jobs=4
 build --remote_download_toplevel
 build --noshow_progress
 EOF
+
+echo "=== ci.bazelrc ==="
+cat ci.bazelrc
+echo "=================="
 
 # Build and test images with a custom image name prefix
 export IMAGE_PREFIX_ALT=${IMAGE_PREFIX_ALT:-kv-}

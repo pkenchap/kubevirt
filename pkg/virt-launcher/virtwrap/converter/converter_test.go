@@ -54,12 +54,15 @@ import (
 	"kubevirt.io/kubevirt/pkg/os/disk"
 	"kubevirt.io/kubevirt/pkg/pointer"
 	"kubevirt.io/kubevirt/pkg/testutils"
+	"kubevirt.io/kubevirt/pkg/util"
 	"kubevirt.io/kubevirt/pkg/util/hardware"
-	"kubevirt.io/kubevirt/pkg/virt-controller/services"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	archconverter "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/arch"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/network"
+	convertertypes "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/types"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/vcpu"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/device/hostdevice/generic"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/device/hostdevice/gpu"
 	lsec "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/launchsecurity"
 )
 
@@ -108,17 +111,160 @@ func memBalloonWithModelAndPeriod(model string, period int) string {
 	return fmt.Sprintf(argMemBalloonFmt, model, fmt.Sprintf(`
       <stats period="%d"></stats>
     `, period))
+}
 
+// createContextWithDevices creates a ConverterContext populated with mock host devices
+// based on the current VMI specification.
+func createContextWithDevices(vmi *v1.VirtualMachineInstance, baseContext *convertertypes.ConverterContext) *convertertypes.ConverterContext {
+	pciPool := &stubAddressPool{addresses: make(map[string][]string)}
+
+	// Count devices by DeviceName to determine how many addresses are needed
+	deviceCounts := make(map[string]int)
+	for _, gpu := range vmi.Spec.Domain.Devices.GPUs {
+		deviceCounts[gpu.DeviceName]++
+	}
+	for _, hostDevice := range vmi.Spec.Domain.Devices.HostDevices {
+		deviceCounts[hostDevice.DeviceName]++
+	}
+
+	// Ensure deterministic ordering by processing device types in a fixed order
+	busNumber := 0x81
+	deviceTypes := []string{"example.com/gpu", "example.com/device"} // Fixed order
+	for _, deviceName := range deviceTypes {
+		if count, exists := deviceCounts[deviceName]; exists {
+			addresses := make([]string, count)
+			for i := 0; i < count; i++ {
+				addresses[i] = fmt.Sprintf("0000:%02x:%02x.0", busNumber, i+1)
+			}
+			pciPool.AddResource(deviceName, addresses...)
+			busNumber++
+		}
+	}
+
+	// Create mock MDEV and USB address pools
+	mdevPool := &stubAddressPool{addresses: make(map[string][]string)}
+	usbPool := &stubAddressPool{addresses: make(map[string][]string)}
+
+	gpuHostDevices, err := gpu.CreateHostDevicesFromPools(vmi.Spec.Domain.Devices.GPUs, pciPool, mdevPool)
+	Expect(err).ToNot(HaveOccurred())
+	genericHostDevices, err := generic.CreateHostDevicesFromPools(vmi.Spec.Domain.Devices.HostDevices, pciPool, mdevPool, usbPool)
+	Expect(err).ToNot(HaveOccurred())
+
+	newContext := *baseContext // copy the base context
+	newContext.GPUHostDevices = gpuHostDevices
+	newContext.GenericHostDevices = genericHostDevices
+
+	return &newContext
+}
+
+// stubAddressPool is a mock implementation for testing GPU address pools
+type stubAddressPool struct {
+	addresses map[string][]string
+}
+
+func (p *stubAddressPool) AddResource(resource string, addresses ...string) {
+	p.addresses[resource] = addresses
+}
+
+func (p *stubAddressPool) Pop(resource string) (string, error) {
+	addresses, exists := p.addresses[resource]
+	if !exists {
+		return "", fmt.Errorf("no resource: %s", resource)
+	}
+	if len(addresses) == 0 {
+		return "", fmt.Errorf("pool is empty")
+	}
+
+	address := addresses[0]
+	p.addresses[resource] = addresses[1:]
+
+	return address, nil
+}
+
+// setupMockHardwarePaths creates fake PCI and NUMA filesystem structures for testing
+// Returns a cleanup function that should be called in a defer statement
+func setupMockHardwarePaths(testDevices map[string]string, numaCPUMap map[string]string) func() {
+	var fakePciBasePath, fakeNodeBasePath string
+	originalPciBasePath := hardware.PciBasePath
+	originalNodeBasePath := hardware.NodeBasePath
+
+	var err error
+	fakePciBasePath, err = os.MkdirTemp("", "pci_devices")
+	Expect(err).ToNot(HaveOccurred())
+
+	fakeNodeBasePath, err = os.MkdirTemp("", "numa_nodes")
+	Expect(err).ToNot(HaveOccurred())
+
+	// Create PCI device directories with NUMA node files
+	for pciAddr, numaNode := range testDevices {
+		pciDevicePath := filepath.Join(fakePciBasePath, pciAddr)
+		err = os.MkdirAll(pciDevicePath, 0o755)
+		Expect(err).ToNot(HaveOccurred())
+
+		numaNodeFile := filepath.Join(pciDevicePath, "numa_node")
+		err = os.WriteFile(numaNodeFile, []byte(numaNode+"\n"), 0o644)
+		Expect(err).ToNot(HaveOccurred())
+	}
+
+	// Create NUMA node directories with CPU lists
+	for numaID, cpuList := range numaCPUMap {
+		numaNodePath := filepath.Join(fakeNodeBasePath, "node"+numaID)
+		err = os.MkdirAll(numaNodePath, 0o755)
+		Expect(err).ToNot(HaveOccurred())
+
+		cpuListFile := filepath.Join(numaNodePath, "cpulist")
+		err = os.WriteFile(cpuListFile, []byte(cpuList+"\n"), 0o644)
+		Expect(err).ToNot(HaveOccurred())
+	}
+
+	// Redirect hardware paths to fake paths
+	hardware.PciBasePath = fakePciBasePath
+	hardware.NodeBasePath = fakeNodeBasePath
+
+	// Return cleanup function
+	return func() {
+		hardware.PciBasePath = originalPciBasePath
+		hardware.NodeBasePath = originalNodeBasePath
+		os.RemoveAll(fakePciBasePath)
+		os.RemoveAll(fakeNodeBasePath)
+	}
+}
+
+// configureNUMAAwareVMI configures a VMI with NUMA-aware settings for testing
+func configureNUMAAwareVMI(vmi *v1.VirtualMachineInstance, cores uint32, memory string, hostDevices []v1.HostDevice, gpus []v1.GPU) {
+	// Configure CPU with NUMA passthrough
+	vmi.Spec.Domain.CPU = &v1.CPU{
+		Cores:                 cores,
+		Sockets:               1,
+		Threads:               1,
+		DedicatedCPUPlacement: true,
+		NUMA: &v1.NUMA{
+			GuestMappingPassthrough: &v1.NUMAGuestMappingPassthrough{},
+		},
+	}
+
+	// Enable hugepages as required for NUMA passthrough
+	vmi.Spec.Domain.Memory = &v1.Memory{
+		Hugepages: &v1.Hugepages{PageSize: "2Mi"},
+	}
+
+	// Set memory resources to satisfy hugepage requirements
+	vmi.Spec.Domain.Resources.Requests = k8sv1.ResourceList{
+		k8sv1.ResourceMemory: resource.MustParse(memory),
+	}
+
+	// Add host devices and GPUs
+	vmi.Spec.Domain.Devices.HostDevices = hostDevices
+	vmi.Spec.Domain.Devices.GPUs = gpus
 }
 
 var _ = Describe("Converter", func() {
-
 	TestSmbios := &cmdv1.SMBios{}
 	EphemeralDiskImageCreator := &fake.MockEphemeralDiskImageCreator{BaseDir: "/var/run/libvirt/kubevirt-ephemeral-disk/"}
 
 	Context("with v1.Disk", func() {
 		DescribeTable("Should define disk capacity as the minimum of capacity and request", func(arch string, requests, capacity, expected int64) {
-			context := &ConverterContext{Architecture: archconverter.NewConverter(arch)}
+			context := &convertertypes.ConverterContext{Architecture: archconverter.NewConverter(arch)}
 			v1Disk := v1.Disk{
 				Name: "myvolume",
 				DiskDevice: v1.DiskDevice{
@@ -148,7 +294,7 @@ var _ = Describe("Converter", func() {
 		)
 
 		DescribeTable("Should assign scsi controller to", func(diskDevice v1.DiskDevice) {
-			context := &ConverterContext{}
+			context := &convertertypes.ConverterContext{}
 			v1Disk := v1.Disk{
 				Name:       "myvolume",
 				DiskDevice: diskDevice,
@@ -252,28 +398,41 @@ var _ = Describe("Converter", func() {
 			Entry("on s390x", s390x, "virtio"),
 		)
 
-		It("Should add blockio fields when custom sizes are provided", func() {
+		DescribeTable("Should handle custom block sizes correctly per architecture", func(arch string, logical, physical uint, shouldSucceed bool) {
 			kubevirtDisk := &v1.Disk{
 				BlockSize: &v1.BlockSize{
 					Custom: &v1.CustomBlockSize{
-						Logical:            1234,
-						Physical:           1234,
-						DiscardGranularity: pointer.P[uint](1234),
+						Logical:            logical,
+						Physical:           physical,
+						DiscardGranularity: pointer.P(physical),
 					},
 				},
 			}
-			expectedXML := `<Disk device="" type="">
+			libvirtDisk := &api.Disk{}
+			err := Convert_v1_BlockSize_To_api_BlockIO(kubevirtDisk, libvirtDisk, arch)
+			if shouldSucceed {
+				Expect(err).ToNot(HaveOccurred())
+				expectedXML := fmt.Sprintf(`<Disk device="" type="">
   <source></source>
   <target></target>
-  <blockio logical_block_size="1234" physical_block_size="1234" discard_granularity="1234"></blockio>
-</Disk>`
-			libvirtDisk := &api.Disk{}
-			Expect(Convert_v1_BlockSize_To_api_BlockIO(kubevirtDisk, libvirtDisk)).To(Succeed())
-			data, err := xml.MarshalIndent(libvirtDisk, "", "  ")
-			Expect(err).ToNot(HaveOccurred())
-			xml := string(data)
-			Expect(xml).To(Equal(expectedXML))
-		})
+  <blockio logical_block_size="%d" physical_block_size="%d" discard_granularity="%d"></blockio>
+</Disk>`, logical, physical, physical)
+				data, xmlErr := xml.MarshalIndent(libvirtDisk, "", "  ")
+				Expect(xmlErr).ToNot(HaveOccurred())
+				Expect(string(data)).To(Equal(expectedXML))
+			} else {
+				Expect(err).To(MatchError(ContainSubstring("exceeds the maximum supported size")))
+			}
+		},
+			MultiArchEntry("valid 1234", uint(1234), uint(1234), true),
+			Entry("4096 on s390x", s390x, uint(4096), uint(4096), true),
+			Entry("2048 on s390x", s390x, uint(2048), uint(2048), true),
+			Entry("1024 on s390x", s390x, uint(1024), uint(1024), true),
+			Entry("8192 on s390x", s390x, uint(8192), uint(8192), false),
+			Entry("65536 on s390x", s390x, uint(65536), uint(65536), false),
+			Entry("1 MiB on s390x", s390x, uint(1048576), uint(1048576), false),
+		)
+
 		DescribeTable("should set sharable and the cache if requested", func(arch, expectedModel string) {
 			v1Disk := &v1.Disk{
 				Name: "mydisk",
@@ -616,7 +775,7 @@ var _ = Describe("Converter", func() {
 
 		var convertedDomainWithDevicesOnRootBus = strings.TrimSpace(embedDomainTemplateRootBus)
 
-		var c *ConverterContext
+		var c *convertertypes.ConverterContext
 
 		isBlockPVCMap := make(map[string]bool)
 		isBlockPVCMap[blockPVCName] = true
@@ -624,18 +783,11 @@ var _ = Describe("Converter", func() {
 		isBlockDVMap["dv_block_test"] = true
 
 		BeforeEach(func() {
-			c = &ConverterContext{
-				Architecture:   archconverter.NewConverter(runtime.GOARCH),
-				VirtualMachine: vmi,
-				Secrets: map[string]*k8sv1.Secret{
-					"mysecret": {
-						Data: map[string][]byte{
-							"node.session.auth.username": []byte("admin"),
-						},
-					},
-				},
+			c = &convertertypes.ConverterContext{
+				Architecture:                    archconverter.NewConverter(runtime.GOARCH),
+				VirtualMachine:                  vmi,
 				AllowEmulation:                  true,
-				KvmAvailable:                    true,
+				HypervisorDeviceAvailable:       true,
 				IsBlockPVC:                      isBlockPVCMap,
 				IsBlockDV:                       isBlockDVMap,
 				SMBios:                          TestSmbios,
@@ -689,12 +841,6 @@ var _ = Describe("Converter", func() {
 				Entry("NOT appear if disabled for arm64", false, "virtio-serial", "virtio-non-transitional", arm64),
 				Entry("NOT appear if disabled for s390x", false, "virtio-serial", "virtio", s390x),
 			)
-		})
-
-		It("should handle float memory", func() {
-			vmi.Spec.Domain.Resources.Requests[k8sv1.ResourceMemory] = resource.MustParse("2222222200m")
-			xml := vmiToDomainXML(vmi, c)
-			Expect(strings.Contains(xml, `<memory unit="b">2222222</memory>`)).To(BeTrue(), xml)
 		})
 
 		It("should use panic devices if requested", func() {
@@ -1021,7 +1167,7 @@ var _ = Describe("Converter", func() {
 				libvmi.WithEphemeralPersistentVolumeClaim(blockPVCName, "test-ephemeral"),
 			)
 
-			domain := vmiToDomain(vmi, &ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true, KvmAvailable: true, EphemeraldiskCreator: EphemeralDiskImageCreator, IsBlockPVC: isBlockPVCMap, IsBlockDV: isBlockDVMap})
+			domain := vmiToDomain(vmi, &convertertypes.ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true, HypervisorDeviceAvailable: true, EphemeraldiskCreator: EphemeralDiskImageCreator, IsBlockPVC: isBlockPVCMap, IsBlockDV: isBlockDVMap})
 			By("Checking if the disk backing store type is block")
 			Expect(domain.Spec.Devices.Disks[0].BackingStore).ToNot(BeNil())
 			Expect(domain.Spec.Devices.Disks[0].BackingStore.Type).To(Equal("block"))
@@ -1169,7 +1315,7 @@ var _ = Describe("Converter", func() {
 			)
 
 			DescribeTable("should create domain disk with datastore for block volumes with CBT enabled",
-				func(volumeName string, createVolumeSource func(string) v1.VolumeSource, setupContext func(*ConverterContext, string)) {
+				func(volumeName string, createVolumeSource func(string) v1.VolumeSource, setupContext func(*convertertypes.ConverterContext, string)) {
 					cbtPath := "/var/lib/libvirt/qemu/cbt/" + volumeName + ".qcow2"
 
 					v1.SetObjectDefaults_VirtualMachineInstance(vmi)
@@ -1222,7 +1368,7 @@ var _ = Describe("Converter", func() {
 							},
 						}
 					},
-					func(c *ConverterContext, name string) {
+					func(c *convertertypes.ConverterContext, name string) {
 						c.IsBlockPVC = map[string]bool{name: true}
 					},
 				),
@@ -1234,7 +1380,7 @@ var _ = Describe("Converter", func() {
 							},
 						}
 					},
-					func(c *ConverterContext, name string) {
+					func(c *convertertypes.ConverterContext, name string) {
 						c.IsBlockDV = map[string]bool{name: true}
 					},
 				),
@@ -1294,6 +1440,16 @@ var _ = Describe("Converter", func() {
 				Index: "0",
 				Model: "virtio-non-transitional",
 			}))
+		})
+
+		It("passt network interface should enable shared memory", func() {
+			v1.SetObjectDefaults_VirtualMachineInstance(vmi)
+			vmi.Spec.Domain.Devices.Interfaces[0].PasstBinding = &v1.InterfacePasstBinding{}
+			vmi.Status.Interfaces = []v1.VirtualMachineInstanceNetworkInterface{{Name: "default", PodInterfaceName: "eth0"}}
+			dom := &api.Domain{}
+			Expect(Convert_v1_VirtualMachineInstance_To_api_Domain(vmi, dom, c)).To(Succeed())
+			Expect(dom.Spec.MemoryBacking.Access.Mode).To(Equal("shared"))
+			Expect(dom.Spec.MemoryBacking.Source.Type).To(Equal("memfd"))
 		})
 
 		DescribeTable("usb controller", func(arch, bus string, matcher types.GomegaMatcher) {
@@ -1531,28 +1687,6 @@ var _ = Describe("Converter", func() {
 			Expect(err).To(HaveOccurred())
 		})
 
-		DescribeTable("should calculate memory in bytes", func(quantity string, bytes int) {
-			m64, _ := resource.ParseQuantity(quantity)
-			memory, err := vcpu.QuantityToByte(m64)
-			Expect(memory.Value).To(BeNumerically("==", bytes))
-			Expect(memory.Unit).To(Equal("b"))
-			Expect(err).ToNot(HaveOccurred())
-		},
-			Entry("specifying memory 64M", "64M", 64*1000*1000),
-			Entry("specifying memory 64Mi", "64Mi", 64*1024*1024),
-			Entry("specifying memory 3G", "3G", 3*1000*1000*1000),
-			Entry("specifying memory 3Gi", "3Gi", 3*1024*1024*1024),
-			Entry("specifying memory 45Gi", "45Gi", 45*1024*1024*1024),
-			Entry("specifying memory 2780Gi", "2780Gi", 2780*1024*1024*1024),
-			Entry("specifying memory 451231 bytes", "451231", 451231),
-		)
-		It("should calculate memory in bytes", func() {
-			By("specyfing negative memory size -45Gi")
-			m45gi, _ := resource.ParseQuantity("-45Gi")
-			_, err := vcpu.QuantityToByte(m45gi)
-			Expect(err).To(HaveOccurred())
-		})
-
 		It("should convert hugepages", func() {
 			v1.SetObjectDefaults_VirtualMachineInstance(vmi)
 			vmi.Spec.Domain.Memory = &v1.Memory{
@@ -1564,19 +1698,6 @@ var _ = Describe("Converter", func() {
 			Expect(domainSpec.MemoryBacking.Source.Type).To(Equal("memfd"))
 
 			Expect(domainSpec.Memory.Value).To(Equal(uint64(8388608)))
-			Expect(domainSpec.Memory.Unit).To(Equal("b"))
-		})
-
-		It("should use guest memory instead of requested memory if present", func() {
-			guestMemory := resource.MustParse("123Mi")
-			vmi.Spec.Domain.Memory = &v1.Memory{
-				Guest: &guestMemory,
-			}
-			v1.SetObjectDefaults_VirtualMachineInstance(vmi)
-
-			domainSpec := vmiToDomainXMLToDomainSpec(vmi, c)
-
-			Expect(domainSpec.Memory.Value).To(Equal(uint64(128974848)))
 			Expect(domainSpec.Memory.Unit).To(Equal("b"))
 		})
 
@@ -1595,10 +1716,10 @@ var _ = Describe("Converter", func() {
 			func(toDefineVerbosityEnvVariable bool, virtLauncherLogVerbosity int, shouldEnableDebugLogs bool) {
 
 				if toDefineVerbosityEnvVariable {
-					Expect(os.Setenv(services.ENV_VAR_VIRT_LAUNCHER_LOG_VERBOSITY, strconv.Itoa(virtLauncherLogVerbosity))).
+					Expect(os.Setenv(util.ENV_VAR_VIRT_LAUNCHER_LOG_VERBOSITY, strconv.Itoa(virtLauncherLogVerbosity))).
 						To(Succeed())
 					defer func() {
-						Expect(os.Unsetenv(services.ENV_VAR_VIRT_LAUNCHER_LOG_VERBOSITY)).To(Succeed())
+						Expect(os.Unsetenv(util.ENV_VAR_VIRT_LAUNCHER_LOG_VERBOSITY)).To(Succeed())
 					}()
 				}
 
@@ -1698,7 +1819,7 @@ var _ = Describe("Converter", func() {
 					},
 				}
 				apiDisk := api.Disk{Source: api.DiskSource{File: "/"}}
-				Expect(Convert_v1_BlockSize_To_api_BlockIO(&v1Disk, &apiDisk)).To(Succeed())
+				Expect(Convert_v1_BlockSize_To_api_BlockIO(&v1Disk, &apiDisk, amd64)).To(Succeed())
 
 				blockIO := apiDisk.BlockIO
 				Expect(blockIO.LogicalBlockSize).To(Equal(blockIO.PhysicalBlockSize))
@@ -1720,13 +1841,179 @@ var _ = Describe("Converter", func() {
 					},
 				}
 				apiDisk := api.Disk{Source: api.DiskSource{}}
-				Expect(Convert_v1_BlockSize_To_api_BlockIO(&v1Disk, &apiDisk)).To(MatchError(ContainSubstring(blockIoConfigErrorMessage)))
+				Expect(Convert_v1_BlockSize_To_api_BlockIO(&v1Disk, &apiDisk, amd64)).To(MatchError(ContainSubstring(blockIoConfigErrorMessage)))
+			})
+
+			It("Should fail block size detection for a nil domain disk", func() {
+				const nilDiskErrorMessage = "disk is nil"
+				v1Disk := v1.Disk{
+					Name: "test",
+					BlockSize: &v1.BlockSize{
+						MatchVolume: &v1.FeatureState{Enabled: pointer.P(true)},
+					},
+				}
+				Expect(Convert_v1_BlockSize_To_api_BlockIO(&v1Disk, nil, amd64)).To(MatchError(ContainSubstring(nilDiskErrorMessage)))
 			})
 		})
 	})
+
+	Context("PCIe topology with NUMA alignment", func() {
+		var vmi *v1.VirtualMachineInstance
+		var c *convertertypes.ConverterContext
+		var cleanup func()
+
+		BeforeEach(func() {
+			vmi = &v1.VirtualMachineInstance{
+				Spec: v1.VirtualMachineInstanceSpec{
+					Domain: v1.DomainSpec{
+						Devices: v1.Devices{
+							Interfaces: []v1.Interface{
+								{
+									Name: "default",
+									InterfaceBindingMethod: v1.InterfaceBindingMethod{
+										Masquerade: &v1.InterfaceMasquerade{},
+									},
+								},
+							},
+						},
+					},
+					Networks: []v1.Network{
+						{
+							Name: "default",
+							NetworkSource: v1.NetworkSource{
+								Pod: &v1.PodNetwork{},
+							},
+						},
+					},
+				},
+			}
+			v1.SetObjectDefaults_VirtualMachineInstance(vmi)
+
+			c = &convertertypes.ConverterContext{
+				Architecture:   archconverter.NewConverter(runtime.GOARCH),
+				VirtualMachine: vmi,
+				AllowEmulation: true,
+				Topology: &cmdv1.Topology{
+					NumaCells: []*cmdv1.Cell{
+						{
+							Id: 0,
+							Cpus: []*cmdv1.CPU{
+								{Id: 0}, {Id: 1},
+							},
+							Memory: &cmdv1.Memory{Amount: 2147483648, Unit: "b"},
+						},
+					},
+				},
+				CPUSet: []int{0, 1},
+			}
+
+			testDevices := map[string]string{
+				"0000:81:01.0": "0", // example.com/gpu
+				"0000:81:02.0": "0", // example.com/gpu
+				"0000:82:01.0": "0", // example.com/device
+				"0000:82:02.0": "0", // example.com/device
+			}
+			numaCPUMap := map[string]string{"0": "0-1"}
+			cleanup = setupMockHardwarePaths(testDevices, numaCPUMap)
+
+			hostDevices := []v1.HostDevice{
+				{Name: "hostdev1", DeviceName: "example.com/device"},
+				{Name: "hostdev2", DeviceName: "example.com/device"},
+			}
+			gpus := []v1.GPU{
+				{Name: "gpu1", DeviceName: "example.com/gpu"},
+				{Name: "gpu2", DeviceName: "example.com/gpu"},
+			}
+
+			configureNUMAAwareVMI(vmi, 2, "4Gi", hostDevices, gpus)
+		})
+
+		AfterEach(func() {
+			if cleanup != nil {
+				cleanup()
+			}
+		})
+
+		Context("with PCINUMAAwareTopology feature gate enabled", func() {
+			BeforeEach(func() {
+				c.PCINUMAAwareTopologyEnabled = true
+				c.Architecture = archconverter.NewConverter(amd64)
+			})
+
+			It("should create PCIe controllers for NUMA-aligned devices", func() {
+				c = createContextWithDevices(vmi, c)
+				domain := vmiToDomain(vmi, c)
+
+				controllers := domain.Spec.Devices.Controllers
+
+				numaExpanderBuses := make([]*api.Controller, 0)
+				rootPorts := make([]*api.Controller, 0)
+				for i := range controllers {
+					ctrl := &controllers[i]
+					if ctrl.Model == api.ControllerModelPCIeExpanderBus {
+						numaExpanderBuses = append(numaExpanderBuses, ctrl)
+					} else if ctrl.Model == api.ControllerModelPCIeRootPort {
+						rootPorts = append(rootPorts, ctrl)
+					}
+				}
+
+				Expect(numaExpanderBuses).To(HaveLen(1), "expected exactly 1 NUMA-aligned pcie-expander-bus controller")
+				Expect(rootPorts).To(HaveLen(4), "expected exactly 4 pcie-root-port controllers for 4 devices")
+
+				numaExpander := numaExpanderBuses[0]
+				for i, rootPort := range rootPorts {
+					Expect(rootPort.Address).ToNot(BeNil(), "root port %d should have a PCI address assigned", i)
+					Expect(rootPort.Address.Bus).To(Equal(numaExpander.Index), "root port %d should be attached to the expander bus", i)
+				}
+			})
+		})
+
+		Context("with PCINUMAAwareTopology feature gate disabled", func() {
+			BeforeEach(func() {
+				c.PCINUMAAwareTopologyEnabled = false
+			})
+
+			It("should not create any PCIe expander bus controllers", func() {
+				c = createContextWithDevices(vmi, c)
+				domain := vmiToDomain(vmi, c)
+
+				expanderBusCount := 0
+				for _, controller := range domain.Spec.Devices.Controllers {
+					if controller.Model == api.ControllerModelPCIeExpanderBus {
+						expanderBusCount++
+					}
+				}
+				Expect(expanderBusCount).To(Equal(0), "expected no PCIe expander bus controllers when feature is disabled")
+			})
+		})
+
+		Context("with PCINUMAAwareTopology feature gate enabled for s390x architecture", func() {
+			BeforeEach(func() {
+				c.PCINUMAAwareTopologyEnabled = true
+				c.Architecture = archconverter.NewConverter(s390x)
+				vmiArchMutate(s390x, vmi, c)
+			})
+
+			It("should not create any PCIe controllers even with NUMA topology enabled", func() {
+				c = createContextWithDevices(vmi, c)
+				domain := vmiToDomain(vmi, c)
+
+				for _, controller := range domain.Spec.Devices.Controllers {
+					Expect(controller.Model).To(
+						And(
+							Not(Equal(api.ControllerModelPCIeExpanderBus)),
+							Not(Equal(api.ControllerModelPCIeRootPort)),
+						),
+						"s390x should not have pcie-expander-bus or pcie-root-port controllers",
+					)
+				}
+			})
+		})
+	})
+
 	Context("Network convert", func() {
 		var vmi *v1.VirtualMachineInstance
-		var c *ConverterContext
+		var c *convertertypes.ConverterContext
 
 		const netName1 = "red1"
 		const netName2 = "red2"
@@ -1739,16 +2026,9 @@ var _ = Describe("Converter", func() {
 				},
 			}
 
-			c = &ConverterContext{
+			c = &convertertypes.ConverterContext{
 				Architecture:   archconverter.NewConverter(runtime.GOARCH),
 				VirtualMachine: vmi,
-				Secrets: map[string]*k8sv1.Secret{
-					"mysecret": {
-						Data: map[string][]byte{
-							"node.session.auth.username": []byte("admin"),
-						},
-					},
-				},
 				AllowEmulation: true,
 				SMBios:         TestSmbios,
 				DomainAttachmentByInterfaceName: map[string]string{
@@ -1968,7 +2248,7 @@ var _ = Describe("Converter", func() {
 			vmi.Spec.Domain.Devices = v1.Devices{
 				AutoattachGraphicsDevice: autoAttach,
 			}
-			domain := vmiToDomain(&vmi, &ConverterContext{AllowEmulation: true, KvmAvailable: true, Architecture: archconverter.NewConverter(arch)})
+			domain := vmiToDomain(&vmi, &convertertypes.ConverterContext{AllowEmulation: true, HypervisorDeviceAvailable: true, Architecture: archconverter.NewConverter(arch)})
 			Expect(domain.Spec.Devices.Video).To(HaveLen(devices))
 			Expect(domain.Spec.Devices.Graphics).To(HaveLen(devices))
 
@@ -1996,7 +2276,7 @@ var _ = Describe("Converter", func() {
 		DescribeTable("should check video device", func(arch string) {
 			const expectedVideoType = "test-video"
 			vmi := libvmi.New(libvmi.WithAutoattachGraphicsDevice(true), libvmi.WithVideo(expectedVideoType))
-			domain := vmiToDomain(vmi, &ConverterContext{AllowEmulation: true, KvmAvailable: true, Architecture: archconverter.NewConverter(arch)})
+			domain := vmiToDomain(vmi, &convertertypes.ConverterContext{AllowEmulation: true, HypervisorDeviceAvailable: true, Architecture: archconverter.NewConverter(arch)})
 			Expect(domain.Spec.Devices.Video[0].Model.Type).To(Equal(expectedVideoType))
 		},
 			MultiArchEntry("and use the explicitly set video device"),
@@ -2014,7 +2294,7 @@ var _ = Describe("Converter", func() {
 				},
 			}
 
-			domain := vmiToDomain(&vmi, &ConverterContext{Architecture: archconverter.NewConverter(arch), AllowEmulation: true, KvmAvailable: true})
+			domain := vmiToDomain(&vmi, &convertertypes.ConverterContext{Architecture: archconverter.NewConverter(arch), AllowEmulation: true, HypervisorDeviceAvailable: true})
 			Expect(domain.Spec.Devices.Graphics).To(HaveLen(1))
 			Expect(domain.Spec.Devices.Graphics).To(HaveExactElements(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
 				"Type": Equal("vnc"),
@@ -2041,7 +2321,7 @@ var _ = Describe("Converter", func() {
 				},
 			}
 
-			domain := vmiToDomain(&vmi, &ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true})
+			domain := vmiToDomain(&vmi, &convertertypes.ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true})
 			Expect(domain.Spec.Features.Hyperv).To(Equal(result))
 
 		},
@@ -2106,7 +2386,7 @@ var _ = Describe("Converter", func() {
 				},
 			}
 
-			domain := vmiToDomain(&vmi, &ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true, KvmAvailable: true})
+			domain := vmiToDomain(&vmi, &convertertypes.ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true, HypervisorDeviceAvailable: true})
 			Expect(domain.Spec.Features.Hyperv.Mode).To(Equal(api.HypervModePassthrough))
 		})
 	})
@@ -2136,7 +2416,7 @@ var _ = Describe("Converter", func() {
 			vmi.Spec.Domain.Devices = v1.Devices{
 				AutoattachSerialConsole: autoAttach,
 			}
-			domain := vmiToDomain(&vmi, &ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true, KvmAvailable: true})
+			domain := vmiToDomain(&vmi, &convertertypes.ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true, HypervisorDeviceAvailable: true})
 			Expect(domain.Spec.Devices.Serials).To(HaveLen(devices))
 			Expect(domain.Spec.Devices.Consoles).To(HaveLen(devices))
 
@@ -2150,7 +2430,7 @@ var _ = Describe("Converter", func() {
 	It("should not include serial entry in sysinfo when firmware.serial is not set", func() {
 		vmi := libvmi.New()
 		v1.SetObjectDefaults_VirtualMachineInstance(vmi)
-		domain := vmiToDomain(vmi, &ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true, KvmAvailable: true})
+		domain := vmiToDomain(vmi, &convertertypes.ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true, HypervisorDeviceAvailable: true})
 		Expect(domain.Spec.SysInfo.System).ToNot(ContainElement(HaveField("Name", Equal("serial"))),
 			"serial entry should not be present in sysinfo",
 		)
@@ -2311,7 +2591,7 @@ var _ = Describe("Converter", func() {
 				},
 			}
 
-			domain := vmiToDomain(&vmi, &ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true, EphemeraldiskCreator: EphemeralDiskImageCreator})
+			domain := vmiToDomain(&vmi, &convertertypes.ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true, EphemeraldiskCreator: EphemeralDiskImageCreator})
 			Expect(domain.Spec.IOThreads).ToNot(BeNil())
 			Expect(int(domain.Spec.IOThreads.IOThreads)).To(Equal(threadCount))
 			for idx, disk := range domain.Spec.Devices.Disks {
@@ -2408,7 +2688,7 @@ var _ = Describe("Converter", func() {
 				},
 			}
 
-			domain := vmiToDomain(&vmi, &ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true, EphemeraldiskCreator: EphemeralDiskImageCreator})
+			domain := vmiToDomain(&vmi, &convertertypes.ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true, EphemeraldiskCreator: EphemeralDiskImageCreator})
 			Expect(domain.Spec.IOThreads).ToNot(BeNil())
 			Expect(domain.Spec.IOThreads.IOThreads).To(Equal(uint(2)))
 			// Disk with dedicated IOThread (2)
@@ -2433,7 +2713,7 @@ var _ = Describe("Converter", func() {
 				iothreads.IOThread = append(iothreads.IOThread, api.DiskIOThread{Id: uint32(id)})
 			}
 
-			domain := vmiToDomain(vmi, &ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true, EphemeraldiskCreator: EphemeralDiskImageCreator})
+			domain := vmiToDomain(vmi, &convertertypes.ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true, EphemeraldiskCreator: EphemeralDiskImageCreator})
 
 			Expect(domain.Spec.IOThreads.IOThreads).To(Equal(uint(count)))
 			Expect(domain.Spec.Devices.Disks[0].Driver.IOThreads).To(Equal(iothreads))
@@ -2444,7 +2724,7 @@ var _ = Describe("Converter", func() {
 				libvmi.WithIOThreadsPolicy(v1.IOThreadsPolicyShared),
 				libvmi.WithPersistentVolumeClaim("disk0", "alpine"),
 			)
-			domain := vmiToDomain(vmi, &ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true, EphemeraldiskCreator: EphemeralDiskImageCreator})
+			domain := vmiToDomain(vmi, &convertertypes.ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true, EphemeraldiskCreator: EphemeralDiskImageCreator})
 
 			expectedIOThreads := 1
 			Expect(domain.Spec.IOThreads).ToNot(BeNil())
@@ -2460,7 +2740,7 @@ var _ = Describe("Converter", func() {
 				libvmi.WithPersistentVolumeClaim("shr2", "alpine"),
 			)
 
-			domain := vmiToDomain(vmi, &ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true, EphemeraldiskCreator: EphemeralDiskImageCreator})
+			domain := vmiToDomain(vmi, &convertertypes.ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true, EphemeraldiskCreator: EphemeralDiskImageCreator})
 
 			// Verify the total number of ioThreads
 			expectedIOThreads := 2
@@ -2492,7 +2772,7 @@ var _ = Describe("Converter", func() {
 				libvmi.WithPersistentVolumeClaim("shr4", "alpine"),
 			)
 
-			domain := vmiToDomain(vmi, &ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true, EphemeraldiskCreator: EphemeralDiskImageCreator})
+			domain := vmiToDomain(vmi, &convertertypes.ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true, EphemeraldiskCreator: EphemeralDiskImageCreator})
 
 			// Verify the total number of ioThreads
 			Expect(int(domain.Spec.IOThreads.IOThreads)).To(Equal(expectedIOThreads))
@@ -2546,7 +2826,7 @@ var _ = Describe("Converter", func() {
 
 			vmi.Spec.Domain.CPU.IsolateEmulatorThread = true
 
-			c := &ConverterContext{
+			c := &convertertypes.ConverterContext{
 				Architecture:         archconverter.NewConverter(runtime.GOARCH),
 				AllowEmulation:       true,
 				EphemeraldiskCreator: EphemeralDiskImageCreator,
@@ -2611,10 +2891,10 @@ var _ = Describe("Converter", func() {
 
 	Context("virtio block multi-queue", func() {
 		var vmi *v1.VirtualMachineInstance
-		var context *ConverterContext
+		var context *convertertypes.ConverterContext
 
 		BeforeEach(func() {
-			context = &ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), UseVirtioTransitional: false}
+			context = &convertertypes.ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), UseVirtioTransitional: false}
 			vmi = &v1.VirtualMachineInstance{
 				ObjectMeta: k8smeta.ObjectMeta{
 					Name:      "testvmi",
@@ -2693,7 +2973,7 @@ var _ = Describe("Converter", func() {
 			expectedNumOfBlkQueues :=
 				vmi.Spec.Domain.CPU.Cores * vmi.Spec.Domain.CPU.Threads * vmi.Spec.Domain.CPU.Sockets
 
-			domain := vmiToDomain(vmi, &ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true, SMBios: &cmdv1.SMBios{}})
+			domain := vmiToDomain(vmi, &convertertypes.ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true, SMBios: &cmdv1.SMBios{}})
 			Expect(domain.Spec.Devices.Disks).To(HaveLen(1))
 			disk := domain.Spec.Devices.Disks[0]
 			Expect(disk.Driver.Queues).ToNot(BeNil())
@@ -2706,15 +2986,173 @@ var _ = Describe("Converter", func() {
 				Cores: 2,
 			}
 
-			domain := vmiToDomain(vmi, &ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true, SMBios: &cmdv1.SMBios{}})
+			domain := vmiToDomain(vmi, &convertertypes.ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true, SMBios: &cmdv1.SMBios{}})
 			Expect(*(domain.Spec.Devices.Disks[0].Driver.Queues)).To(Equal(expectedQueues),
 				"expected number of queues to equal number of requested vCPUs")
 		})
 	})
 
+	Describe("newDeviceNamer", func() {
+		DescribeTable("should correctly build prefix map for different disk types",
+			func(volumeStatuses []v1.VolumeStatus, disks []v1.Disk, expectedPrefixes []string, expectedMappings map[string]map[string]string) {
+				prefixMap := newDeviceNamer(volumeStatuses, disks)
+
+				// Verify expected prefixes exist
+				Expect(prefixMap).To(HaveLen(len(expectedPrefixes)))
+				for _, prefix := range expectedPrefixes {
+					Expect(prefixMap).To(HaveKey(prefix))
+				}
+
+				// Verify mappings for each prefix
+				for prefix, mappings := range expectedMappings {
+					namer := prefixMap[prefix]
+					for diskName, target := range mappings {
+						Expect(namer.existingNameMap).To(HaveKeyWithValue(diskName, target))
+						Expect(namer.usedDeviceMap).To(HaveKeyWithValue(target, diskName))
+					}
+				}
+			},
+			Entry("Disk with virtio bus",
+				[]v1.VolumeStatus{{Name: "mydisk", Target: "vda"}},
+				[]v1.Disk{{Name: "mydisk", DiskDevice: v1.DiskDevice{Disk: &v1.DiskTarget{Bus: v1.DiskBusVirtio}}}},
+				[]string{"vd"},
+				map[string]map[string]string{"vd": {"mydisk": "vda"}},
+			),
+			Entry("Disk with SATA bus",
+				[]v1.VolumeStatus{{Name: "mydisk", Target: "sda"}},
+				[]v1.Disk{{Name: "mydisk", DiskDevice: v1.DiskDevice{Disk: &v1.DiskTarget{Bus: v1.DiskBusSATA}}}},
+				[]string{"sd"},
+				map[string]map[string]string{"sd": {"mydisk": "sda"}},
+			),
+			Entry("LUN with SCSI bus",
+				[]v1.VolumeStatus{{Name: "mylun", Target: "sda"}},
+				[]v1.Disk{{Name: "mylun", DiskDevice: v1.DiskDevice{LUN: &v1.LunTarget{Bus: v1.DiskBusSCSI}}}},
+				[]string{"sd"},
+				map[string]map[string]string{"sd": {"mylun": "sda"}},
+			),
+			Entry("CDRom with SATA bus",
+				[]v1.VolumeStatus{{Name: "mycdrom", Target: "sda"}},
+				[]v1.Disk{{Name: "mycdrom", DiskDevice: v1.DiskDevice{CDRom: &v1.CDRomTarget{Bus: v1.DiskBusSATA}}}},
+				[]string{"sd"},
+				map[string]map[string]string{"sd": {"mycdrom": "sda"}},
+			),
+			Entry("Mixed devices with different buses",
+				[]v1.VolumeStatus{
+					{Name: "disk1", Target: "vda"},
+					{Name: "lun1", Target: "sda"},
+					{Name: "cdrom1", Target: "sdb"},
+				},
+				[]v1.Disk{
+					{Name: "disk1", DiskDevice: v1.DiskDevice{Disk: &v1.DiskTarget{Bus: v1.DiskBusVirtio}}},
+					{Name: "lun1", DiskDevice: v1.DiskDevice{LUN: &v1.LunTarget{Bus: v1.DiskBusSCSI}}},
+					{Name: "cdrom1", DiskDevice: v1.DiskDevice{CDRom: &v1.CDRomTarget{Bus: v1.DiskBusSATA}}},
+				},
+				[]string{"vd", "sd"},
+				map[string]map[string]string{
+					"vd": {"disk1": "vda"},
+					"sd": {"lun1": "sda", "cdrom1": "sdb"},
+				},
+			),
+			Entry("Multiple disks sharing same prefix",
+				[]v1.VolumeStatus{
+					{Name: "disk1", Target: "vda"},
+					{Name: "disk2", Target: "vdb"},
+				},
+				[]v1.Disk{
+					{Name: "disk1", DiskDevice: v1.DiskDevice{Disk: &v1.DiskTarget{Bus: v1.DiskBusVirtio}}},
+					{Name: "disk2", DiskDevice: v1.DiskDevice{Disk: &v1.DiskTarget{Bus: v1.DiskBusVirtio}}},
+				},
+				[]string{"vd"},
+				map[string]map[string]string{"vd": {"disk1": "vda", "disk2": "vdb"}},
+			),
+		)
+
+		It("should return empty map for empty inputs", func() {
+			prefixMap := newDeviceNamer([]v1.VolumeStatus{}, []v1.Disk{})
+			Expect(prefixMap).To(BeEmpty())
+		})
+
+		It("should not populate maps when volume status has no target", func() {
+			volumeStatuses := []v1.VolumeStatus{{Name: "mydisk", Target: ""}}
+			disks := []v1.Disk{{Name: "mydisk", DiskDevice: v1.DiskDevice{Disk: &v1.DiskTarget{Bus: v1.DiskBusVirtio}}}}
+
+			prefixMap := newDeviceNamer(volumeStatuses, disks)
+
+			Expect(prefixMap).To(HaveKey("vd"))
+			namer := prefixMap["vd"]
+			Expect(namer.existingNameMap).To(BeEmpty())
+			Expect(namer.usedDeviceMap).To(BeEmpty())
+		})
+
+		It("should skip disks with no Disk, LUN, or CDRom defined", func() {
+			volumeStatuses := []v1.VolumeStatus{{Name: "unknown", Target: "vda"}}
+			disks := []v1.Disk{{Name: "unknown", DiskDevice: v1.DiskDevice{}}}
+
+			prefixMap := newDeviceNamer(volumeStatuses, disks)
+
+			Expect(prefixMap).To(BeEmpty())
+		})
+
+		It("should handle disk without matching volume status", func() {
+			volumeStatuses := []v1.VolumeStatus{} // no volume status
+			disks := []v1.Disk{{Name: "mydisk", DiskDevice: v1.DiskDevice{Disk: &v1.DiskTarget{Bus: v1.DiskBusVirtio}}}}
+
+			prefixMap := newDeviceNamer(volumeStatuses, disks)
+
+			Expect(prefixMap).To(HaveKey("vd"))
+			namer := prefixMap["vd"]
+			// Prefix entry exists but no mappings since there's no volume status with target
+			Expect(namer.existingNameMap).To(BeEmpty())
+			Expect(namer.usedDeviceMap).To(BeEmpty())
+		})
+
+		It("should allow new disk to fill gap after hotplug detach with mixed disk types", func() {
+			By("Simulating post-detach state: boot=sda, detached=sdb(missing), cdrom=sdc, cloudinit=sdd")
+			// This scenario: SCSI boot disk at sda, hotplugged SCSI disk was detached from sdb,
+			// SATA cdrom at sdc, SATA cloudinit at sdd. All share the 'sd' prefix.
+			volumeStatuses := []v1.VolumeStatus{
+				{Name: "boot", Target: "sda"},
+				// sdb is missing - was detached
+				{Name: "cdrom", Target: "sdc"},
+				{Name: "cloudinit", Target: "sdd"},
+			}
+			disks := []v1.Disk{
+				{Name: "boot", DiskDevice: v1.DiskDevice{Disk: &v1.DiskTarget{Bus: v1.DiskBusSCSI}}},
+				{Name: "cdrom", DiskDevice: v1.DiskDevice{CDRom: &v1.CDRomTarget{Bus: v1.DiskBusSATA}}},
+				{Name: "cloudinit", DiskDevice: v1.DiskDevice{CDRom: &v1.CDRomTarget{Bus: v1.DiskBusSATA}}},
+			}
+
+			prefixMap := newDeviceNamer(volumeStatuses, disks)
+
+			By("Verifying the prefix map correctly tracks all used targets")
+			Expect(prefixMap).To(HaveKey("sd"))
+			namer := prefixMap["sd"]
+			Expect(namer.usedDeviceMap).To(HaveKeyWithValue("sda", "boot"))
+			Expect(namer.usedDeviceMap).To(HaveKeyWithValue("sdc", "cdrom"))
+			Expect(namer.usedDeviceMap).To(HaveKeyWithValue("sdd", "cloudinit"))
+			Expect(namer.usedDeviceMap).NotTo(HaveKey("sdb")) // sdb should be available
+
+			By("Simulating domain conversion: calling makeDeviceName for each disk in order")
+			// This mirrors what Convert_v1_VirtualMachineInstance_To_api_Domain does
+			bootTarget, _ := makeDeviceName("boot", v1.DiskBusSCSI, prefixMap)
+			Expect(bootTarget).To(Equal("sda"), "boot disk should keep its existing target")
+
+			cdromTarget, _ := makeDeviceName("cdrom", v1.DiskBusSATA, prefixMap)
+			Expect(cdromTarget).To(Equal("sdc"), "cdrom should keep its existing target, not get reassigned")
+
+			cloudinitTarget, _ := makeDeviceName("cloudinit", v1.DiskBusSATA, prefixMap)
+			Expect(cloudinitTarget).To(Equal("sdd"), "cloudinit should keep its existing target, not get reassigned")
+
+			By("Adding a new hotplug SCSI disk - it should get sdb (the gap)")
+			newDiskName, index := makeDeviceName("newhotplug", v1.DiskBusSCSI, prefixMap)
+			Expect(newDiskName).To(Equal("sdb"), "new disk should fill the gap at sdb, not collide with sdc/sdd")
+			Expect(index).To(Equal(1))
+		})
+	})
+
 	Context("Correctly handle IsolateEmulatorThread with dedicated cpus", func() {
 		DescribeTable("should succeed assigning CPUs to emulatorThread",
-			func(cpu v1.CPU, converterContext *ConverterContext, vmiAnnotations map[string]string, expectedEmulatorThreads int) {
+			func(cpu v1.CPU, converterContext *convertertypes.ConverterContext, vmiAnnotations map[string]string, expectedEmulatorThreads int) {
 				var err error
 				domain := &api.Domain{}
 
@@ -2742,7 +3180,7 @@ var _ = Describe("Converter", func() {
 			},
 			Entry("when EmulatorThreadCompleteToEvenParity is disabled and there is one extra CPU assigned for emulatorThread",
 				v1.CPU{Sockets: 1, Cores: 2, Threads: 1},
-				&ConverterContext{CPUSet: []int{5, 6, 7},
+				&convertertypes.ConverterContext{CPUSet: []int{5, 6, 7},
 					Topology: &cmdv1.Topology{
 						NumaCells: []*cmdv1.Cell{{
 							Cpus: []*cmdv1.CPU{
@@ -2756,7 +3194,7 @@ var _ = Describe("Converter", func() {
 				1),
 			Entry("when EmulatorThreadCompleteToEvenParity is enabled and there is one extra CPU assigned for emulatorThread (odd CPUs)",
 				v1.CPU{Sockets: 1, Cores: 5, Threads: 1},
-				&ConverterContext{CPUSet: []int{5, 6, 7, 8, 9, 10},
+				&convertertypes.ConverterContext{CPUSet: []int{5, 6, 7, 8, 9, 10},
 					Topology: &cmdv1.Topology{
 						NumaCells: []*cmdv1.Cell{{
 							Cpus: []*cmdv1.CPU{
@@ -2770,7 +3208,7 @@ var _ = Describe("Converter", func() {
 				1),
 			Entry("when EmulatorThreadCompleteToEvenParity is enabled and there are two extra CPUs assigned for emulatorThread (even CPUs)",
 				v1.CPU{Sockets: 1, Cores: 6, Threads: 1},
-				&ConverterContext{CPUSet: []int{5, 6, 7, 8, 9, 10, 11, 12},
+				&convertertypes.ConverterContext{CPUSet: []int{5, 6, 7, 8, 9, 10, 11, 12},
 					Topology: &cmdv1.Topology{
 						NumaCells: []*cmdv1.Cell{{
 							Cpus: []*cmdv1.CPU{
@@ -2784,7 +3222,7 @@ var _ = Describe("Converter", func() {
 				2),
 		)
 		DescribeTable("should fail assigning CPUs to emulatorThread",
-			func(cpu v1.CPU, converterContext *ConverterContext, vmiAnnotations map[string]string, expectedErrorString string) {
+			func(cpu v1.CPU, converterContext *convertertypes.ConverterContext, vmiAnnotations map[string]string, expectedErrorString string) {
 				var err error
 				domain := &api.Domain{}
 
@@ -2802,7 +3240,7 @@ var _ = Describe("Converter", func() {
 			},
 			Entry("when EmulatorThreadCompleteToEvenParity is disabled and there are not enough CPUs to allocate emulator threads",
 				v1.CPU{Sockets: 1, Cores: 2, Threads: 1},
-				&ConverterContext{CPUSet: []int{5, 6},
+				&convertertypes.ConverterContext{CPUSet: []int{5, 6},
 					Topology: &cmdv1.Topology{
 						NumaCells: []*cmdv1.Cell{{
 							Cpus: []*cmdv1.CPU{
@@ -2815,7 +3253,7 @@ var _ = Describe("Converter", func() {
 				"no CPU allocated for the emulation thread"),
 			Entry("when EmulatorThreadCompleteToEvenParity is enabled and there are not enough Cores to allocate emulator threads (odd CPUs)",
 				v1.CPU{Sockets: 1, Cores: 3, Threads: 1},
-				&ConverterContext{CPUSet: []int{5, 6, 7},
+				&convertertypes.ConverterContext{CPUSet: []int{5, 6, 7},
 					Topology: &cmdv1.Topology{
 						NumaCells: []*cmdv1.Cell{{
 							Cpus: []*cmdv1.CPU{
@@ -2829,7 +3267,7 @@ var _ = Describe("Converter", func() {
 				"no CPU allocated for the emulation thread"),
 			Entry("when EmulatorThreadCompleteToEvenParity is enabled and there are not enough Cores to allocate emulator threads (even CPUs)",
 				v1.CPU{Sockets: 1, Cores: 2, Threads: 1},
-				&ConverterContext{CPUSet: []int{5, 6, 7},
+				&convertertypes.ConverterContext{CPUSet: []int{5, 6, 7},
 					Topology: &cmdv1.Topology{
 						NumaCells: []*cmdv1.Cell{{
 							Cpus: []*cmdv1.CPU{
@@ -2870,7 +3308,7 @@ var _ = Describe("Converter", func() {
 			vmi.Spec.Domain.CPU.Cores = 16
 			vmi.Spec.Domain.Resources.Requests[k8sv1.ResourceCPU] = resource.MustParse("16")
 			v1.SetObjectDefaults_VirtualMachineInstance(vmi)
-			c := &ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH),
+			c := &convertertypes.ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH),
 				CPUSet:         []int{5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20},
 				AllowEmulation: true,
 				SMBios:         &cmdv1.SMBios{},
@@ -2917,7 +3355,7 @@ var _ = Describe("Converter", func() {
 		It("should pack iothreads equally on available vcpus, if there are more iothreads than vcpus", func() {
 			vmi.Spec.Domain.CPU.Cores = 2
 			v1.SetObjectDefaults_VirtualMachineInstance(vmi)
-			c := &ConverterContext{
+			c := &convertertypes.ConverterContext{
 				Architecture:   archconverter.NewConverter(runtime.GOARCH),
 				CPUSet:         []int{5, 6},
 				AllowEmulation: true,
@@ -2974,7 +3412,7 @@ var _ = Describe("Converter", func() {
 				Cores: 2,
 			}
 
-			domain := vmiToDomain(vmi, &ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true})
+			domain := vmiToDomain(vmi, &convertertypes.ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true})
 			Expect(*(domain.Spec.Devices.Interfaces[0].Driver.Queues)).To(Equal(expectedQueues),
 				"expected number of queues to equal number of requested vCPUs")
 		})
@@ -2986,14 +3424,14 @@ var _ = Describe("Converter", func() {
 				Sockets: 1,
 				Threads: 2,
 			}
-			domain := vmiToDomain(vmi, &ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true})
+			domain := vmiToDomain(vmi, &convertertypes.ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true})
 			Expect(*(domain.Spec.Devices.Interfaces[0].Driver.Queues)).To(Equal(expectedQueues),
 				"expected number of queues to equal number of requested vCPUs")
 		})
 
 		It("should not assign queues to a non-virtio devices", func() {
 			vmi.Spec.Domain.Devices.Interfaces[0].Model = "e1000"
-			domain := vmiToDomain(vmi, &ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true})
+			domain := vmiToDomain(vmi, &convertertypes.ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true})
 			Expect(domain.Spec.Devices.Interfaces[0].Driver).To(BeNil(),
 				"queues should not be set for models other than virtio")
 		})
@@ -3004,7 +3442,7 @@ var _ = Describe("Converter", func() {
 				Sockets: 1,
 				Threads: 2,
 			}
-			domain := vmiToDomain(vmi, &ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true})
+			domain := vmiToDomain(vmi, &convertertypes.ConverterContext{Architecture: archconverter.NewConverter(runtime.GOARCH), AllowEmulation: true})
 			expectedNumberQueues := uint(network.MultiQueueMaxQueues)
 			Expect(*(domain.Spec.Devices.Interfaces[0].Driver.Queues)).To(Equal(expectedNumberQueues),
 				"should be capped to the maximum number of queues on tap devices")
@@ -3013,9 +3451,9 @@ var _ = Describe("Converter", func() {
 	})
 	Context("Realtime", func() {
 		var vmi *v1.VirtualMachineInstance
-		var rtContext *ConverterContext
+		var rtContext *convertertypes.ConverterContext
 		BeforeEach(func() {
-			rtContext = &ConverterContext{
+			rtContext = &convertertypes.ConverterContext{
 				Architecture:   archconverter.NewConverter(runtime.GOARCH),
 				AllowEmulation: true,
 				CPUSet:         []int{0, 1, 2, 3, 4},
@@ -3051,7 +3489,7 @@ var _ = Describe("Converter", func() {
 
 	Context("Bootloader", func() {
 		var vmi *v1.VirtualMachineInstance
-		var c *ConverterContext
+		var c *convertertypes.ConverterContext
 
 		BeforeEach(func() {
 			vmi = &v1.VirtualMachineInstance{
@@ -3063,7 +3501,7 @@ var _ = Describe("Converter", func() {
 
 			v1.SetObjectDefaults_VirtualMachineInstance(vmi)
 
-			c = &ConverterContext{
+			c = &convertertypes.ConverterContext{
 				Architecture:   archconverter.NewConverter(runtime.GOARCH),
 				VirtualMachine: vmi,
 				AllowEmulation: true,
@@ -3102,7 +3540,7 @@ var _ = Describe("Converter", func() {
 		})
 
 		DescribeTable("EFI bootloader", func(secureBoot *bool, efiCode, efiVars string) {
-			c.EFIConfiguration = &EFIConfiguration{
+			c.EFIConfiguration = &convertertypes.EFIConfiguration{
 				EFICode:      efiCode,
 				EFIVars:      efiVars,
 				SecureLoader: secureBoot == nil || *secureBoot,
@@ -3136,7 +3574,7 @@ var _ = Describe("Converter", func() {
 		)
 
 		It("EFI vars should be in the right place when running as root", func() {
-			c.EFIConfiguration = &EFIConfiguration{
+			c.EFIConfiguration = &convertertypes.EFIConfiguration{
 				EFICode:      "OVMF_CODE.fd",
 				EFIVars:      "OVMF_VARS.fd",
 				SecureLoader: false,
@@ -3160,12 +3598,12 @@ var _ = Describe("Converter", func() {
 
 		DescribeTable("display device should be set to", func(arch string, bootloader v1.Bootloader, enableFG bool, expectedDevice string) {
 			vmi.Spec.Domain.Firmware = &v1.Firmware{Bootloader: &bootloader}
-			c = &ConverterContext{
+			c = &convertertypes.ConverterContext{
 				Architecture:      archconverter.NewConverter(arch),
 				BochsForEFIGuests: enableFG,
 				VirtualMachine:    vmi,
 				AllowEmulation:    true,
-				EFIConfiguration:  &EFIConfiguration{},
+				EFIConfiguration:  &convertertypes.EFIConfiguration{},
 			}
 			domainSpec := vmiToDomainXMLToDomainSpec(vmi, c)
 			Expect(domainSpec.Devices.Video).To(HaveLen(1))
@@ -3207,7 +3645,7 @@ var _ = Describe("Converter", func() {
 			}
 			vmi.Spec.Domain.Firmware = &v1.Firmware{ACPI: acpi}
 
-			c = &ConverterContext{
+			c = &convertertypes.ConverterContext{
 				Architecture:   archconverter.NewConverter(runtime.GOARCH),
 				VirtualMachine: vmi,
 				AllowEmulation: true,
@@ -3296,14 +3734,14 @@ var _ = Describe("Converter", func() {
 
 	Context("Kernel Boot", func() {
 		var vmi *v1.VirtualMachineInstance
-		var c *ConverterContext
+		var c *convertertypes.ConverterContext
 
 		BeforeEach(func() {
 			vmi = &v1.VirtualMachineInstance{}
 
 			v1.SetObjectDefaults_VirtualMachineInstance(vmi)
 
-			c = &ConverterContext{
+			c = &convertertypes.ConverterContext{
 				Architecture:   archconverter.NewConverter(runtime.GOARCH),
 				VirtualMachine: vmi,
 				AllowEmulation: true,
@@ -3350,11 +3788,11 @@ var _ = Describe("Converter", func() {
 
 	Context("hotplug", func() {
 		var vmi *v1.VirtualMachineInstance
-		var c *ConverterContext
+		var c *convertertypes.ConverterContext
 
 		Context("disk", func() {
 
-			type ConverterFunc = func(name string, disk *api.Disk, c *ConverterContext) error
+			type ConverterFunc = func(name string, disk *api.Disk, c *convertertypes.ConverterContext) error
 
 			BeforeEach(func() {
 				vmi = &v1.VirtualMachineInstance{
@@ -3366,7 +3804,7 @@ var _ = Describe("Converter", func() {
 
 				v1.SetObjectDefaults_VirtualMachineInstance(vmi)
 
-				c = &ConverterContext{
+				c = &convertertypes.ConverterContext{
 					Architecture:   archconverter.NewConverter(runtime.GOARCH),
 					VirtualMachine: vmi,
 					AllowEmulation: true,
@@ -3508,125 +3946,12 @@ var _ = Describe("Converter", func() {
 					v1.VolumeSource{DataVolume: &v1.DataVolumeSource{Name: "test-hotplug-block-dv", Hotpluggable: true}}, true),
 			)
 		})
-
-		Context("memory", func() {
-			var domain *api.Domain
-			var guestMemory resource.Quantity
-			var maxGuestMemory resource.Quantity
-
-			BeforeEach(func() {
-				guestMemory = resource.MustParse("32Mi")
-				maxGuestMemory = resource.MustParse("128Mi")
-
-				vmi = &v1.VirtualMachineInstance{
-					ObjectMeta: k8smeta.ObjectMeta{
-						Name:      "testvmi",
-						Namespace: "mynamespace",
-					},
-					Spec: v1.VirtualMachineInstanceSpec{
-						Domain: v1.DomainSpec{
-							Memory: &v1.Memory{
-								Guest:    &guestMemory,
-								MaxGuest: &maxGuestMemory,
-							},
-						},
-					},
-					Status: v1.VirtualMachineInstanceStatus{
-						Memory: &v1.MemoryStatus{
-							GuestAtBoot:  &guestMemory,
-							GuestCurrent: &guestMemory,
-						},
-					},
-				}
-
-				domain = &api.Domain{
-					Spec: api.DomainSpec{
-						VCPU: &api.VCPU{
-							CPUs: 2,
-						},
-					},
-				}
-
-				v1.SetObjectDefaults_VirtualMachineInstance(vmi)
-
-				c = &ConverterContext{
-					VirtualMachine: vmi,
-					AllowEmulation: true,
-				}
-			})
-
-			It("should not setup hotplug when maxGuest is missing", func() {
-				vmi.Spec.Domain.Memory.MaxGuest = nil
-				err := setupDomainMemory(vmi, domain)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(domain.Spec.MaxMemory).To(BeNil())
-			})
-
-			It("should not setup hotplug when maxGuest equals guest memory", func() {
-				vmi.Spec.Domain.Memory.MaxGuest = &guestMemory
-				err := setupDomainMemory(vmi, domain)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(domain.Spec.MaxMemory).To(BeNil())
-			})
-
-			It("should setup hotplug when maxGuest is set", func() {
-				err := setupDomainMemory(vmi, domain)
-				Expect(err).ToNot(HaveOccurred())
-
-				Expect(domain.Spec.MaxMemory).ToNot(BeNil())
-				Expect(domain.Spec.MaxMemory.Unit).To(Equal("b"))
-				Expect(domain.Spec.MaxMemory.Value).To(Equal(uint64(maxGuestMemory.Value())))
-
-				Expect(domain.Spec.Memory).ToNot(BeNil())
-				Expect(domain.Spec.Memory.Unit).To(Equal("b"))
-				Expect(domain.Spec.Memory.Value).To(Equal(uint64(guestMemory.Value())))
-			})
-
-			DescribeTable("should correctly convert memory configuration from VMI spec to domain",
-				func(expectedMemoryMiB int64, opts ...libvmi.Option) {
-
-					vmi := libvmi.New(opts...)
-
-					v1.SetObjectDefaults_VirtualMachineInstance(vmi)
-
-					testContext := &ConverterContext{
-						VirtualMachine: vmi,
-						AllowEmulation: true,
-						Architecture:   archconverter.NewConverter(runtime.GOARCH),
-					}
-
-					apiDomainSpec := vmiToDomainXMLToDomainSpec(vmi, testContext)
-
-					expectedBytes := expectedMemoryMiB * 1024 * 1024
-					Expect(apiDomainSpec.Memory.Value).To(Equal(uint64(expectedBytes)),
-						"Memory value should be %d bytes (%d MiB)", expectedBytes, expectedMemoryMiB)
-					Expect(apiDomainSpec.Memory.Unit).To(Equal("b"))
-				},
-				Entry("provided by domain spec directly (guest memory takes precedence over limits)",
-					int64(512),
-					libvmi.WithGuestMemory("512Mi"),
-				),
-				Entry("provided by resources limits (no guest memory, no request)",
-					int64(256),
-					libvmi.WithMemoryLimit("256Mi"),
-				),
-				Entry("provided by resources requests (request takes precedence over limit when both set)",
-					int64(64),
-					libvmi.WithMemoryRequest("64Mi"),
-					libvmi.WithMemoryLimit("256Gi"),
-				),
-				Entry("provided by resources requests only",
-					int64(128),
-					libvmi.WithMemoryRequest("128Mi"),
-				),
-			)
-		})
 	})
 
 	Context("with AMD SEV LaunchSecurity", func() {
 		var (
 			vmi *v1.VirtualMachineInstance
-			c   *ConverterContext
+			c   *convertertypes.ConverterContext
 		)
 
 		BeforeEach(func() {
@@ -3657,11 +3982,15 @@ var _ = Describe("Converter", func() {
 					},
 				},
 			}
-			c = &ConverterContext{
+			c = &convertertypes.ConverterContext{
 				Architecture:         archconverter.NewConverter(amd64),
 				AllowEmulation:       true,
-				EFIConfiguration:     &EFIConfiguration{},
+				EFIConfiguration:     &convertertypes.EFIConfiguration{},
 				UseLaunchSecuritySEV: true,
+				DomainAttachmentByInterfaceName: map[string]string{
+					"default": string(v1.Tap),
+					"red":     string(v1.Tap),
+				},
 			}
 		})
 
@@ -3740,7 +4069,7 @@ var _ = Describe("Converter", func() {
 	Context("with Secure Execution LaunchSecurity", func() {
 		var (
 			vmi *v1.VirtualMachineInstance
-			c   *ConverterContext
+			c   *convertertypes.ConverterContext
 		)
 
 		BeforeEach(func() {
@@ -3777,7 +4106,7 @@ var _ = Describe("Converter", func() {
 				*v1.DefaultPodNetwork(), secondaryNetwork,
 			}
 			vmi.Spec.Domain.LaunchSecurity = &v1.LaunchSecurity{}
-			c = &ConverterContext{
+			c = &convertertypes.ConverterContext{
 				Architecture:        archconverter.NewConverter(s390x),
 				AllowEmulation:      true,
 				UseLaunchSecurityPV: true,
@@ -3828,7 +4157,7 @@ var _ = Describe("Converter", func() {
 	Context("with Intel TDX LaunchSecurity", func() {
 		var (
 			vmi *v1.VirtualMachineInstance
-			c   *ConverterContext
+			c   *convertertypes.ConverterContext
 		)
 
 		BeforeEach(func() {
@@ -3857,10 +4186,10 @@ var _ = Describe("Converter", func() {
 					},
 				},
 			}
-			c = &ConverterContext{
+			c = &convertertypes.ConverterContext{
 				Architecture:         archconverter.NewConverter(amd64),
 				AllowEmulation:       true,
-				EFIConfiguration:     &EFIConfiguration{},
+				EFIConfiguration:     &convertertypes.EFIConfiguration{},
 				UseLaunchSecurityTDX: true,
 			}
 		})
@@ -3876,7 +4205,7 @@ var _ = Describe("Converter", func() {
 	Context("when TSC Frequency", func() {
 		var (
 			vmi *v1.VirtualMachineInstance
-			c   *ConverterContext
+			c   *convertertypes.ConverterContext
 		)
 
 		const fakeFrequency = 12345
@@ -3885,7 +4214,7 @@ var _ = Describe("Converter", func() {
 			vmi = kvapi.NewMinimalVMI("testvmi")
 			v1.SetObjectDefaults_VirtualMachineInstance(vmi)
 			vmi.Status.TopologyHints = &v1.TopologyHints{TSCFrequency: pointer.P(int64(fakeFrequency))}
-			c = &ConverterContext{
+			c = &convertertypes.ConverterContext{
 				Architecture:   archconverter.NewConverter(runtime.GOARCH),
 				AllowEmulation: true,
 			}
@@ -3951,7 +4280,7 @@ var _ = Describe("Converter", func() {
 	Context("with FreePageReporting", func() {
 		var (
 			vmi *v1.VirtualMachineInstance
-			c   *ConverterContext
+			c   *convertertypes.ConverterContext
 		)
 
 		BeforeEach(func() {
@@ -3960,7 +4289,7 @@ var _ = Describe("Converter", func() {
 		})
 
 		DescribeTable("should set freePageReporting attribute of memballooning device, accordingly to the context value", func(freePageReporting bool, expectedValue string) {
-			c = &ConverterContext{
+			c = &convertertypes.ConverterContext{
 				Architecture:      archconverter.NewConverter(runtime.GOARCH),
 				FreePageReporting: freePageReporting,
 				AllowEmulation:    true,
@@ -3980,7 +4309,7 @@ var _ = Describe("Converter", func() {
 	Context("with Paused strategy", func() {
 		var (
 			vmi *v1.VirtualMachineInstance
-			c   *ConverterContext
+			c   *convertertypes.ConverterContext
 		)
 
 		BeforeEach(func() {
@@ -3989,7 +4318,7 @@ var _ = Describe("Converter", func() {
 		})
 
 		DescribeTable("bootmenu should be", func(startPaused bool) {
-			c = &ConverterContext{
+			c = &convertertypes.ConverterContext{
 				Architecture:   archconverter.NewConverter(runtime.GOARCH),
 				AllowEmulation: true,
 			}
@@ -4020,7 +4349,7 @@ var _ = Describe("Converter", func() {
 			vmi.Spec.Domain.Devices.TPM = vmiTPM
 			domain := vmiToDomain(
 				vmi,
-				&ConverterContext{
+				&convertertypes.ConverterContext{
 					Architecture:   archconverter.NewConverter(runtime.GOARCH),
 					AllowEmulation: true,
 				},
@@ -4110,6 +4439,34 @@ var _ = Describe("disk device naming", func() {
 		res, index = makeDeviceName("something", "scsi", prefixMap)
 		Expect(res).To(Equal("sda"))
 		Expect(index).To(Equal(0))
+	})
+
+	It("makeDeviceName should fill target gap when mixed bus types share same prefix", func() {
+		By("Setting up prefixMap simulating: SCSI boot=sda, SATA cdrom=sdc, SATA cloudinit=sdd, sdb available")
+		prefixMap := map[string]deviceNamer{
+			"sd": {
+				existingNameMap: map[string]string{
+					"boot":      "sda",
+					"cdrom":     "sdc",
+					"cloudinit": "sdd",
+				},
+				usedDeviceMap: map[string]string{
+					"sda": "boot",
+					"sdc": "cdrom",
+					"sdd": "cloudinit",
+				},
+			},
+		}
+
+		By("Adding new SCSI disk - should get sdb (the available gap)")
+		res, index := makeDeviceName("newhotplug", v1.DiskBusSCSI, prefixMap)
+		Expect(res).To(Equal("sdb"), "new disk should fill the gap at sdb")
+		Expect(index).To(Equal(1))
+
+		By("Adding another SCSI disk - should get sde (next available after sdd)")
+		res, index = makeDeviceName("anotherhotplug", v1.DiskBusSCSI, prefixMap)
+		Expect(res).To(Equal("sde"))
+		Expect(index).To(Equal(4))
 	})
 })
 
@@ -4219,35 +4576,131 @@ var _ = Describe("Driver Cache and IO Settings", func() {
 		Entry("'writethrough' on error", string(v1.CacheWriteThrough), string(v1.CacheWriteThrough), expectCheckError),
 	)
 
+	It("should fail to set appropriate driver cache mode for a nil disk", func() {
+		Expect(SetDriverCacheMode(nil, nil)).To(MatchError("unable to set a driver cache mode, disk is nil"))
+	})
+
+	It("should check block device paths correctly", func() {
+		disk := &api.Disk{
+			Source: api.DiskSource{Dev: "/dev/vda"},
+			Driver: &api.DiskDriver{},
+		}
+		mockDirectIOChecker.EXPECT().CheckBlockDevice("/dev/vda").Return(true, nil)
+
+		Expect(SetDriverCacheMode(disk, mockDirectIOChecker)).To(Succeed())
+		Expect(disk.Driver.Cache).To(Equal(string(v1.CacheNone)))
+	})
+
+	It("should resolve datastore block dev over frontend file source", func() {
+		disk := &api.Disk{
+			Source: api.DiskSource{
+				File: "/test/overlay.qcow2",
+				DataStore: &api.DataStore{
+					Source: &api.DiskSource{Dev: "/dev/vda"},
+				},
+			},
+			Driver: &api.DiskDriver{},
+		}
+		mockDirectIOChecker.EXPECT().CheckBlockDevice("/dev/vda").Return(true, nil)
+
+		Expect(SetDriverCacheMode(disk, mockDirectIOChecker)).To(Succeed())
+	})
 	DescribeTable("should set appropriate IO modes", func(disk *api.Disk, expectedIO v1.DriverIO, isPreAllocated bool) {
 		SetOptimalIOMode(disk, func(path string) bool { return isPreAllocated })
 		Expect(disk.Driver.IO).To(Equal(expectedIO))
 	},
-		Entry("user-specified IO", &api.Disk{Driver: &api.DiskDriver{IO: v1.IOThreads}}, v1.IOThreads, false),
-		Entry("sparse image", &api.Disk{Source: api.DiskSource{File: "test.img"}, Driver: &api.DiskDriver{}}, v1.DriverIO(""), false),
-		Entry("pre-allocated image with O_DIRECT", &api.Disk{Source: api.DiskSource{File: "test.img"}, Driver: &api.DiskDriver{Cache: string(v1.CacheNone)}}, v1.IONative, true),
-		Entry("pre-allocated image without O_DIRECT", &api.Disk{Source: api.DiskSource{File: "test.img"}, Driver: &api.DiskDriver{Cache: string(v1.CacheWriteThrough)}}, v1.DriverIO(""), true),
-		Entry("block device with O_DIRECT", &api.Disk{Source: api.DiskSource{Dev: "/dev/test"}, Driver: &api.DiskDriver{Cache: string(v1.CacheNone)}}, v1.IONative, true),
+		Entry("user-specified IO",
+			&api.Disk{Driver: &api.DiskDriver{IO: v1.IOThreads}},
+			v1.IOThreads, false,
+		),
+		Entry("sparse image",
+			&api.Disk{Source: api.DiskSource{File: "test.img"}, Driver: &api.DiskDriver{}},
+			v1.DriverIO(""), false,
+		),
+		Entry("pre-allocated image with O_DIRECT",
+			&api.Disk{Source: api.DiskSource{File: "test.img"}, Driver: &api.DiskDriver{Cache: string(v1.CacheNone)}},
+			v1.IONative, true,
+		),
+		Entry("pre-allocated image without O_DIRECT",
+			&api.Disk{Source: api.DiskSource{File: "test.img"}, Driver: &api.DiskDriver{Cache: string(v1.CacheWriteThrough)}},
+			v1.DriverIO(""), true,
+		),
+		Entry("block device with O_DIRECT",
+			&api.Disk{Source: api.DiskSource{Dev: "/dev/test"}, Driver: &api.DiskDriver{Cache: string(v1.CacheNone)}},
+			v1.IONative, true,
+		),
+		Entry("datastore block device with O_DIRECT",
+			&api.Disk{
+				Source: api.DiskSource{
+					File: "/test/overlay.qcow2",
+					DataStore: &api.DataStore{
+						Type:   "block",
+						Source: &api.DiskSource{Dev: "/dev/vda"},
+					},
+				},
+				Driver: &api.DiskDriver{Cache: string(v1.CacheNone)},
+			},
+			v1.IONative, false,
+		),
+		Entry("datastore block device without O_DIRECT",
+			&api.Disk{
+				Source: api.DiskSource{
+					File: "/test/overlay.qcow2",
+					DataStore: &api.DataStore{
+						Type:   "block",
+						Source: &api.DiskSource{Dev: "/dev/vda"},
+					},
+				},
+				Driver: &api.DiskDriver{Cache: string(v1.CacheWriteThrough)},
+			},
+			v1.DriverIO(""), false,
+		),
+		Entry("datastore file backend pre-allocated with O_DIRECT",
+			&api.Disk{
+				Source: api.DiskSource{
+					File: "/test/overlay.qcow2",
+					DataStore: &api.DataStore{
+						Type:   "file",
+						Source: &api.DiskSource{File: "/disks/disk.img"},
+					},
+				},
+				Driver: &api.DiskDriver{Cache: string(v1.CacheNone)},
+			},
+			v1.IONative, true,
+		),
+		Entry("datastore file backend sparse with O_DIRECT",
+			&api.Disk{
+				Source: api.DiskSource{
+					File: "/test/overlay.qcow2",
+					DataStore: &api.DataStore{
+						Type:   "file",
+						Source: &api.DiskSource{File: "/disks/disk.img"},
+					},
+				},
+				Driver: &api.DiskDriver{Cache: string(v1.CacheNone)},
+			},
+			v1.DriverIO(""), false,
+		),
 	)
 })
 
 func diskToDiskXML(arch string, disk *v1.Disk) string {
 	devicePerBus := make(map[string]deviceNamer)
 	libvirtDisk := &api.Disk{}
-	Expect(Convert_v1_Disk_To_api_Disk(&ConverterContext{Architecture: archconverter.NewConverter(arch), UseVirtioTransitional: false}, disk, libvirtDisk, devicePerBus, nil, make(map[string]v1.VolumeStatus))).To(Succeed())
+	Expect(Convert_v1_Disk_To_api_Disk(&convertertypes.ConverterContext{Architecture: archconverter.NewConverter(arch), UseVirtioTransitional: false}, disk, libvirtDisk, devicePerBus, nil, make(map[string]v1.VolumeStatus))).To(Succeed())
 	data, err := xml.MarshalIndent(libvirtDisk, "", "  ")
 	Expect(err).ToNot(HaveOccurred())
 	return string(data)
 }
 
-func vmiToDomainXML(vmi *v1.VirtualMachineInstance, c *ConverterContext) string {
+func vmiToDomainXML(vmi *v1.VirtualMachineInstance, c *convertertypes.ConverterContext) string {
 	domain := vmiToDomain(vmi, c)
 	data, err := xml.MarshalIndent(domain.Spec, "", "  ")
 	Expect(err).ToNot(HaveOccurred())
 	return string(data)
 }
 
-func vmiToDomain(vmi *v1.VirtualMachineInstance, c *ConverterContext) *api.Domain {
+func vmiToDomain(vmi *v1.VirtualMachineInstance, c *convertertypes.ConverterContext) *api.Domain {
 	domain := &api.Domain{}
 	ExpectWithOffset(1, Convert_v1_VirtualMachineInstance_To_api_Domain(vmi, domain, c)).To(Succeed())
 	api.NewDefaulter(c.Architecture.GetArchitecture()).SetObjectDefaults_Domain(domain)
@@ -4272,19 +4725,19 @@ func xmlToDomainSpec(data string) *api.DomainSpec {
 	return newDomain
 }
 
-func vmiToDomainXMLToDomainSpec(vmi *v1.VirtualMachineInstance, c *ConverterContext) *api.DomainSpec {
+func vmiToDomainXMLToDomainSpec(vmi *v1.VirtualMachineInstance, c *convertertypes.ConverterContext) *api.DomainSpec {
 	return xmlToDomainSpec(vmiToDomainXML(vmi, c))
 }
 
 // As the arch specific default disk is set in the mutating webhook, so in some tests,
 // it needs to run the mutate function before verifying converter
-func vmiArchMutate(arch string, vmi *v1.VirtualMachineInstance, c *ConverterContext) {
+func vmiArchMutate(arch string, vmi *v1.VirtualMachineInstance, c *convertertypes.ConverterContext) {
 	switch arch {
 	case arm64:
 		defaults.SetArm64Defaults(&vmi.Spec)
 		// bootloader has been initialized in webhooks.SetArm64Defaults,
 		// c.EFIConfiguration.SecureLoader is needed in the converter.Convert_v1_VirtualMachineInstance_To_api_Domain.
-		c.EFIConfiguration = &EFIConfiguration{
+		c.EFIConfiguration = &convertertypes.EFIConfiguration{
 			SecureLoader: false,
 		}
 	case amd64:

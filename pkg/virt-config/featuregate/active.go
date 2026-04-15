@@ -20,7 +20,6 @@
 package featuregate
 
 const (
-	ExpandDisksGate       = "ExpandDisks"
 	CPUManager            = "CPUManager"
 	IgnitionGate          = "ExperimentalIgnitionSupport"
 	HypervStrictCheckGate = "HypervStrictCheck"
@@ -35,7 +34,6 @@ const (
 	// Owner: sig-storage
 	// Alpha: v0.55.0
 	// Beta: v1.3.0
-	VMExportGate       = "VMExport"
 	HotplugVolumesGate = "HotplugVolumes"
 	HostDiskGate       = "HostDisk"
 
@@ -108,6 +106,12 @@ const (
 	// HostDevicesWithDRAGate allows users to create VMIs with DRA provisioned Host devices
 	HostDevicesWithDRAGate = "HostDevicesWithDRA"
 
+	// Owner: @mresvanis
+	// Alpha: v1.6.0
+	//
+	// PCINUMAAwareTopologyEnabled enables NUMA-aware PCIe topology mapping for passthrough devices
+	PCINUMAAwareTopologyEnabled = "PCINUMAAwareTopology"
+
 	DecentralizedLiveMigration = "DecentralizedLiveMigration"
 
 	// Owner: sig-storage / @alromeros
@@ -137,17 +141,10 @@ const (
 	//
 	VideoConfig = "VideoConfig"
 
-	// Owner: @varunrsekar
-	// Alpha: v1.6.0
-	// Beta: v1.7.0
+	// Beta: v1.8.0
 	//
-	// PanicDevices allows defining panic devices for signaling crashes in the guest for a VirtualMachineInstance.
-	PanicDevicesGate = "PanicDevices"
-
-	// Alpha: v1.6.0
-	//
-	// PasstIPStackMigration enables seamless migration with passt network binding.
-	PasstIPStackMigration = "PasstIPStackMigration"
+	// PasstBinding enables the use of passt core network binding
+	PasstBinding = "PasstBinding"
 
 	// MigrationPriorityQueue enables controllers to assign priorities to migrations,
 	// ensuring system-initiated migrations (e.g., node drains, upgrades) take precedence
@@ -165,19 +162,83 @@ const (
 	// Details of the new hypervisors should be specified via the
 	// HypervisorConfigurations field in KubeVirtConfiguration.
 	ConfigurableHypervisor = "ConfigurableHypervisor"
+
+	// PodSecondaryInterfaceNamingUpgrade enables the upgrade mechanism for VMs
+	// stuck with the obsolete ordinal naming scheme for their pod secondary networks
+	// Owner: SIG network
+	// Beta: v1.8
+	PodSecondaryInterfaceNamingUpgrade = "PodSecondaryInterfaceNamingUpgrade"
+
+	// ExternalNetResourceInjection disables the VMI controller query of NetworkAttachmentDefinition objects and
+	// the deployment of related RBAC rules by virt-operator.
+	// Owner: SIG network
+	// Beta: v1.8.0
+	ExternalNetResourceInjection = "ExternalNetResourceInjection"
+
+	// Owner: sig-compute / @MarSik
+	// Alpha: v1.8.0
+	//
+	// RebootPolicy enables setting the RebootPolicy field on VMI's DomainSpec
+	// which allows terminating the VMI on guest reboot instead of silently rebooting,
+	// enabling the VM controller to recreate the VMI with updated configuration.
+	RebootPolicy = "RebootPolicy"
+
+	// Owner: sig-compute / @0xFelix
+	// Template enables the deployment of virt-template components by virt-operator.
+	// Alpha: v1.8.0
+	Template = "Template"
+
+	// Owner: @bmordeha
+	// Alpha: v1.8.0
+	//
+	// VmiMemoryOverheadReport enables reporting the memory overhead in the VMI status.
+	// When enabled, the memory overhead is calculated and set in the VMI status.Memory.MemoryOverhead field.
+	VmiMemoryOverheadReport = "VmiMemoryOverheadReport"
+
+	// Owner: sig-storage / @mhenriks
+	// Alpha: v1.8.0
+	//
+	// ContainerPathVolumes enables exposing virt-launcher volumeMount paths to the VM
+	// via virtiofs. This allows VMs to access credentials and tokens injected into pods
+	// by external systems such as AWS IRSA, GKE Workload Identity, or TEE attestation.
+	ContainerPathVolumesGate = "ContainerPathVolumes"
+
+	// Enables using the spec.domain.memory.ReservedOverhead field which
+	// can specify some required memory overhead as well as whether VM
+	// memory (and overhead) needs to be locked or not
+	// Owner: sig-compute / @bgartzi
+	// Alpha: v1.8.0
+	ReservedOverheadMemlock = "ReservedOverheadMemlock"
+
+	// Owner: @orenc1
+	// Alpha: v1.8.0
+	//
+	// OptOutRoleAggregation enables the RoleAggregationStrategy field in KubeVirtConfiguration,
+	// allowing users to opt out of aggregating KubeVirt ClusterRoles to the default Kubernetes roles.
+	OptOutRoleAggregation = "OptOutRoleAggregation"
+
+	// LiveUpdateNADRef enables dynamic modification of NAD references for secondary networks on running VMs.
+	// Owner: SIG network
+	// Beta: v1.8
+	LiveUpdateNADRef = "LiveUpdateNADRef"
+
+	// Owner: @csomani1
+	// Alpha: v1.8.0
+	//
+	// The VGPULiveMigration fg enables the vGPU hook to run for vGPU live migrations, allowing the
+	// target XML's mdev UUID to be mutated.
+	VGPULiveMigration = "VGPULiveMigration"
 )
 
 func init() {
 	RegisterFeatureGate(FeatureGate{Name: LibvirtHooksServerAndClient, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: ImageVolume, State: Beta})
-	RegisterFeatureGate(FeatureGate{Name: ExpandDisksGate, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: CPUManager, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: IgnitionGate, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: HypervStrictCheckGate, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: SidecarGate, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: HostDevicesGate, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: SnapshotGate, State: Beta})
-	RegisterFeatureGate(FeatureGate{Name: VMExportGate, State: Beta})
 	RegisterFeatureGate(FeatureGate{Name: HotplugVolumesGate, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: HostDiskGate, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: DownwardMetricsFeatureGate, State: Alpha})
@@ -192,14 +253,24 @@ func init() {
 	RegisterFeatureGate(FeatureGate{Name: VirtIOFSStorageVolumeGate, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: GPUsWithDRAGate, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: HostDevicesWithDRAGate, State: Alpha})
+	RegisterFeatureGate(FeatureGate{Name: PCINUMAAwareTopologyEnabled, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: DecentralizedLiveMigration, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: DeclarativeHotplugVolumesGate, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: SecureExecution, State: Beta})
 	RegisterFeatureGate(FeatureGate{Name: VideoConfig, State: Beta})
-	RegisterFeatureGate(FeatureGate{Name: PanicDevicesGate, State: Beta})
 	RegisterFeatureGate(FeatureGate{Name: UtilityVolumesGate, State: Alpha})
-	RegisterFeatureGate(FeatureGate{Name: PasstIPStackMigration, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: ConfigurableHypervisor, State: Alpha})
+	RegisterFeatureGate(FeatureGate{Name: PasstBinding, State: Beta})
 	RegisterFeatureGate(FeatureGate{Name: IncrementalBackupGate, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: MigrationPriorityQueue, State: Beta})
+	RegisterFeatureGate(FeatureGate{Name: PodSecondaryInterfaceNamingUpgrade, State: Beta})
+	RegisterFeatureGate(FeatureGate{Name: ExternalNetResourceInjection, State: Beta})
+	RegisterFeatureGate(FeatureGate{Name: RebootPolicy, State: Alpha})
+	RegisterFeatureGate(FeatureGate{Name: Template, State: Alpha})
+	RegisterFeatureGate(FeatureGate{Name: VmiMemoryOverheadReport, State: Alpha})
+	RegisterFeatureGate(FeatureGate{Name: ContainerPathVolumesGate, State: Alpha})
+	RegisterFeatureGate(FeatureGate{Name: ReservedOverheadMemlock, State: Alpha})
+	RegisterFeatureGate(FeatureGate{Name: OptOutRoleAggregation, State: Alpha})
+	RegisterFeatureGate(FeatureGate{Name: LiveUpdateNADRef, State: Beta})
+	RegisterFeatureGate(FeatureGate{Name: VGPULiveMigration, State: Alpha})
 }

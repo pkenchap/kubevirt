@@ -135,7 +135,7 @@ func (l *Launcher) CancelVirtualMachineMigration(_ context.Context, request *cmd
 		return response, nil
 	}
 
-	log.Log.Object(vmi).Info("Live migration as been aborted")
+	log.Log.Object(vmi).Info("Live migration has been aborted")
 	return response, nil
 
 }
@@ -647,25 +647,23 @@ func RunServer(socketPath string,
 	done := make(chan struct{})
 
 	go func() {
-		select {
-		case <-stopChan:
-			log.Log.Info("stopping cmd server")
-			stopped := make(chan struct{})
-			go func() {
-				grpcServer.Stop()
-				close(stopped)
-			}()
+		<-stopChan
+		log.Log.Info("stopping cmd server")
+		stopped := make(chan struct{})
+		go func() {
+			grpcServer.Stop()
+			close(stopped)
+		}()
 
-			select {
-			case <-stopped:
-				log.Log.Info("cmd server stopped")
-			case <-time.After(1 * time.Second):
-				log.Log.Error("timeout on stopping the cmd server, continuing anyway.")
-			}
-			sock.Close()
-			os.Remove(socketPath)
-			close(done)
+		select {
+		case <-stopped:
+			log.Log.Info("cmd server stopped")
+		case <-time.After(1 * time.Second):
+			log.Log.Error("timeout on stopping the cmd server, continuing anyway.")
 		}
+		sock.Close()
+		os.Remove(socketPath)
+		close(done)
 	}()
 
 	go func() {
@@ -822,14 +820,56 @@ func getBackupOptionsFromRequest(request *cmdv1.BackupRequest) (*backupv1.Backup
 		return nil, fmt.Errorf("no valid backup options object present in command server request: %v", err)
 	}
 
-	if options.Mode != backupv1.PushMode {
-		return nil, fmt.Errorf("currently only backup in push mode is supported")
-	}
-	if options.PushPath == nil {
-		return nil, fmt.Errorf("backup with push mode - pushPath wasn't provided")
+	switch options.Cmd {
+	case backupv1.Start:
+		switch options.Mode {
+		case backupv1.PushMode, backupv1.PullMode:
+			if options.TargetPath == nil {
+				return nil, fmt.Errorf("backup targetPath wasn't provided")
+			}
+		default:
+			return nil, fmt.Errorf("unknown backup mode: only Push and Pull are supported")
+		}
+	case backupv1.Export:
+		if err := validateBackupExportRequest(options); err != nil {
+			return nil, err
+		}
+		return options, nil
+	case backupv1.Abort:
+		return options, nil
+	default:
+		return nil, fmt.Errorf("cmd unsupported, backup command only supports start or abort")
 	}
 
 	return options, nil
+}
+
+func validateBackupExportRequest(options *backupv1.BackupOptions) error {
+	if options.Mode != backupv1.PullMode {
+		return fmt.Errorf("can only export Pull mode backup")
+	}
+	if options.ExportServerAddr == nil {
+		return fmt.Errorf("backup export server address wasn't provided")
+	}
+	if options.ExportServerName == nil {
+		return fmt.Errorf("backup export server name wasn't provided")
+	}
+	if options.BackupName == "" {
+		return fmt.Errorf("backup name wasn't provided")
+	}
+	if options.BackupStartTime == nil {
+		return fmt.Errorf("backup start time wasn't provided")
+	}
+	if options.BackupCert == nil {
+		return fmt.Errorf("backup certificate wasn't provided")
+	}
+	if options.BackupKey == nil {
+		return fmt.Errorf("backup key wasn't provided")
+	}
+	if options.CACert == nil {
+		return fmt.Errorf("backup export server CA cert wasn't provided")
+	}
+	return nil
 }
 
 func (l *Launcher) BackupVirtualMachine(_ context.Context, request *cmdv1.BackupRequest) (*cmdv1.Response, error) {
@@ -860,4 +900,54 @@ func (l *Launcher) BackupVirtualMachine(_ context.Context, request *cmdv1.Backup
 
 	log.Log.Object(vmi).Info("VMI backup job initiated")
 	return response, nil
+}
+
+func (l *Launcher) RedefineCheckpoint(_ context.Context, request *cmdv1.RedefineCheckpointRequest) (*cmdv1.RedefineCheckpointResponse, error) {
+	vmi, response := getVMIFromRequest(request.Vmi)
+	if !response.Success {
+		return &cmdv1.RedefineCheckpointResponse{
+			Response:          response,
+			CheckpointInvalid: false,
+		}, nil
+	}
+
+	if !storage.IsChangedBlockTrackingEnabled(vmi) {
+		return &cmdv1.RedefineCheckpointResponse{
+			Response: &cmdv1.Response{
+				Success: false,
+				Message: "Redefine checkpoint failed: ChangedBlockTracking is not enabled",
+			},
+			CheckpointInvalid: false,
+		}, nil
+	}
+
+	checkpoint := &backupv1.BackupCheckpoint{}
+	if err := json.Unmarshal(request.Checkpoint, checkpoint); err != nil {
+		return &cmdv1.RedefineCheckpointResponse{
+			Response: &cmdv1.Response{
+				Success: false,
+				Message: fmt.Sprintf("Redefine checkpoint failed: invalid checkpoint info: %v", err),
+			},
+			CheckpointInvalid: false,
+		}, nil
+	}
+
+	checkpointInvalid, err := l.domainManager.RedefineCheckpoint(vmi, checkpoint)
+	if err != nil {
+		log.Log.Object(vmi).Reason(err).Errorf("Failed to redefine checkpoint %s", checkpoint.Name)
+		return &cmdv1.RedefineCheckpointResponse{
+			Response: &cmdv1.Response{
+				Success: false,
+				Message: err.Error(),
+			},
+			CheckpointInvalid: checkpointInvalid,
+		}, nil
+	}
+
+	log.Log.Object(vmi).Infof("Checkpoint %s redefined successfully", checkpoint.Name)
+	return &cmdv1.RedefineCheckpointResponse{
+		Response: &cmdv1.Response{
+			Success: true,
+		},
+	}, nil
 }

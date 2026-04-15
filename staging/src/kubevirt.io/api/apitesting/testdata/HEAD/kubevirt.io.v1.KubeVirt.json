@@ -89,6 +89,9 @@
         "featureGates": [
           "featureGatesValue"
         ],
+        "disabledFeatureGates": [
+          "disabledFeatureGatesValue"
+        ],
         "pvcTolerateLessSpaceUpToPercent": -31,
         "minimumReservePVCBytes": 18446744073709551594,
         "memoryOvercommit": -16,
@@ -372,6 +375,9 @@
       "commonInstancetypesDeployment": {
         "enabled": true
       },
+      "virtTemplateDeployment": {
+        "enabled": true
+      },
       "instancetype": {
         "referencePolicy": "referencePolicyValue"
       },
@@ -409,7 +415,16 @@
             }
           ]
         }
-      }
+      },
+      "confidentialCompute": {
+        "tdx": {
+          "attestation": {
+            "enforced": true,
+            "qgsSocketPath": "qgsSocketPathValue"
+          }
+        }
+      },
+      "roleAggregationStrategy": "roleAggregationStrategyValue"
     },
     "infra": {
       "nodePlacement": {

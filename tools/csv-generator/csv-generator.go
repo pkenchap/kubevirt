@@ -25,6 +25,7 @@ import (
 
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/components"
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/csv"
+	operatorutil "kubevirt.io/kubevirt/pkg/virt-operator/util"
 	"kubevirt.io/kubevirt/tools/util"
 )
 
@@ -55,6 +56,8 @@ func main() {
 	virtExportProxyImage := flag.String("virt-export-proxy-image", "", "custom image for virt-export-proxy. "+customImageExample)
 	virtExportServerImage := flag.String("virt-export-server-image", "", "custom image for virt-export-server. "+customImageExample)
 	virtSynchronizationControllerImage := flag.String("virt-synchronization-controller-image", "", "custom image for virt-synchronization-controller. "+customImageExample)
+	virtTemplateApiserverImage := flag.String("virt-template-apiserver-image", "", "custom image for virt-template-apiserver. "+customImageExample)
+	virtTemplateControllerImage := flag.String("virt-template-controller-image", "", "custom image for virt-template-controller. "+customImageExample)
 	gsImage := flag.String("gs-image", "", "custom image for gs. "+customImageExample)
 	prHelperImage := flag.String("pr-helper-image", "", "custom image for pr-helper. "+customImageExample)
 	sidecarShimImage := flag.String("sidecar-shim-image", "", "custom image for sidecar-shim. "+customImageExample)
@@ -84,6 +87,8 @@ func main() {
 		VirtExportProxyImage:               *virtExportProxyImage,
 		VirtExportServerImage:              *virtExportServerImage,
 		VirtSynchronizationControllerImage: *virtSynchronizationControllerImage,
+		VirtTemplateApiserverImage:         *virtTemplateApiserverImage,
+		VirtTemplateControllerImage:        *virtTemplateControllerImage,
 		GsImage:                            *gsImage,
 		PrHelperImage:                      *prHelperImage,
 		SidecarShimImage:                   *sidecarShimImage,
@@ -105,7 +110,15 @@ func main() {
 	}
 
 	if *dumpNetworkPolicies {
+		virtTemplateResources, err := components.NewVirtTemplateResources(&operatorutil.KubeVirtDeploymentConfig{
+			Namespace: *namespace,
+		})
+		if err != nil {
+			panic(err)
+		}
+
 		kvNPs := components.NewKubeVirtNetworkPolicies(*namespace)
+		kvNPs = append(kvNPs, virtTemplateResources.NetworkPolicies...)
 		for _, v := range kvNPs {
 			util.MarshallObject(v, os.Stdout)
 		}

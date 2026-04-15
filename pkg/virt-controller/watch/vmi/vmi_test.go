@@ -23,6 +23,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,12 +55,16 @@ import (
 	kubevirtfake "kubevirt.io/client-go/kubevirt/fake"
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
 
+	backendstorage "kubevirt.io/kubevirt/pkg/storage/backend-storage"
+	velero "kubevirt.io/kubevirt/pkg/storage/velero"
+
 	"kubevirt.io/kubevirt/pkg/libvmi"
 
 	kvcontroller "kubevirt.io/kubevirt/pkg/controller"
 	controllertesting "kubevirt.io/kubevirt/pkg/controller/testing"
 	"kubevirt.io/kubevirt/pkg/pointer"
 	"kubevirt.io/kubevirt/pkg/storage/cbt"
+	storageannotations "kubevirt.io/kubevirt/pkg/storage/pod/annotations"
 	storagetypes "kubevirt.io/kubevirt/pkg/storage/types"
 	"kubevirt.io/kubevirt/pkg/testutils"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
@@ -215,6 +220,7 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 		storageClassStore = storageClassInformer.GetStore()
 		cdiInformer, _ := testutils.NewFakeInformerFor(&cdiv1.CDIConfig{})
 		cdiConfigInformer, _ := testutils.NewFakeInformerFor(&cdiv1.CDIConfig{})
+		kubeVirtInformer, _ := testutils.NewFakeInformerFor(&virtv1.KubeVirt{})
 		rqInformer, _ := testutils.NewFakeInformerFor(&k8sv1.ResourceQuota{})
 		nsInformer, _ := testutils.NewFakeInformerFor(&k8sv1.Namespace{})
 		var qemuGid int64 = 107
@@ -238,9 +244,11 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 			storageProfileInformer,
 			cdiInformer,
 			cdiConfigInformer,
+			kubeVirtInformer,
 			config,
 			topology.NewTopologyHinter(&cache.FakeCustomStore{}, &cache.FakeCustomStore{}, config),
 			stubNetworkAnnotationsGenerator{},
+			stubStorageAnnotationsGenerator{},
 			stubNetStatusUpdate,
 			validateNetVMISpecStub(),
 			stubMigrationEvaluator{result: k8sv1.ConditionUnknown},
@@ -920,6 +928,74 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 			"Reason":  Equal("FailedCreateValidation"),
 			"Message": Equal("failed create validation: &StatusCause{Type:test,Message:test,Field:test,}"),
 		}))))
+	})
+
+	It("should fail when VMI has ContainerPath volumes but feature gate is disabled", func() {
+		vmi := newPendingVirtualMachine("testvmi")
+
+		// Add ContainerPath volume with matching filesystem
+		vmi.Spec.Volumes = append(vmi.Spec.Volumes, virtv1.Volume{
+			Name: "token-volume",
+			VolumeSource: virtv1.VolumeSource{
+				ContainerPath: &virtv1.ContainerPathVolumeSource{
+					Path: "/var/run/secrets/token",
+				},
+			},
+		})
+		vmi.Spec.Domain.Devices.Filesystems = append(vmi.Spec.Domain.Devices.Filesystems, virtv1.Filesystem{
+			Name:     "token-volume",
+			Virtiofs: &virtv1.FilesystemVirtiofs{},
+		})
+
+		addVirtualMachine(vmi)
+
+		// Feature gate is disabled by default in tests
+		sanityExecute()
+
+		testutils.ExpectEvent(recorder, virtv1.ContainerPathVolumesDisabledReason)
+		vmi, err := virtClientset.KubevirtV1().VirtualMachineInstances(vmi.Namespace).Get(context.Background(), vmi.Name, metav1.GetOptions{})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(vmi.Status.Conditions).To(ContainElement(MatchFields(IgnoreExtras, Fields{
+			"Type":   Equal(virtv1.VirtualMachineInstanceSynchronized),
+			"Status": Equal(k8sv1.ConditionFalse),
+			"Reason": Equal(virtv1.ContainerPathVolumesDisabledReason),
+		})))
+	})
+
+	It("should fail when pod is missing virtiofs containers for ContainerPath volumes", func() {
+		vmi := newPendingVirtualMachine("testvmi")
+		vmi.Status.Phase = virtv1.Scheduling
+
+		// Add ContainerPath volume with matching filesystem
+		vmi.Spec.Volumes = append(vmi.Spec.Volumes, virtv1.Volume{
+			Name: "token-volume",
+			VolumeSource: virtv1.VolumeSource{
+				ContainerPath: &virtv1.ContainerPathVolumeSource{
+					Path: "/var/run/secrets/token",
+				},
+			},
+		})
+		vmi.Spec.Domain.Devices.Filesystems = append(vmi.Spec.Domain.Devices.Filesystems, virtv1.Filesystem{
+			Name:     "token-volume",
+			Virtiofs: &virtv1.FilesystemVirtiofs{},
+		})
+
+		// Create pod WITHOUT the expected virtiofs container
+		pod := newPodForVirtualMachine(vmi, k8sv1.PodRunning)
+		addActivePods(vmi, pod.UID, "")
+		addVirtualMachine(vmi)
+		addPod(pod)
+
+		sanityExecute()
+
+		testutils.ExpectEvent(recorder, virtv1.MissingVirtiofsContainersReason)
+		vmi, err := virtClientset.KubevirtV1().VirtualMachineInstances(vmi.Namespace).Get(context.Background(), vmi.Name, metav1.GetOptions{})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(vmi.Status.Conditions).To(ContainElement(MatchFields(IgnoreExtras, Fields{
+			"Type":   Equal(virtv1.VirtualMachineInstanceSynchronized),
+			"Status": Equal(k8sv1.ConditionFalse),
+			"Reason": Equal(virtv1.MissingVirtiofsContainersReason),
+		})))
 	})
 
 	Context("On valid VirtualMachineInstance given", func() {
@@ -2328,6 +2404,104 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 			)
 		})
 
+		Context("Velero backup hook annotations", func() {
+			It("should remove Velero annotations when skip annotation is added to VMI", func() {
+				controller.storageAnnotationsGenerator = storageannotations.NewGenerator(config)
+
+				vmi := newPendingVirtualMachine("testvmi")
+				vmi.Status.Phase = virtv1.Running
+				// Start without skip annotation so Velero annotations are generated
+				delete(vmi.Annotations, velero.SkipHooksAnnotation)
+
+				pod := newPodForVirtualMachine(vmi, k8sv1.PodRunning)
+				// Start with Velero annotations on pod
+				pod.Annotations[velero.PreBackupHookContainerAnnotation] = "compute"
+				pod.Annotations[velero.PreBackupHookCommandAnnotation] = `["/usr/bin/virt-freezer", "--freeze", "--name", "testvmi", "--namespace", "default"]`
+				pod.Annotations[velero.PreBackupHookTimeoutAnnotation] = "60s"
+				pod.Annotations[velero.PostBackupHookContainerAnnotation] = "compute"
+				pod.Annotations[velero.PostBackupHookCommandAnnotation] = `["/usr/bin/virt-freezer", "--unfreeze", "--name", "testvmi", "--namespace", "default"]`
+				addVirtualMachine(vmi)
+				addActivePods(vmi, pod.UID, "")
+				addPod(pod)
+
+				// Add skip annotation to VMI
+				vmi.Annotations[velero.SkipHooksAnnotation] = "true"
+				controller.vmiIndexer.Update(vmi)
+
+				sanityExecute()
+
+				updatedPod, err := kubeClient.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(updatedPod.Annotations).ToNot(HaveKey(velero.PreBackupHookContainerAnnotation))
+				Expect(updatedPod.Annotations).ToNot(HaveKey(velero.PreBackupHookCommandAnnotation))
+				Expect(updatedPod.Annotations).ToNot(HaveKey(velero.PreBackupHookTimeoutAnnotation))
+				Expect(updatedPod.Annotations).ToNot(HaveKey(velero.PostBackupHookContainerAnnotation))
+				Expect(updatedPod.Annotations).ToNot(HaveKey(velero.PostBackupHookCommandAnnotation))
+				// Other annotations should remain
+				Expect(updatedPod.Annotations).To(HaveKeyWithValue("kubevirt.io/domain", "testvmi"))
+			})
+
+			It("should add Velero annotations when skip annotation is removed from VMI", func() {
+				controller.storageAnnotationsGenerator = storageannotations.NewGenerator(config)
+
+				vmi := newPendingVirtualMachine("testvmi")
+				vmi.Status.Phase = virtv1.Running
+				vmi.Annotations[velero.SkipHooksAnnotation] = "true"
+
+				pod := newPodForVirtualMachine(vmi, k8sv1.PodRunning)
+
+				addVirtualMachine(vmi)
+				addActivePods(vmi, pod.UID, "")
+				addPod(pod)
+
+				// Remove skip annotation from VMI
+				delete(vmi.Annotations, velero.SkipHooksAnnotation)
+				controller.vmiIndexer.Update(vmi)
+
+				sanityExecute()
+
+				updatedPod, err := kubeClient.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(updatedPod.Annotations).To(HaveKeyWithValue(velero.PreBackupHookContainerAnnotation, "compute"))
+				Expect(updatedPod.Annotations).To(HaveKey(velero.PreBackupHookCommandAnnotation))
+				Expect(updatedPod.Annotations).To(HaveKeyWithValue(velero.PreBackupHookTimeoutAnnotation, "60s"))
+				Expect(updatedPod.Annotations).To(HaveKeyWithValue(velero.PostBackupHookContainerAnnotation, "compute"))
+				Expect(updatedPod.Annotations).To(HaveKey(velero.PostBackupHookCommandAnnotation))
+			})
+
+			It("should not patch pod when Velero annotations are already in sync", func() {
+				controller.storageAnnotationsGenerator = storageannotations.NewGenerator(config)
+
+				vmi := newPendingVirtualMachine("testvmi")
+				vmi.Status.Phase = virtv1.Running
+				// Remove skip annotation so Velero annotations are generated
+				delete(vmi.Annotations, velero.SkipHooksAnnotation)
+
+				pod := newPodForVirtualMachine(vmi, k8sv1.PodRunning)
+				// Pod already has the expected Velero annotations
+				pod.Annotations[velero.PreBackupHookContainerAnnotation] = "compute"
+				pod.Annotations[velero.PreBackupHookCommandAnnotation] = `["/usr/bin/virt-freezer", "--freeze", "--name", "testvmi", "--namespace", "default"]`
+				pod.Annotations[velero.PreBackupHookTimeoutAnnotation] = "60s"
+				pod.Annotations[velero.PostBackupHookContainerAnnotation] = "compute"
+				pod.Annotations[velero.PostBackupHookCommandAnnotation] = `["/usr/bin/virt-freezer", "--unfreeze", "--name", "testvmi", "--namespace", "default"]`
+
+				addVirtualMachine(vmi)
+				addActivePods(vmi, pod.UID, "")
+				addPod(pod)
+
+				sanityExecute()
+
+				// Verify no patch action occurred
+				patchActions := 0
+				for _, action := range kubeClient.Actions() {
+					if action.GetVerb() == "patch" {
+						patchActions++
+					}
+				}
+				Expect(patchActions).To(Equal(0), "Expected no patch actions but found %d", patchActions)
+			})
+		})
+
 		Context("Descheduler annotations", func() {
 			It("should add eviction-in-progress annotation in case of VMI marked for eviction", func() {
 				vmi := newPendingVirtualMachine("testvmi")
@@ -2551,6 +2725,33 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 				controller.syncMemoryHotplug(vmi)
 
 				Expect(vmi.Labels).To(HaveKeyWithValue(virtv1.MemoryHotplugOverheadRatioLabel, overheadRatio))
+			})
+
+			It("should update memory overhead in VMI status from pod annotation", func() {
+				memoryQuantity := resource.NewQuantity(256*1024*1024, resource.BinarySI) // 256Mi
+				memory := strconv.FormatInt(memoryQuantity.Value(), 10)
+
+				vmi := newPendingVirtualMachine("testvmi")
+				vmi.Status.Phase = virtv1.Running
+				pod := newPodForVirtualMachine(vmi, k8sv1.PodRunning)
+				pod.Annotations[virtv1.MemoryOverheadAnnotationBytes] = memory
+
+				controller.updateMemoryOverheadStatusFromPod(vmi, pod)
+
+				Expect(vmi.Status.Memory).ToNot(BeNil(), "Memory status should be populated")
+				Expect(vmi.Status.Memory.MemoryOverhead).ToNot(BeNil(), "MemoryOverhead should be set")
+				Expect(vmi.Status.Memory.MemoryOverhead.Value()).To(Equal(memoryQuantity.Value()), "MemoryOverhead should match annotation value")
+			})
+
+			It("should not update memory overhead if pod annotation is missing", func() {
+				vmi := newPendingVirtualMachine("testvmi")
+				vmi.Status.Phase = virtv1.Running
+				pod := newPodForVirtualMachine(vmi, k8sv1.PodRunning)
+				delete(pod.Annotations, virtv1.MemoryOverheadAnnotationBytes)
+
+				controller.updateMemoryOverheadStatusFromPod(vmi, pod)
+
+				Expect(vmi.Status.Memory).To(BeNil(), "Memory status should remain nil")
 			})
 		})
 	})
@@ -3120,6 +3321,10 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 			return makeVolumeStatusesForUpdateWithMessage("test-pod", "abcd", virtv1.HotplugVolumeAttachedToNode, "Created hotplug attachment pod test-pod, for volume volume%d", kvcontroller.SuccessfulCreatePodReason, indexes...)
 		}
 
+		makeDetachVolumeStatus := func(indexes ...int) []virtv1.VolumeStatus {
+			return makeVolumeStatusesForUpdateWithMessage("test-pod", "abcd", virtv1.HotplugVolumeDetaching, "Deleted hotplug attachment pod test-pod, for volume%d", kvcontroller.SuccessfulDeletePodReason, indexes...)
+		}
+
 		DescribeTable("updateVolumeStatus", func(oldStatus []virtv1.VolumeStatus, specVolumes []*virtv1.Volume, podIndexes []int, pvcIndexes []int, expectedStatus []virtv1.VolumeStatus, expectedEvents []string) {
 			vmi := newPendingVirtualMachine("testvmi")
 			volumes := make([]virtv1.Volume, 0)
@@ -3180,6 +3385,13 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 				[]int{0},
 				makeVolumeStatusesForUpdateWithMessage("test-pod", "abcd", virtv1.HotplugVolumeDetaching, "Deleted hotplug attachment pod test-pod, for volume volume0", kvcontroller.SuccessfulDeletePodReason, 0),
 				[]string{kvcontroller.SuccessfulDeletePodReason}),
+			Entry("should update volume status, if volume gets stuck in Detaching state due to it being removed and re-added",
+				makeDetachVolumeStatus(),
+				makeVolumes(0),
+				[]int{0},
+				[]int{0},
+				makeVolumeStatusesForUpdateWithMessage("", "", virtv1.VolumeBound, "PVC is in phase Bound", kvcontroller.PVCNotReadyReason, 0),
+				[]string{}),
 			Entry("should keep status and not update phase if volume is still Ready",
 				makeVolumeStatusesForUpdateWithMessage("", "", virtv1.VolumeReady, "", "", 0),
 				makeVolumes(),
@@ -3436,6 +3648,40 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 			Expect(volumeStatus.HotplugVolume).ToNot(BeNil())
 			Expect(volumeStatus.PersistentVolumeClaimInfo).ToNot(BeNil())
 			Expect(volumeStatus.PersistentVolumeClaimInfo.ClaimName).To(Equal("filesystem-pvc"))
+		})
+
+		// TODO drop test with legacy code https://github.com/kubevirt/kubevirt/issues/17369
+		It("Should normalize legacy backend storage volume name on upgrade", func() {
+			vmi := newPendingVirtualMachine("testvmi")
+			legacyPVCName := "persistent-state-for-testvmi"
+			// Simulate a VMI whose status was written by an older controller:
+			// the volume status entry uses the PVC name as the Name field.
+			vmi.Status.VolumeStatus = []virtv1.VolumeStatus{
+				{
+					Name: legacyPVCName,
+					PersistentVolumeClaimInfo: &virtv1.PersistentVolumeClaimInfo{
+						ClaimName: legacyPVCName,
+					},
+				},
+			}
+
+			pvc := &k8sv1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      legacyPVCName,
+					Namespace: k8sv1.NamespaceDefault,
+					Labels:    map[string]string{backendstorage.PVCPrefix: "testvmi"},
+				},
+			}
+			Expect(controller.pvcIndexer.Add(pvc)).To(Succeed())
+
+			virtlauncherPod := newPodForVirtualMachine(vmi, k8sv1.PodRunning)
+			Expect(controller.updateVolumeStatus(vmi, virtlauncherPod)).To(Succeed())
+
+			// The legacy entry must be carried forward under the new static name,
+			// so that UpdateVolumeStatus can update it in-place on the same reconcile.
+			Expect(vmi.Status.VolumeStatus).To(HaveLen(1))
+			Expect(vmi.Status.VolumeStatus[0].Name).To(Equal(backendstorage.VolumeName))
+			Expect(vmi.Status.VolumeStatus[0].PersistentVolumeClaimInfo.ClaimName).To(Equal(legacyPVCName))
 		})
 
 		Context("isUtilityVolumeWithBlockPVC", func() {
@@ -4091,6 +4337,144 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 
 				testutils.ExpectEvent(recorder, kvcontroller.SuccessfulCreatePodReason)
 				expectMatchingPodCreation(vmi)
+			})
+		})
+
+		Context("decentralized live migration", func() {
+			It("should set the topology hints when the VMI is created", func() {
+				vmi := getVmiWithReenlightenment()
+				vmi.Annotations[virtv1.CreateMigrationTarget] = "true"
+				addVirtualMachine(vmi)
+				sanityExecute()
+				expectTopologyHintsDefined(vmi, BeTrue())
+				updatedVmi, err := virtClientset.KubevirtV1().VirtualMachineInstances(vmi.Namespace).Get(context.Background(), vmi.Name, metav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(updatedVmi.Status.Phase).To(Equal(virtv1.WaitingForSync))
+			})
+
+			DescribeTable("should transition migration target to WaitingForSync when pod is down", func(vmiPhase virtv1.VirtualMachineInstancePhase, podPhase k8sv1.PodPhase) {
+				vmi := newPendingVirtualMachine("testvmi")
+				vmi.Status.Phase = vmiPhase
+				vmi.Status.NodeName = "targetnode"
+				if vmi.Annotations == nil {
+					vmi.Annotations = make(map[string]string)
+				}
+				vmi.Annotations[virtv1.CreateMigrationTarget] = "true"
+				vmi.Status.MigrationState = &virtv1.VirtualMachineInstanceMigrationState{
+					TargetNode: "targetnode",
+					SourceNode: "sourcenode",
+				}
+
+				pod := newPodForVirtualMachine(vmi, podPhase)
+				pod.Spec.NodeName = "targetnode"
+
+				addVirtualMachine(vmi)
+				addActivePods(vmi, pod.UID, "targetnode")
+				addPod(pod)
+
+				sanityExecute()
+
+				updatedVmi, err := virtClientset.KubevirtV1().VirtualMachineInstances(vmi.Namespace).Get(context.Background(), vmi.Name, metav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(updatedVmi.Status.Phase).To(Equal(virtv1.WaitingForSync))
+			},
+				Entry("Scheduled VMI with Failed pod", virtv1.Scheduled, k8sv1.PodFailed),
+				Entry("Scheduled VMI with Succeeded pod", virtv1.Scheduled, k8sv1.PodSucceeded),
+			)
+
+			It("should transition scheduled migration target to WaitingForSync when migration failed even if pod is running", func() {
+				vmi := newPendingVirtualMachine("testvmi")
+				vmi.Status.Phase = virtv1.Scheduled
+				vmi.Status.NodeName = "targetnode"
+				if vmi.Annotations == nil {
+					vmi.Annotations = make(map[string]string)
+				}
+				vmi.Annotations[virtv1.CreateMigrationTarget] = "true"
+				vmi.Status.MigrationState = &virtv1.VirtualMachineInstanceMigrationState{
+					TargetNode: "targetnode",
+					SourceNode: "sourcenode",
+					Failed:     true,
+					Completed:  true,
+				}
+
+				pod := newPodForVirtualMachine(vmi, k8sv1.PodRunning)
+				pod.Spec.NodeName = "targetnode"
+
+				addVirtualMachine(vmi)
+				addActivePods(vmi, pod.UID, "targetnode")
+				addPod(pod)
+
+				sanityExecute()
+
+				updatedVmi, err := virtClientset.KubevirtV1().VirtualMachineInstances(vmi.Namespace).Get(context.Background(), vmi.Name, metav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(updatedVmi.Status.Phase).To(Equal(virtv1.WaitingForSync))
+			})
+
+			DescribeTable("should keep migration target in WaitingForSync when pod is down", func(podPhase k8sv1.PodPhase) {
+				vmi := newPendingVirtualMachine("testvmi")
+				vmi.Status.Phase = virtv1.WaitingForSync
+				vmi.Status.NodeName = "targetnode"
+				if vmi.Annotations == nil {
+					vmi.Annotations = make(map[string]string)
+				}
+				vmi.Annotations[virtv1.CreateMigrationTarget] = "true"
+
+				pod := newPodForVirtualMachine(vmi, podPhase)
+				pod.Spec.NodeName = "targetnode"
+
+				addVirtualMachine(vmi)
+				addActivePods(vmi, pod.UID, "targetnode")
+				addPod(pod)
+
+				sanityExecute()
+
+				updatedVmi, err := virtClientset.KubevirtV1().VirtualMachineInstances(vmi.Namespace).Get(context.Background(), vmi.Name, metav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(updatedVmi.Status.Phase).To(Equal(virtv1.WaitingForSync))
+			},
+				Entry("Failed pod", k8sv1.PodFailed),
+				Entry("Succeeded pod", k8sv1.PodSucceeded),
+			)
+
+			It("should keep migration target in WaitingForSync when migration failed and pod is running", func() {
+				vmi := newPendingVirtualMachine("testvmi")
+				vmi.Status.Phase = virtv1.WaitingForSync
+				vmi.Status.NodeName = "targetnode"
+				if vmi.Annotations == nil {
+					vmi.Annotations = make(map[string]string)
+				}
+				vmi.Annotations[virtv1.CreateMigrationTarget] = "true"
+				vmi.Status.MigrationState = &virtv1.VirtualMachineInstanceMigrationState{
+					TargetNode: "targetnode",
+					SourceNode: "sourcenode",
+					Failed:     true,
+					Completed:  true,
+				}
+
+				pod := newPodForVirtualMachine(vmi, k8sv1.PodRunning)
+				pod.Spec.NodeName = "targetnode"
+
+				addVirtualMachine(vmi)
+				addActivePods(vmi, pod.UID, "targetnode")
+				addPod(pod)
+
+				sanityExecute()
+
+				updatedVmi, err := virtClientset.KubevirtV1().VirtualMachineInstances(vmi.Namespace).Get(context.Background(), vmi.Name, metav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(updatedVmi.Status.Phase).To(Equal(virtv1.WaitingForSync))
+			})
+
+			It("should transition running non-target VMI to Failed when pod disappears", func() {
+				vmi := newPendingVirtualMachine("testvmi")
+				vmi.Status.Phase = virtv1.Running
+				vmi.Status.NodeName = "somenode"
+
+				addVirtualMachine(vmi)
+
+				sanityExecute()
+				expectVMIBeInPhase(vmi.Namespace, vmi.Name, virtv1.Failed)
 			})
 		})
 	})
@@ -4821,6 +5205,19 @@ func (s stubNetworkAnnotationsGenerator) GenerateFromActivePod(_ *virtv1.Virtual
 	return s.annotations
 }
 
+type stubStorageAnnotationsGenerator struct {
+	annotations map[string]string
+	keys        []string
+}
+
+func (s stubStorageAnnotationsGenerator) Generate(_ *virtv1.VirtualMachineInstance) (map[string]string, error) {
+	return s.annotations, nil
+}
+
+func (s stubStorageAnnotationsGenerator) ManagedAnnotationKeys() []string {
+	return s.keys
+}
+
 func validateNetVMISpecStub(causes ...metav1.StatusCause) func(*k8sfield.Path, *virtv1.VirtualMachineInstanceSpec, *virtconfig.ClusterConfig) []metav1.StatusCause {
 	return func(*k8sfield.Path, *virtv1.VirtualMachineInstanceSpec, *virtconfig.ClusterConfig) []metav1.StatusCause {
 		return causes
@@ -4831,6 +5228,6 @@ type stubMigrationEvaluator struct {
 	result k8sv1.ConditionStatus
 }
 
-func (e stubMigrationEvaluator) Evaluate(_ *virtv1.VirtualMachineInstance) k8sv1.ConditionStatus {
+func (e stubMigrationEvaluator) Evaluate(_ *virtv1.VirtualMachineInstance, _ *k8sv1.Pod) k8sv1.ConditionStatus {
 	return e.result
 }

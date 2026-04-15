@@ -96,6 +96,7 @@ aliases:
     - akalenyu
     - ShellyKa13
     - alromeros
+    - Acedus
   sig-storage-emeritus_approvers:
     - alicefr
 
@@ -121,6 +122,7 @@ aliases:
     - vladikr
     - enp0s3
     - xpivarc
+    - orelmisan
   sig-compute-reviewers:
     - victortoso
     - fossedihelm
@@ -128,6 +130,7 @@ aliases:
     - 0xFelix
     - Barakmor1
     - dasionov
+    - orelmisan
 
   # SIG Compute Instance types sub project
   # Responsible the overall instance type feature set within SIG Compute
@@ -182,6 +185,7 @@ aliases:
     - xpivarc
   sig-buildsystem-reviewers:
     - brianmcarey
+    - dollierp
     - enp0s3
     - xpivarc
 
@@ -192,3 +196,17 @@ aliases:
   #
   sig-architecture-approvers: []
   sig-architecture-reviewers: []
+
+  #
+  # SIG Control plane
+  # Responsible for the development and enhancement of
+  # KubeVirt control plane.
+  sig-control-plane-approvers: []
+  sig-control-plane-reviewers:
+    - akalenyu
+    - Barakmor1
+    - dasionov
+    - lyarwood
+    - mhenriks
+    - orelmisan
+    - xpivarc

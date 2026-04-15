@@ -41,14 +41,16 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 
+	backupv1 "kubevirt.io/api/backup/v1alpha1"
 	virtv1 "kubevirt.io/api/core/v1"
-	exportv1 "kubevirt.io/api/export/v1beta1"
+	exportv1 "kubevirt.io/api/export/v1"
 	instancetypev1beta1 "kubevirt.io/api/instancetype/v1beta1"
 	snapshotv1 "kubevirt.io/api/snapshot/v1beta1"
 	"kubevirt.io/client-go/kubecli"
 	kubevirtfake "kubevirt.io/client-go/kubevirt/fake"
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
 
+	"kubevirt.io/kubevirt/pkg/certificates/bootstrap"
 	virtcontroller "kubevirt.io/kubevirt/pkg/controller"
 	"kubevirt.io/kubevirt/pkg/testutils"
 	"kubevirt.io/kubevirt/pkg/virt-controller/services"
@@ -82,12 +84,13 @@ var _ = Describe("PVC source", func() {
 		preferenceInformer          cache.SharedIndexInformer
 		clusterPreferenceInformer   cache.SharedIndexInformer
 		controllerRevisionInformer  cache.SharedIndexInformer
+		vmBackupInformer            cache.SharedIndexInformer
 		rqInformer                  cache.SharedIndexInformer
 		nsInformer                  cache.SharedIndexInformer
 		k8sClient                   *k8sfake.Clientset
 		vmExportClient              *kubevirtfake.Clientset
 		fakeVolumeSnapshotProvider  *MockVolumeSnapshotProvider
-		fakeCertManager             *MockCertManager
+		fakeCertManager             *bootstrap.MockCertificateManager
 		mockVMExportQueue           *testutils.MockWorkQueue[string]
 		routeCache                  cache.Store
 		ingressCache                cache.Store
@@ -118,12 +121,15 @@ var _ = Describe("PVC source", func() {
 		preferenceInformer, _ = testutils.NewFakeInformerFor(&instancetypev1beta1.VirtualMachinePreference{})
 		clusterPreferenceInformer, _ = testutils.NewFakeInformerFor(&instancetypev1beta1.VirtualMachineClusterPreference{})
 		controllerRevisionInformer, _ = testutils.NewFakeInformerFor(&appsv1.ControllerRevision{})
+		vmBackupInformer, _ = testutils.NewFakeInformerFor(&backupv1.VirtualMachineBackup{})
 		rqInformer, _ = testutils.NewFakeInformerFor(&k8sv1.ResourceQuota{})
 		nsInformer, _ = testutils.NewFakeInformerFor(&k8sv1.Namespace{})
 		fakeVolumeSnapshotProvider = &MockVolumeSnapshotProvider{
 			volumeSnapshots: []*vsv1.VolumeSnapshot{},
 		}
-		fakeCertManager = &MockCertManager{}
+		var err error
+		fakeCertManager, err = bootstrap.NewMockCertificateManager()
+		Expect(err).ToNot(HaveOccurred())
 
 		config, _, _ := testutils.NewFakeClusterConfigUsingKVConfig(&virtv1.KubeVirtConfiguration{})
 		k8sClient = k8sfake.NewSimpleClientset()
@@ -132,7 +138,7 @@ var _ = Describe("PVC source", func() {
 
 		virtClient.EXPECT().CoreV1().Return(k8sClient.CoreV1()).AnyTimes()
 		virtClient.EXPECT().VirtualMachineExport(testNamespace).
-			Return(vmExportClient.ExportV1beta1().VirtualMachineExports(testNamespace)).AnyTimes()
+			Return(vmExportClient.ExportV1().VirtualMachineExports(testNamespace)).AnyTimes()
 
 		controller = &VMExportController{
 			Client:                      virtClient,
@@ -162,6 +168,7 @@ var _ = Describe("PVC source", func() {
 			PreferenceInformer:          preferenceInformer,
 			ClusterPreferenceInformer:   clusterPreferenceInformer,
 			ControllerRevisionInformer:  controllerRevisionInformer,
+			VMBackupInformer:            vmBackupInformer,
 		}
 		initCert = func(ctrl *VMExportController) {
 			ctrl.caCertManager.Start()

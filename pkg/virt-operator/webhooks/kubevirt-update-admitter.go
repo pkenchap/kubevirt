@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 
 	kvtls "kubevirt.io/kubevirt/pkg/util/tls"
@@ -79,6 +80,8 @@ func (admitter *KubeVirtUpdateAdmitter) Admit(ctx context.Context, ar *admission
 	results = append(results, validateCustomizeComponents(newKV.Spec.CustomizeComponents)...)
 	results = append(results, validateCertificates(newKV.Spec.CertificateRotationStrategy.SelfSigned)...)
 	results = append(results, validateGuestToRequestHeadroom(newKV.Spec.Configuration.AdditionalGuestMemoryOverheadRatio)...)
+	results = append(results, validateVirtTemplateDeployment(&newKV.Spec.Configuration)...)
+	results = append(results, validateRoleAggregationStrategy(&newKV.Spec.Configuration)...)
 
 	if !equality.Semantic.DeepEqual(currKV.Spec.Configuration.TLSConfiguration, newKV.Spec.Configuration.TLSConfiguration) {
 		if newKV.Spec.Configuration.TLSConfiguration != nil {
@@ -109,6 +112,10 @@ func (admitter *KubeVirtUpdateAdmitter) Admit(ctx context.Context, ar *admission
 
 	if newKV.Spec.Infra != nil {
 		results = append(results, validateInfraReplicas(newKV.Spec.Infra.Replicas)...)
+	}
+
+	if featureGatesChanged(&currKV.Spec, &newKV.Spec) {
+		results = append(results, validateFeatureGates(newKV.Spec.Configuration.DeveloperConfiguration)...)
 	}
 
 	response := validating_webhooks.NewAdmissionResponse(results)
@@ -440,13 +447,12 @@ func featureGatesChanged(currKVSpec, newKVSpec *v1.KubeVirtSpec) bool {
 
 	if (currDevConfig == nil && newDevConfig == nil) || (currDevConfig != nil && newDevConfig == nil) {
 		return false
+	} else if currDevConfig == nil && newDevConfig != nil {
+		return true
 	}
 
-	if currDevConfig == nil && newDevConfig != nil {
-		return len(newDevConfig.FeatureGates) > 0
-	}
-
-	return !equality.Semantic.DeepEqual(currDevConfig.FeatureGates, newDevConfig.FeatureGates)
+	return !slices.Equal(currDevConfig.FeatureGates, newDevConfig.FeatureGates) ||
+		!slices.Equal(currDevConfig.DisabledFeatureGates, newDevConfig.DisabledFeatureGates)
 }
 
 func warnDeprecatedFeatureGates(featureGates []string) (warnings []string) {
@@ -493,4 +499,67 @@ func validateGuestToRequestHeadroom(ratioStrPtr *string) (causes []metav1.Status
 	}
 
 	return
+}
+
+func validateFeatureGates(devConfig *v1.DeveloperConfiguration) (causes []metav1.StatusCause) {
+	if devConfig == nil {
+		return
+	}
+
+	enabledFGs := devConfig.FeatureGates
+	disabledFGs := devConfig.DisabledFeatureGates
+
+	if len(enabledFGs) == 0 || len(disabledFGs) == 0 {
+		return
+	}
+
+	// check that the same feature doesn't appear in both FeatureGates and DisabledFeatureGates, emit error otherwise
+	for _, enabledFG := range enabledFGs {
+		if slices.Contains(disabledFGs, enabledFG) {
+			causes = append(causes, metav1.StatusCause{
+				Type:    metav1.CauseTypeForbidden,
+				Message: fmt.Sprintf(`feature gate "%s" exists on both "FeatureGates" and "DisabledFeatureGates"`, enabledFG),
+				Field:   field.NewPath("spec", "configuration", "developerConfiguration", "featureGates").String(),
+			})
+		}
+	}
+
+	return causes
+}
+
+func hasFeatureGateEnabled(config *v1.KubeVirtConfiguration, gate string) bool {
+	return config.DeveloperConfiguration != nil && slices.Contains(config.DeveloperConfiguration.FeatureGates, gate)
+}
+
+func validateVirtTemplateDeployment(config *v1.KubeVirtConfiguration) []metav1.StatusCause {
+	virtTemplateDeployment := config.VirtTemplateDeployment
+	if virtTemplateDeployment == nil || virtTemplateDeployment.Enabled == nil || !*virtTemplateDeployment.Enabled {
+		return nil
+	}
+
+	if hasFeatureGateEnabled(config, featuregate.Template) {
+		return nil
+	}
+
+	return []metav1.StatusCause{{
+		Type:    metav1.CauseTypeFieldValueInvalid,
+		Field:   "spec.configuration.virtTemplateDeployment.enabled",
+		Message: fmt.Sprintf("VirtTemplateDeployment cannot be enabled without enabling the %s feature gate", featuregate.Template),
+	}}
+}
+
+func validateRoleAggregationStrategy(config *v1.KubeVirtConfiguration) []metav1.StatusCause {
+	if config.RoleAggregationStrategy == nil || *config.RoleAggregationStrategy == v1.RoleAggregationStrategyAggregateToDefault {
+		return nil
+	}
+
+	if hasFeatureGateEnabled(config, featuregate.OptOutRoleAggregation) {
+		return nil
+	}
+
+	return []metav1.StatusCause{{
+		Type:    metav1.CauseTypeFieldValueInvalid,
+		Field:   "spec.configuration.roleAggregationStrategy",
+		Message: fmt.Sprintf("RoleAggregationStrategy cannot be set to Manual without enabling the %s feature gate", featuregate.OptOutRoleAggregation),
+	}}
 }

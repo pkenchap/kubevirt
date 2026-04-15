@@ -27,6 +27,7 @@ source hack/config.sh
 other_images_default="
     //cmd/sidecars:sidecar-shim-image
     //cmd/libguestfs:libguestfs-tools-image
+    //cmd/test-helpers:test-helpers-image
     //containerimages:alpine-container-disk-image
     //containerimages:fedora-with-test-tooling
     //images/disks-images-provider:disks-images-provider-image
@@ -72,7 +73,7 @@ case ${ARCHITECTURE} in
 esac
 
 bazel build \
-    --config=${ARCHITECTURE} \
+    --config=${ARCHITECTURE} ${BAZEL_CS_CONFIG} \
     --define container_prefix= \
     --define image_prefix= \
     --define container_tag= \

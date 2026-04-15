@@ -26,7 +26,7 @@ KUBEVIRT_NO_BAZEL=${KUBEVIRT_NO_BAZEL:-false}
 HOST_ARCHITECTURE="$(uname -m)"
 
 sandbox_root=${SANDBOX_DIR}/default/root
-sandbox_hash="f54426b7385c0f2b0b33e9a490c7d8ecfbbb9448"
+sandbox_hash="7d81dbd01474902b1ed6bfbe7b6762f9784620c9"
 
 function kubevirt::bootstrap::regenerate() {
     (
@@ -41,8 +41,8 @@ function kubevirt::bootstrap::regenerate() {
         rm .bazeldnf/sandbox.bazelrc -f
         # Run gazelle to ensure that nogo has all build files resolved and that we can bootstrap the env.
         # This is necessary since some steps remove the vendor build files and nogo would be broken then.
-        KUBEVIRT_BOOTSTRAPPING=true bazel run --config=${HOST_ARCHITECTURE} //:gazelle -- --exclude kubevirtci/cluster-up
-        KUBEVIRT_BOOTSTRAPPING=true bazel run --config ${HOST_ARCHITECTURE} //rpm:sandbox_${1}
+        KUBEVIRT_BOOTSTRAPPING=true bazel run --config=${HOST_ARCHITECTURE} ${BAZEL_CS_CONFIG} //:gazelle -- --exclude kubevirtci/cluster-up
+        KUBEVIRT_BOOTSTRAPPING=true bazel run --config ${HOST_ARCHITECTURE} ${BAZEL_CS_CONFIG} //rpm:sandbox_${1}_cs${KUBEVIRT_CENTOS_STREAM_VERSION}
         bazel clean
 
         local sha=$(kubevirt::bootstrap::sha256)
@@ -64,7 +64,7 @@ build --sandbox_add_mount_pair=${sandbox_root}/lib64:/lib64
 build --sandbox_add_mount_pair=${sandbox_root}/lib:/lib
 build --sandbox_add_mount_pair=${sandbox_root}/bin:/bin
 
-build --incompatible_enable_cc_toolchain_resolution --platforms=//bazel/platforms:x86_64-none-linux-gnu
+build --incompatible_enable_cc_toolchain_resolution --platforms=//bazel/platforms:${HOST_ARCHITECTURE}-none-linux-gnu
 EOT
 }
 
@@ -75,6 +75,6 @@ function kubevirt::bootstrap::sha256() {
     )
 }
 
-if [ "${KUBEVIRT_NO_BAZEL}" != "true" ]; then
+if [ "${KUBEVIRT_NO_BAZEL}" != "true" ] && [ "${KUBEVIRT_SKIP_BOOTSTRAP}" != "true" ]; then
     kubevirt::bootstrap::regenerate ${HOST_ARCHITECTURE}
 fi

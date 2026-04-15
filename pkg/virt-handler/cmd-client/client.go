@@ -113,6 +113,7 @@ type LauncherClient interface {
 	GetDomainDirtyRateStats() (dirtyRateMbps int64, err error)
 	GetScreenshot(*v1.VirtualMachineInstance) (*cmdv1.ScreenshotResponse, error)
 	VirtualMachineBackup(vmi *v1.VirtualMachineInstance, options *backupv1.BackupOptions) error
+	RedefineCheckpoint(vmi *v1.VirtualMachineInstance, checkpoint *backupv1.BackupCheckpoint) (checkpointInvalid bool, err error)
 }
 
 type VirtLauncherClient struct {
@@ -121,8 +122,9 @@ type VirtLauncherClient struct {
 }
 
 const (
-	shortTimeout time.Duration = 5 * time.Second
-	longTimeout  time.Duration = 20 * time.Second
+	shortTimeout    time.Duration = 5 * time.Second
+	longTimeout     time.Duration = 20 * time.Second
+	extendedTimeout time.Duration = 60 * time.Second
 )
 
 func SetBaseDir(dir string) {
@@ -202,7 +204,7 @@ func FindPodDirOnHost(vmi *v1.VirtualMachineInstance, socketDirFunc func(string)
 // Finds exactly one socket on a host based on the hostname.
 // A empty hostname is wildcard.
 // Returns error otherwise.
-func FindSocketOnHost(vmi *v1.VirtualMachineInstance, host string) (string, error) {
+func findSocketOnHost(vmi *v1.VirtualMachineInstance, host string) (string, error) {
 	socketsFound := 0
 	foundSocket := ""
 	// It is possible for multiple pods to be active on a single VMI
@@ -234,8 +236,13 @@ func FindSocketOnHost(vmi *v1.VirtualMachineInstance, host string) (string, erro
 // Finds exactly one socket on a host based on the NODE_NAME env. Returns error otherwise.
 func FindSocket(vmi *v1.VirtualMachineInstance) (string, error) {
 	host, _ := os.LookupEnv("NODE_NAME")
-	return FindSocketOnHost(vmi, host)
+	return findSocketOnHost(vmi, host)
 }
+
+// Do not use this low level function unless you know what you are doing.
+// Particularly testing is challenging as you need to instance a fully functional GRPC server.
+//
+// It is also not wise to have unbound number of clients to the launcher, or duplicate implementation of caching or  future recognition of source/target client(in case of same node migration).
 func NewClient(socketPath string) (LauncherClient, error) {
 	// dial socket
 	conn, err := grpcutil.DialSocket(socketPath)
@@ -246,10 +253,10 @@ func NewClient(socketPath string) (LauncherClient, error) {
 
 	// create info client and find cmd version to use
 	infoClient := info.NewCmdInfoClient(conn)
-	return NewClientWithInfoClient(infoClient, conn)
+	return newClientWithInfoClient(infoClient, conn)
 }
 
-func NewClientWithInfoClient(infoClient info.CmdInfoClient, conn *grpc.ClientConn) (LauncherClient, error) {
+func newClientWithInfoClient(infoClient info.CmdInfoClient, conn *grpc.ClientConn) (LauncherClient, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), shortTimeout)
 	defer cancel()
 	info, err := infoClient.Info(ctx, &info.CmdInfoRequest{})
@@ -331,7 +338,8 @@ func (c *VirtLauncherClient) FreezeVirtualMachine(vmi *v1.VirtualMachineInstance
 		UnfreezeTimeoutSeconds: unfreezeTimeoutSeconds,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), longTimeout)
+	// Use extended timeout as Windows VSS can take up to 60 seconds
+	ctx, cancel := context.WithTimeout(context.Background(), extendedTimeout)
 	defer cancel()
 	response, err := c.v1client.FreezeVirtualMachine(ctx, request)
 
@@ -800,4 +808,36 @@ func (c *VirtLauncherClient) VirtualMachineBackup(vmi *v1.VirtualMachineInstance
 
 	err = handleError(err, "Backup", response)
 	return err
+}
+
+func (c *VirtLauncherClient) RedefineCheckpoint(vmi *v1.VirtualMachineInstance, checkpoint *backupv1.BackupCheckpoint) (checkpointInvalid bool, err error) {
+	vmiJson, err := json.Marshal(vmi)
+	if err != nil {
+		return false, err
+	}
+
+	checkpointJson, err := json.Marshal(checkpoint)
+	if err != nil {
+		return false, err
+	}
+
+	request := &cmdv1.RedefineCheckpointRequest{
+		Vmi: &cmdv1.VMI{
+			VmiJson: vmiJson,
+		},
+		Checkpoint: checkpointJson,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), longTimeout)
+	defer cancel()
+	response, err := c.v1client.RedefineCheckpoint(ctx, request)
+	if err != nil {
+		return false, fmt.Errorf("RedefineCheckpoint call failed: %v", err)
+	}
+
+	if response.Response != nil && !response.Response.Success {
+		return response.CheckpointInvalid, fmt.Errorf("RedefineCheckpoint failed: %s", response.Response.Message)
+	}
+
+	return false, nil
 }

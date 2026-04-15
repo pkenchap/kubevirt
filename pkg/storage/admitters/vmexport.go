@@ -29,8 +29,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sfield "k8s.io/apimachinery/pkg/util/validation/field"
 
+	"kubevirt.io/api/backup"
 	virt "kubevirt.io/api/core"
-	exportv1 "kubevirt.io/api/export/v1beta1"
+	exportv1 "kubevirt.io/api/export/v1"
 	"kubevirt.io/api/snapshot"
 
 	webhookutils "kubevirt.io/kubevirt/pkg/util/webhooks"
@@ -41,6 +42,7 @@ const (
 	pvc            = "PersistentVolumeClaim"
 	vmSnapshotKind = "VirtualMachineSnapshot"
 	vmKind         = "VirtualMachine"
+	vmBackupKind   = "VirtualMachineBackup"
 )
 
 // VMExportAdmitter validates VirtualMachineExports
@@ -60,10 +62,6 @@ func (admitter *VMExportAdmitter) Admit(_ context.Context, ar *admissionv1.Admis
 	if ar.Request.Resource.Group != exportv1.SchemeGroupVersion.Group ||
 		ar.Request.Resource.Resource != "virtualmachineexports" {
 		return webhookutils.ToAdmissionResponseError(fmt.Errorf("unexpected resource %+v", ar.Request.Resource))
-	}
-
-	if ar.Request.Operation == admissionv1.Create && !admitter.Config.VMExportEnabled() {
-		return webhookutils.ToAdmissionResponseError(fmt.Errorf("vm export feature gate not enabled"))
 	}
 
 	vmExport := &exportv1.VirtualMachineExport{}
@@ -89,6 +87,9 @@ func (admitter *VMExportAdmitter) Admit(_ context.Context, ar *admissionv1.Admis
 		case vmKind:
 			causes = append(causes, admitter.validateVMName(sourceField.Child("name"), vmExport.Spec.Source.Name)...)
 			causes = append(causes, admitter.validateVMApiGroup(sourceField.Child("APIGroup"), vmExport.Spec.Source.APIGroup)...)
+		case vmBackupKind:
+			causes = append(causes, admitter.validateVMBackupName(sourceField.Child("name"), vmExport.Spec.Source.Name)...)
+			causes = append(causes, admitter.validateVMBackupApiGroup(sourceField.Child("APIGroup"), vmExport.Spec.Source.APIGroup)...)
 		default:
 			causes = []metav1.StatusCause{
 				{
@@ -210,5 +211,32 @@ func (admitter *VMExportAdmitter) validateVMApiGroup(field *k8sfield.Path, apigr
 		}
 	}
 
+	return []metav1.StatusCause{}
+}
+
+func (admitter *VMExportAdmitter) validateVMBackupName(field *k8sfield.Path, name string) []metav1.StatusCause {
+	if name == "" {
+		return []metav1.StatusCause{
+			{
+				Type:    metav1.CauseTypeFieldValueInvalid,
+				Message: "VirtualMachineBackup name must not be empty",
+				Field:   field.String(),
+			},
+		}
+	}
+
+	return []metav1.StatusCause{}
+}
+
+func (admitter *VMExportAdmitter) validateVMBackupApiGroup(field *k8sfield.Path, apigroup *string) []metav1.StatusCause {
+	if apigroup == nil || *apigroup != backup.GroupName {
+		return []metav1.StatusCause{
+			{
+				Type:    metav1.CauseTypeFieldValueInvalid,
+				Message: "VirtualMachineBackup API group must be " + backup.GroupName,
+				Field:   field.String(),
+			},
+		}
+	}
 	return []metav1.StatusCause{}
 }

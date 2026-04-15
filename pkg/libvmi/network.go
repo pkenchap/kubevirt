@@ -74,6 +74,16 @@ func InterfaceDeviceWithSRIOVBinding(name string) kvirtv1.Interface {
 	}
 }
 
+// InterfaceDeviceWithPasstBinding returns an Interface with passtBinding.
+func InterfaceDeviceWithPasstBinding(name string) kvirtv1.Interface {
+	return kvirtv1.Interface{
+		Name: name,
+		InterfaceBindingMethod: kvirtv1.InterfaceBindingMethod{
+			PasstBinding: &kvirtv1.InterfacePasstBinding{},
+		},
+	}
+}
+
 // InterfaceWithPasstBinding returns an Interface named "default" with passt binding plugin.
 func InterfaceWithPasstBindingPlugin(ports ...kvirtv1.Port) kvirtv1.Interface {
 	const passtBindingName = "passt"
@@ -85,9 +95,9 @@ func InterfaceWithPasstBindingPlugin(ports ...kvirtv1.Port) kvirtv1.Interface {
 }
 
 // InterfaceWithMacvtapBindingPlugin returns an Interface named "default" with "macvtap" binding plugin.
-func InterfaceWithMacvtapBindingPlugin(name string) *kvirtv1.Interface {
+func InterfaceWithMacvtapBindingPlugin(name string) kvirtv1.Interface {
 	const macvtapBindingName = "macvtap"
-	return &kvirtv1.Interface{
+	return kvirtv1.Interface{
 		Name:    name,
 		Binding: &kvirtv1.PluginBinding{Name: macvtapBindingName},
 	}
@@ -102,8 +112,14 @@ func InterfaceWithBindingPlugin(name string, binding kvirtv1.PluginBinding, port
 }
 
 // InterfaceWithMac decorates an existing Interface with a MAC address.
-func InterfaceWithMac(iface *kvirtv1.Interface, macAddress string) *kvirtv1.Interface {
+func InterfaceWithMac(iface kvirtv1.Interface, macAddress string) kvirtv1.Interface {
 	iface.MacAddress = macAddress
+	return iface
+}
+
+// InterfaceWithModel decorates an existing Interface with a model.
+func InterfaceWithModel(iface kvirtv1.Interface, model string) kvirtv1.Interface {
+	iface.Model = model
 	return iface
 }
 

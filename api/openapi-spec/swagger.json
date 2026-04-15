@@ -1030,13 +1030,13 @@
      }
     }
    },
-   "/apis/export.kubevirt.io/v1beta1/": {
+   "/apis/export.kubevirt.io/v1/": {
     "get": {
      "description": "Get KubeVirt API Resources",
      "produces": [
       "application/json"
      ],
-     "operationId": "getAPIResources-export.kubevirt.io-v1beta1",
+     "operationId": "getAPIResources-export.kubevirt.io-v1",
      "responses": {
       "200": {
        "description": "OK",
@@ -1056,7 +1056,7 @@
      }
     }
    },
-   "/apis/export.kubevirt.io/v1beta1/namespaces/{namespace}/virtualmachineexports": {
+   "/apis/export.kubevirt.io/v1/namespaces/{namespace}/virtualmachineexports": {
     "get": {
      "description": "Get a list of VirtualMachineExport objects.",
      "produces": [
@@ -1098,7 +1098,7 @@
       "200": {
        "description": "OK",
        "schema": {
-        "$ref": "#/definitions/v1beta1.VirtualMachineExportList"
+        "$ref": "#/definitions/v1.VirtualMachineExportList"
        }
       },
       "401": {
@@ -1126,7 +1126,7 @@
        "in": "body",
        "required": true,
        "schema": {
-        "$ref": "#/definitions/v1beta1.VirtualMachineExport"
+        "$ref": "#/definitions/v1.VirtualMachineExport"
        }
       },
       {
@@ -1137,19 +1137,19 @@
       "200": {
        "description": "OK",
        "schema": {
-        "$ref": "#/definitions/v1beta1.VirtualMachineExport"
+        "$ref": "#/definitions/v1.VirtualMachineExport"
        }
       },
       "201": {
        "description": "Created",
        "schema": {
-        "$ref": "#/definitions/v1beta1.VirtualMachineExport"
+        "$ref": "#/definitions/v1.VirtualMachineExport"
        }
       },
       "202": {
        "description": "Accepted",
        "schema": {
-        "$ref": "#/definitions/v1beta1.VirtualMachineExport"
+        "$ref": "#/definitions/v1.VirtualMachineExport"
        }
       },
       "401": {
@@ -1209,7 +1209,7 @@
      }
     }
    },
-   "/apis/export.kubevirt.io/v1beta1/namespaces/{namespace}/virtualmachineexports/{name}": {
+   "/apis/export.kubevirt.io/v1/namespaces/{namespace}/virtualmachineexports/{name}": {
     "get": {
      "description": "Get a VirtualMachineExport object.",
      "produces": [
@@ -1230,7 +1230,7 @@
       "200": {
        "description": "OK",
        "schema": {
-        "$ref": "#/definitions/v1beta1.VirtualMachineExport"
+        "$ref": "#/definitions/v1.VirtualMachineExport"
        }
       },
       "401": {
@@ -1258,7 +1258,7 @@
        "in": "body",
        "required": true,
        "schema": {
-        "$ref": "#/definitions/v1beta1.VirtualMachineExport"
+        "$ref": "#/definitions/v1.VirtualMachineExport"
        }
       }
      ],
@@ -1266,13 +1266,13 @@
       "200": {
        "description": "OK",
        "schema": {
-        "$ref": "#/definitions/v1beta1.VirtualMachineExport"
+        "$ref": "#/definitions/v1.VirtualMachineExport"
        }
       },
       "201": {
        "description": "Create",
        "schema": {
-        "$ref": "#/definitions/v1beta1.VirtualMachineExport"
+        "$ref": "#/definitions/v1.VirtualMachineExport"
        }
       },
       "401": {
@@ -1352,7 +1352,7 @@
       "200": {
        "description": "OK",
        "schema": {
-        "$ref": "#/definitions/v1beta1.VirtualMachineExport"
+        "$ref": "#/definitions/v1.VirtualMachineExport"
        }
       },
       "401": {
@@ -1377,7 +1377,7 @@
      }
     ]
    },
-   "/apis/export.kubevirt.io/v1beta1/virtualmachineexports": {
+   "/apis/export.kubevirt.io/v1/virtualmachineexports": {
     "get": {
      "description": "Get a list of all VirtualMachineExport objects.",
      "produces": [
@@ -1390,7 +1390,7 @@
       "200": {
        "description": "OK",
        "schema": {
-        "$ref": "#/definitions/v1beta1.VirtualMachineExportList"
+        "$ref": "#/definitions/v1.VirtualMachineExportList"
        }
       },
       "401": {
@@ -1428,7 +1428,7 @@
      }
     ]
    },
-   "/apis/export.kubevirt.io/v1beta1/watch/namespaces/{namespace}/virtualmachineexports": {
+   "/apis/export.kubevirt.io/v1/watch/namespaces/{namespace}/virtualmachineexports": {
     "get": {
      "description": "Watch a VirtualMachineExport object.",
      "produces": [
@@ -1480,7 +1480,7 @@
      }
     ]
    },
-   "/apis/export.kubevirt.io/v1beta1/watch/virtualmachineexports": {
+   "/apis/export.kubevirt.io/v1/watch/virtualmachineexports": {
     "get": {
      "description": "Watch a VirtualMachineExportList object.",
      "produces": [
@@ -9175,6 +9175,61 @@
      }
     ]
    },
+   "/apis/subresources.kubevirt.io/v1/namespaces/{namespace}/virtualmachineinstances/{name}/redefine-checkpoint": {
+    "put": {
+     "description": "Redefine a checkpoint for a VirtualMachineInstance.",
+     "consumes": [
+      "*/*"
+     ],
+     "operationId": "v1RedefineCheckpoint",
+     "parameters": [
+      {
+       "name": "body",
+       "in": "body",
+       "required": true,
+       "schema": {
+        "$ref": "#/definitions/v1alpha1.BackupCheckpoint"
+       }
+      }
+     ],
+     "responses": {
+      "200": {
+       "description": "OK",
+       "schema": {
+        "type": "string"
+       }
+      },
+      "400": {
+       "description": "Bad Request",
+       "schema": {
+        "type": "string"
+       }
+      },
+      "401": {
+       "description": "Unauthorized"
+      },
+      "404": {
+       "description": "Not Found",
+       "schema": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Name of the resource",
+      "name": "name",
+      "in": "path",
+      "required": true
+     },
+     {
+      "$ref": "#/parameters/namespace-nfszEHZ0"
+     }
+    ]
+   },
    "/apis/subresources.kubevirt.io/v1/namespaces/{namespace}/virtualmachineinstances/{name}/removevolume": {
     "put": {
      "description": "Removes a volume and disk from a running Virtual Machine Instance",
@@ -10951,6 +11006,61 @@
      }
     ]
    },
+   "/apis/subresources.kubevirt.io/v1alpha3/namespaces/{namespace}/virtualmachineinstances/{name}/redefine-checkpoint": {
+    "put": {
+     "description": "Redefine a checkpoint for a VirtualMachineInstance.",
+     "consumes": [
+      "*/*"
+     ],
+     "operationId": "v1alpha3RedefineCheckpoint",
+     "parameters": [
+      {
+       "name": "body",
+       "in": "body",
+       "required": true,
+       "schema": {
+        "$ref": "#/definitions/v1alpha1.BackupCheckpoint"
+       }
+      }
+     ],
+     "responses": {
+      "200": {
+       "description": "OK",
+       "schema": {
+        "type": "string"
+       }
+      },
+      "400": {
+       "description": "Bad Request",
+       "schema": {
+        "type": "string"
+       }
+      },
+      "401": {
+       "description": "Unauthorized"
+      },
+      "404": {
+       "description": "Not Found",
+       "schema": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Name of the resource",
+      "name": "name",
+      "in": "path",
+      "required": true
+     },
+     {
+      "$ref": "#/parameters/namespace-nfszEHZ0"
+     }
+    ]
+   },
    "/apis/subresources.kubevirt.io/v1alpha3/namespaces/{namespace}/virtualmachineinstances/{name}/removevolume": {
     "put": {
      "description": "Removes a volume and disk from a running Virtual Machine Instance",
@@ -12140,7 +12250,7 @@
    "/healthz": {
     "get": {
      "description": "Health endpoint",
-     "operationId": "func15",
+     "operationId": "func17",
      "responses": {
       "401": {
        "description": "Unauthorized"
@@ -12160,6 +12270,72 @@
      "responses": {
       "401": {
        "description": "Unauthorized"
+      }
+     }
+    }
+   },
+   "/openapi/v3": {
+    "get": {
+     "description": "Get OpenAPI v3 discovery",
+     "produces": [
+      "application/json"
+     ],
+     "operationId": "getOpenAPIV3Discovery",
+     "responses": {
+      "401": {
+       "description": "Unauthorized"
+      }
+     }
+    }
+   },
+   "/openapi/v3/apis/subresources.kubevirt.io/v1": {
+    "get": {
+     "description": "Get OpenAPI v3 specification for subresources.kubevirt.io/v1",
+     "produces": [
+      "application/json"
+     ],
+     "operationId": "getOpenAPIV3Spec_subresources.kubevirt.io_v1",
+     "responses": {
+      "200": {
+       "description": "OK",
+       "schema": {
+        "type": "string"
+       }
+      },
+      "401": {
+       "description": "Unauthorized"
+      },
+      "500": {
+       "description": "Internal Server Error",
+       "schema": {
+        "type": "string"
+       }
+      }
+     }
+    }
+   },
+   "/openapi/v3/apis/subresources.kubevirt.io/v1alpha3": {
+    "get": {
+     "description": "Get OpenAPI v3 specification for subresources.kubevirt.io/v1alpha3",
+     "produces": [
+      "application/json"
+     ],
+     "operationId": "getOpenAPIV3Spec_subresources.kubevirt.io_v1alpha3",
+     "responses": {
+      "200": {
+       "description": "OK",
+       "schema": {
+        "type": "string"
+       }
+      },
+      "401": {
+       "description": "Unauthorized"
+      },
+      "500": {
+       "description": "Internal Server Error",
+       "schema": {
+        "type": "string"
+       }
       }
      }
     }
@@ -14086,6 +14262,51 @@
      }
     }
    },
+   "v1.Condition": {
+    "description": "Condition defines conditions",
+    "type": "object",
+    "required": [
+     "type",
+     "status"
+    ],
+    "properties": {
+     "lastProbeTime": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "lastTransitionTime": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "message": {
+      "type": "string"
+     },
+     "reason": {
+      "type": "string"
+     },
+     "status": {
+      "type": "string",
+      "default": ""
+     },
+     "type": {
+      "type": "string",
+      "default": ""
+     }
+    }
+   },
+   "v1.ConfidentialComputeConfiguration": {
+    "type": "object",
+    "properties": {
+     "tdx": {
+      "description": "TDX configuration for attestation on the Intel TDX Platform",
+      "$ref": "#/definitions/v1.TDXConfiguration"
+     }
+    }
+   },
    "v1.ConfigDriveSSHPublicKeyAccessCredentialPropagation": {
     "type": "object"
    },
@@ -14147,6 +14368,24 @@
      "path": {
       "description": "Path defines the path to disk file in the container",
       "type": "string"
+     }
+    }
+   },
+   "v1.ContainerPathVolumeSource": {
+    "description": "ContainerPathVolumeSource represents a path from the virt-launcher container to be exposed to the VM via virtiofs. The path must correspond to an existing volumeMount in the virt-launcher pod's compute container.",
+    "type": "object",
+    "required": [
+     "path"
+    ],
+    "properties": {
+     "path": {
+      "description": "Path is the absolute path within the virt-launcher container to expose to the VM. The path must correspond to an existing volumeMount in the compute container.",
+      "type": "string",
+      "default": ""
+     },
+     "readOnly": {
+      "description": "ReadOnly controls whether the volume is exposed as read-only to the VM. Defaults to true. Write access is not currently supported.",
+      "type": "boolean"
      }
     }
    },
@@ -14358,16 +14597,26 @@
       "type": "integer",
       "format": "int32"
      },
-     "diskVerification": {
-      "$ref": "#/definitions/v1.DiskVerification"
-     },
-     "featureGates": {
-      "description": "FeatureGates is the list of experimental features to enable. Defaults to none",
+     "disabledFeatureGates": {
+      "description": "DisabledFeatureGates specifies a list of experimental feature gates to disable. A feature gate must not appear in both FeatureGates and DisabledFeatureGates.",
       "type": "array",
       "items": {
        "type": "string",
        "default": ""
-      }
+      },
+      "x-kubernetes-list-type": "atomic"
+     },
+     "diskVerification": {
+      "$ref": "#/definitions/v1.DiskVerification"
+     },
+     "featureGates": {
+      "description": "FeatureGates specifies a list of experimental feature gates to enable. Defaults to none. A feature gate must not appear in both FeatureGates and DisabledFeatureGates.",
+      "type": "array",
+      "items": {
+       "type": "string",
+       "default": ""
+      },
+      "x-kubernetes-list-type": "atomic"
      },
      "logVerbosity": {
       "$ref": "#/definitions/v1.LogVerbosity"
@@ -14403,79 +14652,6 @@
      "useEmulation": {
       "description": "UseEmulation can be set to true to allow fallback to software emulation in case hardware-assisted emulation is not available. Defaults to false",
       "type": "boolean"
-     }
-    }
-   },
-   "v1.DeviceAttribute": {
-    "description": "DeviceAttribute must have exactly one field set.",
-    "type": "object",
-    "properties": {
-     "mDevUUID": {
-      "description": "MDevUUID is the mediated device uuid of the allocated device",
-      "type": "string"
-     },
-     "pciAddress": {
-      "description": "PCIAddress is the PCIe bus address of the allocated device",
-      "type": "string"
-     }
-    }
-   },
-   "v1.DeviceResourceClaimStatus": {
-    "description": "DeviceResourceClaimStatus has to be before SyncVMI call from virt-handler to virt-launcher",
-    "type": "object",
-    "properties": {
-     "attributes": {
-      "description": "Attributes are properties of the device that could be used by kubevirt and other copmonents to learn more about the device, like pciAddress or mdevUUID",
-      "$ref": "#/definitions/v1.DeviceAttribute"
-     },
-     "name": {
-      "description": "Name is the name of actual device on the host provisioned by the driver as reflected in resourceclaim.status",
-      "type": "string"
-     },
-     "resourceClaimName": {
-      "description": "ResourceClaimName is the name of the resource claims object used to provision this resource",
-      "type": "string"
-     }
-    }
-   },
-   "v1.DeviceStatus": {
-    "description": "DeviceStatus has the information of all devices allocated spec.domain.devices",
-    "type": "object",
-    "properties": {
-     "gpuStatuses": {
-      "description": "GPUStatuses reflects the state of GPUs requested in spec.domain.devices.gpus",
-      "type": "array",
-      "items": {
-       "default": {},
-       "$ref": "#/definitions/v1.DeviceStatusInfo"
-      },
-      "x-kubernetes-list-type": "atomic"
-     },
-     "hostDeviceStatuses": {
-      "description": "HostDeviceStatuses reflects the state of GPUs requested in spec.domain.devices.hostDevices DRA",
-      "type": "array",
-      "items": {
-       "default": {},
-       "$ref": "#/definitions/v1.DeviceStatusInfo"
-      },
-      "x-kubernetes-list-type": "atomic"
-     }
-    }
-   },
-   "v1.DeviceStatusInfo": {
-    "type": "object",
-    "required": [
-     "name"
-    ],
-    "properties": {
-     "deviceResourceClaimStatus": {
-      "description": "DeviceResourceClaimStatus reflects the DRA related information for the device",
-      "$ref": "#/definitions/v1.DeviceResourceClaimStatus"
-     },
-     "name": {
-      "description": "Name of the device as specified in spec.domain.devices.gpus.name or spec.domain.devices.hostDevices.name",
-      "type": "string",
-      "default": ""
      }
     }
    },
@@ -14808,6 +14984,10 @@
      "memory": {
       "description": "Memory allow specifying the VMI memory features.",
       "$ref": "#/definitions/v1.Memory"
+     },
+     "rebootPolicy": {
+      "description": "RebootPolicy specifies how the guest should behave on reboot. Reboot (default): The guest is allowed to reboot silently. Terminate: The VMI will be terminated on guest reboot, allowing higher level controllers (such as the VM controller) to recreate the VMI with any updated configuration such as boot order changes.",
+      "type": "string"
      },
      "resources": {
       "description": "Resources describes the Compute Resources required by this vmi.",
@@ -15529,6 +15709,9 @@
       "description": "DeprecatedPasst is an alias to the deprecated Passt interface, please refer to Kubevirt user guide for alternatives. Deprecated: Removed in v1.3",
       "$ref": "#/definitions/v1.DeprecatedInterfacePasst"
      },
+     "passtBinding": {
+      "$ref": "#/definitions/v1.InterfacePasstBinding"
+     },
      "pciAddress": {
       "description": "If specified, the virtual network interface will be placed on the guests pci address with the specified PCI address. For example: 0000:81:01.10",
       "type": "string"
@@ -15602,6 +15785,10 @@
    },
    "v1.InterfaceMasquerade": {
     "description": "InterfaceMasquerade connects to a given network using netfilter rules to nat the traffic.",
+    "type": "object"
+   },
+   "v1.InterfacePasstBinding": {
+    "description": "InterfacePasstBinding connects to a given network using passt usermode networking.",
     "type": "object"
    },
    "v1.InterfaceSRIOV": {
@@ -15800,6 +15987,10 @@
       "description": "CommonInstancetypesDeployment controls the deployment of common-instancetypes resources",
       "$ref": "#/definitions/v1.CommonInstancetypesDeployment"
      },
+     "confidentialCompute": {
+      "description": "QGS configuration for attestation on the Intel TDX Platform",
+      "$ref": "#/definitions/v1.ConfidentialComputeConfiguration"
+     },
      "controllerConfiguration": {
       "$ref": "#/definitions/v1.ReloadableComponentConfiguration"
      },
@@ -15895,6 +16086,10 @@
      "permittedHostDevices": {
       "$ref": "#/definitions/v1.PermittedHostDevices"
      },
+     "roleAggregationStrategy": {
+      "description": "RoleAggregationStrategy controls whether RBAC cluster roles should be aggregated to the default Kubernetes roles (admin, edit, view). When set to \"AggregateToDefault\" (default) or not specified, the aggregate-to-* labels are added to the cluster roles. When set to \"Manual\", the labels are not added, and roles will not be aggregated to the default roles. Setting this field to \"Manual\" requires the OptOutRoleAggregation feature gate to be enabled. This is an Alpha feature and subject to change.",
+      "type": "string"
+     },
      "seccompConfiguration": {
       "$ref": "#/definitions/v1.SeccompConfiguration"
      },
@@ -15926,6 +16121,10 @@
      },
      "tlsConfiguration": {
       "$ref": "#/definitions/v1.TLSConfiguration"
+     },
+     "virtTemplateDeployment": {
+      "description": "VirtTemplateDeployment controls the deployment of virt-template components",
+      "$ref": "#/definitions/v1.VirtTemplateDeployment"
      },
      "virtualMachineInstancesPerNode": {
       "type": "integer",
@@ -16357,6 +16556,10 @@
      "maxGuest": {
       "description": "MaxGuest allows to specify the maximum amount of memory which is visible inside the Guest OS. The delta between MaxGuest and Guest is the amount of memory that can be hot(un)plugged.",
       "$ref": "#/definitions/k8s.io.apimachinery.pkg.api.resource.Quantity"
+     },
+     "reservedOverhead": {
+      "description": "ReservedOverhead configures the memory overhead applied to a VM and its characteristics.",
+      "$ref": "#/definitions/v1.ReservedOverhead"
      }
     }
    },
@@ -16394,6 +16597,10 @@
      },
      "guestRequested": {
       "description": "GuestRequested specifies how much memory was requested (hotplug) for the VirtualMachine.",
+      "$ref": "#/definitions/k8s.io.apimachinery.pkg.api.resource.Quantity"
+     },
+     "memoryOverhead": {
+      "description": "MemoryOverhead specifies the memory overhead added by the virtualization infrastructure for the virt-launcher pod.",
       "$ref": "#/definitions/k8s.io.apimachinery.pkg.api.resource.Quantity"
      }
     }
@@ -17085,6 +17292,19 @@
      }
     }
    },
+   "v1.ReservedOverhead": {
+    "type": "object",
+    "properties": {
+     "addedOverhead": {
+      "description": "AddedOverhead determines the memory overhead that will be reserved for the VM. It increases the virt-launcher pod memory limit.",
+      "$ref": "#/definitions/k8s.io.apimachinery.pkg.api.resource.Quantity"
+     },
+     "memLock": {
+      "description": "RequiresLock determines whether the VM's and its overhead memory need to be locked or not. It is a common practice to enable this if vDPA, VFIO or any other specialized hardware that depends on DMA is being used by the VM. False - (Default) memory lock RLimits are not modified. True - Memory lock RLimits will be updated to consider VM memory\n       size and memory overhead",
+      "type": "string"
+     }
+    }
+   },
    "v1.ResourceRequirements": {
     "type": "object",
     "properties": {
@@ -17536,6 +17756,28 @@
    "v1.TDX": {
     "type": "object"
    },
+   "v1.TDXAttestationConfiguration": {
+    "description": "QGSConfiguration holds QGS configuration",
+    "type": "object",
+    "properties": {
+     "enforced": {
+      "description": "Indicates whether TDX VM should enforce the existence of QGS (required for attestation) to be scheduled",
+      "type": "boolean"
+     },
+     "qgsSocketPath": {
+      "description": "Socket path pointing to the Quote Generation Service",
+      "type": "string"
+     }
+    }
+   },
+   "v1.TDXConfiguration": {
+    "type": "object",
+    "properties": {
+     "attestation": {
+      "$ref": "#/definitions/v1.TDXAttestationConfiguration"
+     }
+    }
+   },
    "v1.TLBFlush": {
     "type": "object",
     "properties": {
@@ -17802,6 +18044,15 @@
      }
     }
    },
+   "v1.VirtTemplateDeployment": {
+    "type": "object",
+    "properties": {
+     "enabled": {
+      "description": "Enabled controls the deployment of virt-template resources, defaults to True when feature gate is enabled.",
+      "type": "boolean"
+     }
+    }
+   },
    "v1.VirtualMachine": {
     "description": "VirtualMachine handles the VirtualMachines that are not running or are in a stopped state The VirtualMachine contains the template to create the VirtualMachineInstance. It also mirrors the running state of the created VirtualMachineInstance in its status.",
     "type": "object",
@@ -17869,6 +18120,294 @@
      }
     }
    },
+   "v1.VirtualMachineExport": {
+    "description": "VirtualMachineExport defines the operation of exporting a VM source",
+    "type": "object",
+    "required": [
+     "spec"
+    ],
+    "properties": {
+     "apiVersion": {
+      "description": "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+      "type": "string"
+     },
+     "kind": {
+      "description": "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+      "type": "string"
+     },
+     "metadata": {
+      "default": {},
+      "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.ObjectMeta"
+     },
+     "spec": {
+      "default": {},
+      "$ref": "#/definitions/v1.VirtualMachineExportSpec"
+     },
+     "status": {
+      "$ref": "#/definitions/v1.VirtualMachineExportStatus"
+     }
+    }
+   },
+   "v1.VirtualMachineExportBackup": {
+    "description": "VirtualMachineExportBackup contains the name and available endpoints for the exported backup",
+    "type": "object",
+    "required": [
+     "name"
+    ],
+    "properties": {
+     "endpoints": {
+      "type": "array",
+      "items": {
+       "default": {},
+       "$ref": "#/definitions/v1.VirtualMachineExportBackupEndpoint"
+      },
+      "x-kubernetes-list-map-keys": [
+       "endpoint"
+      ],
+      "x-kubernetes-list-type": "map"
+     },
+     "name": {
+      "description": "Name is the name of the exported volume",
+      "type": "string",
+      "default": ""
+     }
+    }
+   },
+   "v1.VirtualMachineExportBackupEndpoint": {
+    "description": "VirtualMachineExportBackupEndpoint contains the endpoint type and URL to interact with a backup export",
+    "type": "object",
+    "required": [
+     "endpoint",
+     "url"
+    ],
+    "properties": {
+     "endpoint": {
+      "description": "Endpoint is the endpoint of the backup export at the specified URL",
+      "type": "string",
+      "default": ""
+     },
+     "url": {
+      "description": "Url is the url that contains the volume in the format specified",
+      "type": "string",
+      "default": ""
+     }
+    }
+   },
+   "v1.VirtualMachineExportLink": {
+    "description": "VirtualMachineExportLink contains a list of volumes available for export, as well as the URLs to obtain these volumes",
+    "type": "object",
+    "required": [
+     "cert"
+    ],
+    "properties": {
+     "backups": {
+      "description": "Backups is a list of available backups for the export",
+      "type": "array",
+      "items": {
+       "default": {},
+       "$ref": "#/definitions/v1.VirtualMachineExportBackup"
+      },
+      "x-kubernetes-list-map-keys": [
+       "name"
+      ],
+      "x-kubernetes-list-type": "map"
+     },
+     "cert": {
+      "description": "Cert is the public CA certificate base64 encoded",
+      "type": "string",
+      "default": ""
+     },
+     "manifests": {
+      "description": "Manifests is a list of available manifests for the export",
+      "type": "array",
+      "items": {
+       "default": {},
+       "$ref": "#/definitions/v1.VirtualMachineExportManifest"
+      },
+      "x-kubernetes-list-map-keys": [
+       "type"
+      ],
+      "x-kubernetes-list-type": "map"
+     },
+     "volumes": {
+      "description": "Volumes is a list of available volumes to export",
+      "type": "array",
+      "items": {
+       "default": {},
+       "$ref": "#/definitions/v1.VirtualMachineExportVolume"
+      },
+      "x-kubernetes-list-map-keys": [
+       "name"
+      ],
+      "x-kubernetes-list-type": "map"
+     }
+    }
+   },
+   "v1.VirtualMachineExportLinks": {
+    "description": "VirtualMachineExportLinks contains the links that point the exported VM resources",
+    "type": "object",
+    "properties": {
+     "external": {
+      "$ref": "#/definitions/v1.VirtualMachineExportLink"
+     },
+     "internal": {
+      "$ref": "#/definitions/v1.VirtualMachineExportLink"
+     }
+    }
+   },
+   "v1.VirtualMachineExportList": {
+    "description": "VirtualMachineExportList is a list of VirtualMachineExport resources",
+    "type": "object",
+    "required": [
+     "metadata",
+     "items"
+    ],
+    "properties": {
+     "apiVersion": {
+      "description": "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+      "type": "string"
+     },
+     "items": {
+      "type": "array",
+      "items": {
+       "default": {},
+       "$ref": "#/definitions/v1.VirtualMachineExport"
+      },
+      "x-kubernetes-list-type": "atomic"
+     },
+     "kind": {
+      "description": "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+      "type": "string"
+     },
+     "metadata": {
+      "default": {},
+      "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.ListMeta"
+     }
+    }
+   },
+   "v1.VirtualMachineExportManifest": {
+    "description": "VirtualMachineExportManifest contains the type and URL of the exported manifest",
+    "type": "object",
+    "required": [
+     "type",
+     "url"
+    ],
+    "properties": {
+     "type": {
+      "description": "Type is the type of manifest returned",
+      "type": "string",
+      "default": ""
+     },
+     "url": {
+      "description": "Url is the url of the endpoint that returns the manifest",
+      "type": "string",
+      "default": ""
+     }
+    }
+   },
+   "v1.VirtualMachineExportSpec": {
+    "description": "VirtualMachineExportSpec is the spec for a VirtualMachineExport resource",
+    "type": "object",
+    "required": [
+     "source"
+    ],
+    "properties": {
+     "source": {
+      "default": {},
+      "$ref": "#/definitions/k8s.io.api.core.v1.TypedLocalObjectReference"
+     },
+     "tokenSecretRef": {
+      "description": "TokenSecretRef is the name of the custom-defined secret that contains the token used by the export server pod",
+      "type": "string"
+     },
+     "ttlDuration": {
+      "description": "ttlDuration limits the lifetime of an export If this field is set, after this duration has passed from counting from CreationTimestamp, the export is eligible to be automatically deleted. If this field is omitted, a reasonable default is applied.",
+      "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.Duration"
+     }
+    }
+   },
+   "v1.VirtualMachineExportStatus": {
+    "description": "VirtualMachineExportStatus is the status for a VirtualMachineExport resource",
+    "type": "object",
+    "nullable": true,
+    "properties": {
+     "conditions": {
+      "type": "array",
+      "items": {
+       "default": {},
+       "$ref": "#/definitions/v1.Condition"
+      },
+      "x-kubernetes-list-type": "atomic"
+     },
+     "links": {
+      "$ref": "#/definitions/v1.VirtualMachineExportLinks"
+     },
+     "phase": {
+      "type": "string"
+     },
+     "serviceName": {
+      "description": "ServiceName is the name of the service created associated with the Virtual Machine export. It will be used to create the internal URLs for downloading the images",
+      "type": "string"
+     },
+     "tokenSecretRef": {
+      "description": "TokenSecretRef is the name of the secret that contains the token used by the export server pod",
+      "type": "string"
+     },
+     "ttlExpirationTime": {
+      "description": "The time at which the VM Export will be completely removed according to specified TTL Formula is CreationTimestamp + TTL",
+      "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.Time"
+     },
+     "virtualMachineName": {
+      "description": "VirtualMachineName shows the name of the source virtual machine if the source is either a VirtualMachine or a VirtualMachineSnapshot. This is mainly to easily identify the source VirtualMachine in case of a VirtualMachineSnapshot",
+      "type": "string"
+     }
+    }
+   },
+   "v1.VirtualMachineExportVolume": {
+    "description": "VirtualMachineExportVolume contains the name and available formats for the exported volume",
+    "type": "object",
+    "required": [
+     "name"
+    ],
+    "properties": {
+     "formats": {
+      "type": "array",
+      "items": {
+       "default": {},
+       "$ref": "#/definitions/v1.VirtualMachineExportVolumeFormat"
+      },
+      "x-kubernetes-list-map-keys": [
+       "format"
+      ],
+      "x-kubernetes-list-type": "map"
+     },
+     "name": {
+      "description": "Name is the name of the exported volume",
+      "type": "string",
+      "default": ""
+     }
+    }
+   },
+   "v1.VirtualMachineExportVolumeFormat": {
+    "description": "VirtualMachineExportVolumeFormat contains the format type and URL to get the volume in that format",
+    "type": "object",
+    "required": [
+     "format",
+     "url"
+    ],
+    "properties": {
+     "format": {
+      "description": "Format is the format of the image at the specified URL",
+      "type": "string",
+      "default": ""
+     },
+     "url": {
+      "description": "Url is the url that contains the volume in the format specified",
+      "type": "string",
+      "default": ""
+     }
+    }
+   },
    "v1.VirtualMachineInstance": {
     "description": "VirtualMachineInstance is *the* VirtualMachineInstance Definition. It represents a virtual machine in the runtime environment of kubernetes.",
     "type": "object",
@@ -17923,9 +18462,22 @@
       "description": "EndTimestamp is the timestamp when the backup ended",
       "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.Time"
      },
+     "failed": {
+      "description": "Failed indicates that the backup failed",
+      "type": "boolean"
+     },
      "startTimestamp": {
       "description": "StartTimestamp is the timestamp when the backup started",
       "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.Time"
+     },
+     "volumes": {
+      "description": "Volumes lists the volumes included in the backup",
+      "type": "array",
+      "items": {
+       "default": {},
+       "$ref": "#/definitions/v1alpha1.BackupVolumeInfo"
+      },
+      "x-kubernetes-list-type": "atomic"
      }
     }
    },
@@ -18528,6 +19080,10 @@
        "format": "int32",
        "default": 0
       }
+     },
+     "targetMemoryOverhead": {
+      "description": "TargetMemoryOverhead is the memory overhead of the target virt-launcher pod",
+      "$ref": "#/definitions/k8s.io.apimachinery.pkg.api.resource.Quantity"
      },
      "targetNode": {
       "description": "The target node that the VMI is moving to",
@@ -19166,10 +19722,6 @@
       "description": "CurrentCPUTopology specifies the current CPU topology used by the VM workload. Current topology may differ from the desired topology in the spec while CPU hotplug takes place.",
       "$ref": "#/definitions/v1.CPUTopology"
      },
-     "deviceStatus": {
-      "description": "DeviceStatus reflects the state of devices requested in spec.domain.devices. This is an optional field available only when DRA feature gate is enabled This field will only be populated if one of the feature-gates GPUsWithDRA or HostDevicesWithDRA is enabled. This feature is in alpha.",
-      "$ref": "#/definitions/v1.DeviceStatus"
-     },
      "evacuationNodeName": {
       "description": "EvacuationNodeName is used to track the eviction process of a VMI. It stores the name of the node that we want to evacuate. It is meant to be used by KubeVirt core components only and can't be set or modified by users.",
       "type": "string"
@@ -19597,6 +20149,10 @@
       "description": "ContainerDisk references a docker image, embedding a qcow or raw disk. More info: https://kubevirt.gitbooks.io/user-guide/registry-disk.html",
       "$ref": "#/definitions/v1.ContainerDiskSource"
      },
+     "containerPath": {
+      "description": "ContainerPath exposes a path from the virt-launcher container to the VM via virtiofs. The path must correspond to an existing volumeMount in the compute container.",
+      "$ref": "#/definitions/v1.ContainerPathVolumeSource"
+     },
      "dataVolume": {
       "description": "DataVolume represents the dynamic creation a PVC for this volume as well as the process of populating that PVC with a disk image.",
       "$ref": "#/definitions/v1.DataVolumeSource"
@@ -19769,17 +20325,52 @@
      }
     }
    },
+   "v1alpha1.BackupCheckpoint": {
+    "type": "object",
+    "properties": {
+     "creationTime": {
+      "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.Time"
+     },
+     "name": {
+      "type": "string"
+     },
+     "volumes": {
+      "description": "Volumes lists volumes and their disk targets at backup time",
+      "type": "array",
+      "items": {
+       "default": {},
+       "$ref": "#/definitions/v1alpha1.BackupVolumeInfo"
+      },
+      "x-kubernetes-list-type": "atomic"
+     }
+    }
+   },
    "v1alpha1.BackupOptions": {
     "description": "BackupOptions are options used to configure virtual machine backup job",
     "type": "object",
     "properties": {
+     "backupCert": {
+      "type": "string"
+     },
+     "backupKey": {
+      "type": "string"
+     },
      "backupName": {
       "type": "string"
      },
      "backupStartTime": {
       "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.Time"
      },
+     "caCert": {
+      "type": "string"
+     },
      "cmd": {
+      "type": "string"
+     },
+     "exportServerAddr": {
+      "type": "string"
+     },
+     "exportServerName": {
       "type": "string"
      },
      "incremental": {
@@ -19788,11 +20379,39 @@
      "mode": {
       "type": "string"
      },
-     "pushPath": {
-      "type": "string"
-     },
      "skipQuiesce": {
       "type": "boolean"
+     },
+     "targetPath": {
+      "type": "string"
+     }
+    }
+   },
+   "v1alpha1.BackupVolumeInfo": {
+    "description": "BackupVolumeInfo contains information about a volume included in a backup",
+    "type": "object",
+    "required": [
+     "volumeName",
+     "diskTarget"
+    ],
+    "properties": {
+     "dataEndpoint": {
+      "description": "DataEndpoint is the URL of the endpoint for read for pull mode",
+      "type": "string"
+     },
+     "diskTarget": {
+      "description": "DiskTarget is the disk target device name at backup time",
+      "type": "string",
+      "default": ""
+     },
+     "mapEndpoint": {
+      "description": "MapEndpoint is the URL of the endpoint for map for pull mode",
+      "type": "string"
+     },
+     "volumeName": {
+      "description": "VolumeName is the volume name from VMI spec",
+      "type": "string",
+      "default": ""
      }
     }
    },
@@ -20025,6 +20644,14 @@
       "description": "Source specifies the backup source - either a VirtualMachine or a VirtualMachineBackupTracker. When Kind is VirtualMachine: performs a backup of the specified VM. When Kind is VirtualMachineBackupTracker: uses the tracker to get the source VM and the base checkpoint for incremental backup. The tracker will be updated with the new checkpoint after backup completion.",
       "default": {},
       "$ref": "#/definitions/k8s.io.api.core.v1.TypedLocalObjectReference"
+     },
+     "tokenSecretRef": {
+      "description": "TokenSecretRef is the name of the secret that will be used to pull the backup from an associated endpoint",
+      "type": "string"
+     },
+     "ttlDuration": {
+      "description": "TtlDuration limits the lifetime of a pull mode backup and its export If this field is set, after this duration has passed from counting from CreationTimestamp, the backup is eligible to be automatically considered as complete. If this field is omitted, a reasonable default is applied.",
+      "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.Duration"
      }
     }
    },
@@ -20042,6 +20669,19 @@
       "items": {
        "default": {},
        "$ref": "#/definitions/v1alpha1.Condition"
+      },
+      "x-kubernetes-list-type": "atomic"
+     },
+     "endpointCert": {
+      "description": "EndpointCert is the raw CACert that is to be used when connecting to an exported backup endpoint in pull mode.",
+      "type": "string"
+     },
+     "includedVolumes": {
+      "description": "IncludedVolumes lists the volumes that were included in the backup",
+      "type": "array",
+      "items": {
+       "default": {},
+       "$ref": "#/definitions/v1alpha1.BackupVolumeInfo"
       },
       "x-kubernetes-list-type": "atomic"
      },
@@ -20308,6 +20948,10 @@
       "description": "DiskID provides id of a disk to be imported",
       "type": "string",
       "default": ""
+     },
+     "insecureSkipVerify": {
+      "description": "InsecureSkipVerify is a flag to skip certificate verification",
+      "type": "boolean"
      },
      "secretRef": {
       "description": "SecretRef provides the secret reference needed to access the ovirt-engine",
@@ -20619,6 +21263,10 @@
      "preferredUseVirtioTransitional": {
       "description": "PreferredUseVirtioTransitional optionally defines the preferred value of UseVirtioTransitional",
       "type": "boolean"
+     },
+     "preferredVideoType": {
+      "description": "PreferredVideoType optionally defines the preferred type for Video devices.",
+      "type": "string"
      },
      "preferredVirtualGPUOptions": {
       "description": "PreferredVirtualGPUOptions optionally defines the preferred value of VirtualGPUOptions",
@@ -21201,237 +21849,6 @@
      "metadata": {
       "default": {},
       "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.ListMeta"
-     }
-    }
-   },
-   "v1beta1.VirtualMachineExport": {
-    "description": "VirtualMachineExport defines the operation of exporting a VM source",
-    "type": "object",
-    "required": [
-     "spec"
-    ],
-    "properties": {
-     "apiVersion": {
-      "description": "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
-      "type": "string"
-     },
-     "kind": {
-      "description": "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
-      "type": "string"
-     },
-     "metadata": {
-      "default": {},
-      "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.ObjectMeta"
-     },
-     "spec": {
-      "default": {},
-      "$ref": "#/definitions/v1beta1.VirtualMachineExportSpec"
-     },
-     "status": {
-      "$ref": "#/definitions/v1beta1.VirtualMachineExportStatus"
-     }
-    }
-   },
-   "v1beta1.VirtualMachineExportLink": {
-    "description": "VirtualMachineExportLink contains a list of volumes available for export, as well as the URLs to obtain these volumes",
-    "type": "object",
-    "required": [
-     "cert"
-    ],
-    "properties": {
-     "cert": {
-      "description": "Cert is the public CA certificate base64 encoded",
-      "type": "string",
-      "default": ""
-     },
-     "manifests": {
-      "description": "Manifests is a list of available manifests for the export",
-      "type": "array",
-      "items": {
-       "default": {},
-       "$ref": "#/definitions/v1beta1.VirtualMachineExportManifest"
-      },
-      "x-kubernetes-list-map-keys": [
-       "type"
-      ],
-      "x-kubernetes-list-type": "map"
-     },
-     "volumes": {
-      "description": "Volumes is a list of available volumes to export",
-      "type": "array",
-      "items": {
-       "default": {},
-       "$ref": "#/definitions/v1beta1.VirtualMachineExportVolume"
-      },
-      "x-kubernetes-list-map-keys": [
-       "name"
-      ],
-      "x-kubernetes-list-type": "map"
-     }
-    }
-   },
-   "v1beta1.VirtualMachineExportLinks": {
-    "description": "VirtualMachineExportLinks contains the links that point the exported VM resources",
-    "type": "object",
-    "properties": {
-     "external": {
-      "$ref": "#/definitions/v1beta1.VirtualMachineExportLink"
-     },
-     "internal": {
-      "$ref": "#/definitions/v1beta1.VirtualMachineExportLink"
-     }
-    }
-   },
-   "v1beta1.VirtualMachineExportList": {
-    "description": "VirtualMachineExportList is a list of VirtualMachineExport resources",
-    "type": "object",
-    "required": [
-     "metadata",
-     "items"
-    ],
-    "properties": {
-     "apiVersion": {
-      "description": "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
-      "type": "string"
-     },
-     "items": {
-      "type": "array",
-      "items": {
-       "default": {},
-       "$ref": "#/definitions/v1beta1.VirtualMachineExport"
-      },
-      "x-kubernetes-list-type": "atomic"
-     },
-     "kind": {
-      "description": "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
-      "type": "string"
-     },
-     "metadata": {
-      "default": {},
-      "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.ListMeta"
-     }
-    }
-   },
-   "v1beta1.VirtualMachineExportManifest": {
-    "description": "VirtualMachineExportManifest contains the type and URL of the exported manifest",
-    "type": "object",
-    "required": [
-     "type",
-     "url"
-    ],
-    "properties": {
-     "type": {
-      "description": "Type is the type of manifest returned",
-      "type": "string",
-      "default": ""
-     },
-     "url": {
-      "description": "Url is the url of the endpoint that returns the manifest",
-      "type": "string",
-      "default": ""
-     }
-    }
-   },
-   "v1beta1.VirtualMachineExportSpec": {
-    "description": "VirtualMachineExportSpec is the spec for a VirtualMachineExport resource",
-    "type": "object",
-    "required": [
-     "source"
-    ],
-    "properties": {
-     "source": {
-      "default": {},
-      "$ref": "#/definitions/k8s.io.api.core.v1.TypedLocalObjectReference"
-     },
-     "tokenSecretRef": {
-      "description": "TokenSecretRef is the name of the custom-defined secret that contains the token used by the export server pod",
-      "type": "string"
-     },
-     "ttlDuration": {
-      "description": "ttlDuration limits the lifetime of an export If this field is set, after this duration has passed from counting from CreationTimestamp, the export is eligible to be automatically deleted. If this field is omitted, a reasonable default is applied.",
-      "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.Duration"
-     }
-    }
-   },
-   "v1beta1.VirtualMachineExportStatus": {
-    "description": "VirtualMachineExportStatus is the status for a VirtualMachineExport resource",
-    "type": "object",
-    "nullable": true,
-    "properties": {
-     "conditions": {
-      "type": "array",
-      "items": {
-       "default": {},
-       "$ref": "#/definitions/v1beta1.Condition"
-      },
-      "x-kubernetes-list-type": "atomic"
-     },
-     "links": {
-      "$ref": "#/definitions/v1beta1.VirtualMachineExportLinks"
-     },
-     "phase": {
-      "type": "string"
-     },
-     "serviceName": {
-      "description": "ServiceName is the name of the service created associated with the Virtual Machine export. It will be used to create the internal URLs for downloading the images",
-      "type": "string"
-     },
-     "tokenSecretRef": {
-      "description": "TokenSecretRef is the name of the secret that contains the token used by the export server pod",
-      "type": "string"
-     },
-     "ttlExpirationTime": {
-      "description": "The time at which the VM Export will be completely removed according to specified TTL Formula is CreationTimestamp + TTL",
-      "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.Time"
-     },
-     "virtualMachineName": {
-      "description": "VirtualMachineName shows the name of the source virtual machine if the source is either a VirtualMachine or a VirtualMachineSnapshot. This is mainly to easily identify the source VirtualMachine in case of a VirtualMachineSnapshot",
-      "type": "string"
-     }
-    }
-   },
-   "v1beta1.VirtualMachineExportVolume": {
-    "description": "VirtualMachineExportVolume contains the name and available formats for the exported volume",
-    "type": "object",
-    "required": [
-     "name"
-    ],
-    "properties": {
-     "formats": {
-      "type": "array",
-      "items": {
-       "default": {},
-       "$ref": "#/definitions/v1beta1.VirtualMachineExportVolumeFormat"
-      },
-      "x-kubernetes-list-map-keys": [
-       "format"
-      ],
-      "x-kubernetes-list-type": "map"
-     },
-     "name": {
-      "description": "Name is the name of the exported volume",
-      "type": "string",
-      "default": ""
-     }
-    }
-   },
-   "v1beta1.VirtualMachineExportVolumeFormat": {
-    "description": "VirtualMachineExportVolumeFormat contains the format type and URL to get the volume in that format",
-    "type": "object",
-    "required": [
-     "format",
-     "url"
-    ],
-    "properties": {
-     "format": {
-      "description": "Format is the format of the image at the specified URL",
-      "type": "string",
-      "default": ""
-     },
-     "url": {
-      "description": "Url is the url that contains the volume in the format specified",
-      "type": "string",
-      "default": ""
      }
     }
    },

@@ -101,6 +101,11 @@ spec:
           matchLabelsKey: matchLabelsValue
     commonInstancetypesDeployment:
       enabled: true
+    confidentialCompute:
+      tdx:
+        attestation:
+          enforced: true
+          qgsSocketPath: qgsSocketPathValue
     controllerConfiguration:
       restClient:
         rateLimiter:
@@ -113,6 +118,8 @@ spec:
     developerConfiguration:
       clusterProfiler: true
       cpuAllocationRatio: -18
+      disabledFeatureGates:
+      - disabledFeatureGatesValue
       diskVerification:
         memoryLimit: "0"
       featureGates:
@@ -226,6 +233,7 @@ spec:
         selectors:
         - product: productValue
           vendor: vendorValue
+    roleAggregationStrategy: roleAggregationStrategyValue
     seccompConfiguration:
       virtualMachineInstanceProfile:
         customProfile:
@@ -251,6 +259,8 @@ spec:
       ciphers:
       - ciphersValue
       minTLSVersion: minTLSVersionValue
+    virtTemplateDeployment:
+      enabled: true
     virtualMachineInstancesPerNode: -30
     virtualMachineOptions:
       disableFreePageReporting: {}

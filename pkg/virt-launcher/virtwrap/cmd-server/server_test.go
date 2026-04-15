@@ -30,9 +30,11 @@ import (
 	. "github.com/onsi/gomega"
 	"go.uber.org/mock/gomock"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	backupv1 "kubevirt.io/api/backup/v1alpha1"
 	v1 "kubevirt.io/api/core/v1"
 
-	"kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/info"
 	cmdv1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap"
@@ -337,6 +339,71 @@ var _ = Describe("Virt remote commands", func() {
 			Expect(client.SyncVirtualMachineMemory(vmi, &cmdv1.VirtualMachineOptions{})).To(Succeed())
 		})
 
+		Context("RedefineCheckpoint", func() {
+			var vmi *v1.VirtualMachineInstance
+			var checkpoint *backupv1.BackupCheckpoint
+
+			BeforeEach(func() {
+				vmi = v1.NewVMIReferenceFromName("testvmi")
+				vmi.Status.ChangedBlockTracking = &v1.ChangedBlockTrackingStatus{
+					State: v1.ChangedBlockTrackingEnabled,
+				}
+				creationTime := metav1.Unix(1234567890, 0)
+				checkpoint = &backupv1.BackupCheckpoint{
+					Name:         "checkpoint-1",
+					CreationTime: &creationTime,
+					Volumes: []backupv1.BackupVolumeInfo{
+						{VolumeName: "disk1", DiskTarget: "vda"},
+						{VolumeName: "disk2", DiskTarget: "vdb"},
+					},
+				}
+			})
+
+			It("should redefine checkpoint successfully", func() {
+				domainManager.EXPECT().RedefineCheckpoint(gomock.Any(), gomock.Any()).DoAndReturn(
+					func(vmiArg *v1.VirtualMachineInstance, cpArg *backupv1.BackupCheckpoint) (bool, error) {
+						Expect(vmiArg.Name).To(Equal("testvmi"))
+						Expect(cpArg.Name).To(Equal("checkpoint-1"))
+						Expect(cpArg.Volumes).To(HaveLen(2))
+						Expect(cpArg.Volumes[0].VolumeName).To(Equal("disk1"))
+						Expect(cpArg.Volumes[0].DiskTarget).To(Equal("vda"))
+						Expect(cpArg.CreationTime.Unix()).To(Equal(int64(1234567890)))
+						return false, nil
+					})
+
+				checkpointInvalid, err := client.RedefineCheckpoint(vmi, checkpoint)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(checkpointInvalid).To(BeFalse())
+			})
+
+			It("should return error when redefinition fails", func() {
+				domainManager.EXPECT().RedefineCheckpoint(gomock.Any(), gomock.Any()).Return(false, errors.New("redefinition failed"))
+
+				checkpointInvalid, err := client.RedefineCheckpoint(vmi, checkpoint)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("redefinition failed"))
+				Expect(checkpointInvalid).To(BeFalse())
+			})
+
+			It("should return checkpointInvalid=true when checkpoint is corrupt", func() {
+				domainManager.EXPECT().RedefineCheckpoint(gomock.Any(), gomock.Any()).Return(true, errors.New("bitmap invalid"))
+
+				checkpointInvalid, err := client.RedefineCheckpoint(vmi, checkpoint)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("bitmap invalid"))
+				Expect(checkpointInvalid).To(BeTrue())
+			})
+
+			It("should fail when CBT is not enabled", func() {
+				vmi.Status.ChangedBlockTracking = nil
+
+				checkpointInvalid, err := client.RedefineCheckpoint(vmi, checkpoint)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("ChangedBlockTracking is not enabled"))
+				Expect(checkpointInvalid).To(BeFalse())
+			})
+		})
+
 		Context("exec & guestPing", func() {
 			var (
 				testDomainName           = "test"
@@ -443,32 +510,4 @@ var _ = Describe("Virt remote commands", func() {
 		})
 
 	})
-
-	Describe("Version mismatch", func() {
-
-		var err error
-		var ctrl *gomock.Controller
-		var infoClient *info.MockCmdInfoClient
-
-		BeforeEach(func() {
-			ctrl = gomock.NewController(GinkgoT())
-			infoClient = info.NewMockCmdInfoClient(ctrl)
-		})
-
-		It("Should report error when server version mismatches", func() {
-
-			fakeResponse := info.CmdInfoResponse{
-				SupportedCmdVersions: []uint32{42},
-			}
-			infoClient.EXPECT().Info(gomock.Any(), gomock.Any()).Return(&fakeResponse, nil)
-
-			By("Initializing the notifier")
-			_, err = cmdclient.NewClientWithInfoClient(infoClient, nil)
-
-			Expect(err).To(HaveOccurred(), "Should have returned error about incompatible versions")
-			Expect(err.Error()).To(ContainSubstring("no compatible version found"), "Expected error message to contain 'no compatible version found'")
-
-		})
-	})
-
 })

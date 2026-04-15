@@ -43,6 +43,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 
+	backupv1 "kubevirt.io/api/backup/v1alpha1"
 	v1 "kubevirt.io/api/core/v1"
 	api2 "kubevirt.io/client-go/api"
 	"kubevirt.io/client-go/kubecli"
@@ -53,6 +54,7 @@ import (
 	controllertesting "kubevirt.io/kubevirt/pkg/controller/testing"
 	diskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
 	cmdv1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
+	"kubevirt.io/kubevirt/pkg/hypervisor"
 	"kubevirt.io/kubevirt/pkg/libvmi"
 	libvmistatus "kubevirt.io/kubevirt/pkg/libvmi/status"
 	neterrors "kubevirt.io/kubevirt/pkg/network/errors"
@@ -61,6 +63,7 @@ import (
 	"kubevirt.io/kubevirt/pkg/testutils"
 	"kubevirt.io/kubevirt/pkg/util"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
+	"kubevirt.io/kubevirt/pkg/virt-config/featuregate"
 	virtcache "kubevirt.io/kubevirt/pkg/virt-handler/cache"
 	"kubevirt.io/kubevirt/pkg/virt-handler/cgroup"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
@@ -97,7 +100,7 @@ var _ = Describe("VirtualMachineInstance", func() {
 	const host = "master"
 	const interfaceName = "interface_name"
 
-	getCgroupManager = func(_ *v1.VirtualMachineInstance, _ string) (cgroup.Manager, error) {
+	getCgroupManager = func(_ *v1.VirtualMachineInstance, _ string, _ hypervisor.HypervisorNodeInformation, _ bool) (cgroup.Manager, error) {
 		return mockCgroupManager, nil
 	}
 
@@ -163,7 +166,6 @@ var _ = Describe("VirtualMachineInstance", func() {
 
 		mockIsolationDetector := isolation.NewMockPodIsolationDetector(ctrl)
 		mockIsolationDetector.EXPECT().Detect(gomock.Any()).Return(mockIsolationResult, nil).AnyTimes()
-		mockIsolationDetector.EXPECT().AdjustResources(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 
 		mockContainerDiskMounter = containerdisk.NewMockMounter(ctrl)
 		mockHotplugVolumeMounter = hotplugvolume.NewMockVolumeMounter(ctrl)
@@ -177,6 +179,8 @@ var _ = Describe("VirtualMachineInstance", func() {
 		}
 		fakeNodeInformer, _ := testutils.NewFakeInformerFor(&k8sv1.Node{})
 		fakeNodeStore := fakeNodeInformer.GetStore()
+		fakeBackupTrackerInformer, _ := testutils.NewFakeInformerFor(&backupv1.VirtualMachineBackupTracker{})
+		cbtHandler := NewCBTHandler(virtClient, fakeBackupTrackerInformer)
 		controller, _ = NewVirtualMachineController(
 			recorder,
 			virtClient,
@@ -197,6 +201,7 @@ var _ = Describe("VirtualMachineInstance", func() {
 			"",  // host cpu model
 			&netConfStub{},
 			&netStatStub{},
+			cbtHandler,
 		)
 
 		controller.hotplugVolumeMounter = mockHotplugVolumeMounter
@@ -2257,10 +2262,10 @@ var _ = Describe("VirtualMachineInstance", func() {
 			conditionManager := virtcontroller.NewVirtualMachineInstanceConditionManager()
 			controller.updateLiveMigrationConditions(vmi, conditionManager)
 
-			testutils.ExpectEvent(recorder, fmt.Sprintf("cannot migrate VMI which does not use masquerade, bridge with %s VM annotation or a migratable plugin to connect to the pod network", v1.AllowPodBridgeNetworkLiveMigrationAnnotation))
+			testutils.ExpectEvent(recorder, "cannot migrate VMI which does not use masquerade or a migratable plugin to connect to the pod network")
 		})
 
-		Context("check that migration is not supported when using Host Devices", func() {
+		Context("check migration support when using Host Devices", func() {
 			envName := util.ResourceNameToEnvVar(v1.PCIResourcePrefix, "dev1")
 
 			BeforeEach(func() {
@@ -2287,26 +2292,161 @@ var _ = Describe("VirtualMachineInstance", func() {
 				Expect(condition.Reason).To(Equal(v1.VirtualMachineInstanceReasonHostDeviceNotMigratable))
 			})
 
-			It("should not be allowed to live-migrate if the VMI uses PCI GPU", func() {
-				envName := util.ResourceNameToEnvVar(v1.PCIResourcePrefix, "dev1")
-				_ = os.Setenv(envName, "0000:81:01.0")
-				defer func() {
+			Context("with GPU", func() {
+				BeforeEach(func() {
+					envName := util.ResourceNameToEnvVar(v1.PCIResourcePrefix, "dev1")
+					_ = os.Setenv(envName, "0000:81:01.0")
+					envName2 := util.ResourceNameToEnvVar(v1.PCIResourcePrefix, "nvidia.com/gpu")
+					_ = os.Setenv(envName2, "0000:81:02.0")
+				})
+
+				AfterEach(func() {
+					envName := util.ResourceNameToEnvVar(v1.PCIResourcePrefix, "dev1")
 					_ = os.Unsetenv(envName)
-				}()
+					envName2 := util.ResourceNameToEnvVar(v1.PCIResourcePrefix, "nvidia.com/gpu")
+					_ = os.Unsetenv(envName2)
+				})
 
-				vmi := api2.NewMinimalVMI("testvmi")
-				vmi.Spec.Domain.Devices.GPUs = []v1.GPU{
-					{
-						Name:       "name1",
-						DeviceName: "dev1",
-					},
-				}
+				It("should respect the vgpu live migration feature gate", func() {
+					vmi := api2.NewMinimalVMI("testvmi")
+					vmi.Spec.Domain.Devices.GPUs = []v1.GPU{
+						{
+							Name:       "m10",
+							DeviceName: "nvidia.com/GRID_M10-2B",
+						},
+					}
+					permittedHostDevs := &v1.PermittedHostDevices{
+						MediatedDevices: []v1.MediatedHostDevice{
+							{
+								MDEVNameSelector:         "GRID M10-2B",
+								ResourceName:             "nvidia.com/GRID_M10-2B",
+								ExternalResourceProvider: false,
+							},
+						},
+					}
 
-				condition, isBlockMigration := controller.calculateLiveMigrationCondition(vmi)
-				Expect(isBlockMigration).To(BeFalse())
-				Expect(condition.Type).To(Equal(v1.VirtualMachineInstanceIsMigratable))
-				Expect(condition.Status).To(Equal(k8sv1.ConditionFalse))
-				Expect(condition.Reason).To(Equal(v1.VirtualMachineInstanceReasonHostDeviceNotMigratable))
+					config, _, _ := testutils.NewFakeClusterConfigUsingKVConfig(&v1.KubeVirtConfiguration{
+						DeveloperConfiguration: &v1.DeveloperConfiguration{
+							FeatureGates: []string{},
+						},
+						PermittedHostDevices: permittedHostDevs,
+					})
+					controller.clusterConfig = config
+
+					condition, isBlockMigration := controller.calculateLiveMigrationCondition(vmi)
+					Expect(isBlockMigration).To(BeFalse())
+					Expect(condition.Type).To(Equal(v1.VirtualMachineInstanceIsMigratable))
+					Expect(condition.Status).To(Equal(k8sv1.ConditionFalse))
+					Expect(condition.Reason).To(Equal(v1.VirtualMachineInstanceReasonHostDeviceNotMigratable))
+					Expect(condition.Message).To(Equal("VMI specifies a GPU but feature gate " + featuregate.VGPULiveMigration + " is not enabled"))
+
+					config, _, _ = testutils.NewFakeClusterConfigUsingKVConfig(&v1.KubeVirtConfiguration{
+						DeveloperConfiguration: &v1.DeveloperConfiguration{
+							FeatureGates: []string{featuregate.VGPULiveMigration},
+						},
+						PermittedHostDevices: permittedHostDevs,
+					})
+					controller.clusterConfig = config
+
+					condition, isBlockMigration = controller.calculateLiveMigrationCondition(vmi)
+					Expect(isBlockMigration).To(BeFalse())
+					Expect(condition.Type).To(Equal(v1.VirtualMachineInstanceIsMigratable))
+					Expect(condition.Status).To(Equal(k8sv1.ConditionTrue))
+				})
+
+				It("should not be allowed to live-migrate if the VMI uses generic PCI Host Device", func() {
+					vmi := api2.NewMinimalVMI("testvmi")
+					vmi.Spec.Domain.Devices.HostDevices = []v1.HostDevice{
+						{
+							Name:       "nic1",
+							DeviceName: "intel.com/e810",
+						},
+					}
+
+					config, _, _ := testutils.NewFakeClusterConfigUsingKVConfig(&v1.KubeVirtConfiguration{
+						DeveloperConfiguration: &v1.DeveloperConfiguration{
+							FeatureGates: []string{featuregate.VGPULiveMigration},
+						},
+						PermittedHostDevices: &v1.PermittedHostDevices{
+							PciHostDevices: []v1.PciHostDevice{
+								{
+									PCIVendorSelector:        "0000:0000",
+									ResourceName:             "intel.com/e810",
+									ExternalResourceProvider: false,
+								},
+							},
+						},
+					})
+					controller.clusterConfig = config
+
+					condition, isBlockMigration := controller.calculateLiveMigrationCondition(vmi)
+					Expect(isBlockMigration).To(BeFalse())
+					Expect(condition.Type).To(Equal(v1.VirtualMachineInstanceIsMigratable))
+					Expect(condition.Status).To(Equal(k8sv1.ConditionFalse))
+					Expect(condition.Reason).To(Equal(v1.VirtualMachineInstanceReasonHostDeviceNotMigratable))
+					Expect(condition.Message).To(Equal("VMI specifies non-migratable generic PCI host device"))
+				})
+
+				It("should not be allowed to live-migrate if the VMI uses passthrough PCI GPU", func() {
+					vmi := api2.NewMinimalVMI("testvmi")
+					vmi.Spec.Domain.Devices.GPUs = []v1.GPU{
+						{
+							Name:       "m10",
+							DeviceName: "nvidia.com/M10",
+						},
+					}
+
+					config, _, _ := testutils.NewFakeClusterConfigUsingKVConfig(&v1.KubeVirtConfiguration{
+						DeveloperConfiguration: &v1.DeveloperConfiguration{
+							FeatureGates: []string{featuregate.VGPULiveMigration},
+						},
+						PermittedHostDevices: &v1.PermittedHostDevices{
+							PciHostDevices: []v1.PciHostDevice{
+								{
+									PCIVendorSelector:        "10de:13bd",
+									ResourceName:             "nvidia.com/M10",
+									ExternalResourceProvider: false,
+								},
+							},
+						},
+					})
+					controller.clusterConfig = config
+
+					condition, isBlockMigration := controller.calculateLiveMigrationCondition(vmi)
+					Expect(isBlockMigration).To(BeFalse())
+					Expect(condition.Type).To(Equal(v1.VirtualMachineInstanceIsMigratable))
+					Expect(condition.Status).To(Equal(k8sv1.ConditionFalse))
+					Expect(condition.Reason).To(Equal(v1.VirtualMachineInstanceReasonHostDeviceNotMigratable))
+					Expect(condition.Message).To(Equal("VMI specifies non-migratable GPU device"))
+				})
+
+				It("should not be allowed to live-migrate if the VMI uses multiple vGPUs", func() {
+					vmi := api2.NewMinimalVMI("testvmi")
+					vmi.Spec.Domain.Devices.GPUs = []v1.GPU{
+						{
+							Name:       "name1",
+							DeviceName: "nvidia.com/gpu",
+						},
+						{
+							Name:       "name2",
+							DeviceName: "nvidia.com/gpu",
+						},
+					}
+
+					config, _, _ := testutils.NewFakeClusterConfigUsingKVConfig(&v1.KubeVirtConfiguration{
+						DeveloperConfiguration: &v1.DeveloperConfiguration{
+							FeatureGates: []string{featuregate.VGPULiveMigration},
+						},
+					})
+					controller.clusterConfig = config
+
+					condition, isBlockMigration := controller.calculateLiveMigrationCondition(vmi)
+					Expect(isBlockMigration).To(BeFalse())
+					Expect(condition.Type).To(Equal(v1.VirtualMachineInstanceIsMigratable))
+					Expect(condition.Status).To(Equal(k8sv1.ConditionFalse))
+					Expect(condition.Reason).To(Equal(v1.VirtualMachineInstanceReasonHostDeviceNotMigratable))
+					Expect(condition.Message).To(Equal("VMI specifies too many GPUs"))
+				})
 			})
 		})
 
@@ -3043,6 +3183,9 @@ var _ = Describe("VirtualMachineInstance", func() {
 	})
 
 	Context("updateBackupStatus", func() {
+		startTime := metav1.Now()
+		endTime := metav1.NewTime(startTime.Add(5 * time.Minute))
+
 		DescribeTable("should not update when",
 			func(cbtStatus *v1.ChangedBlockTrackingStatus) {
 				vmi := api2.NewMinimalVMI("testvmi")
@@ -3063,51 +3206,82 @@ var _ = Describe("VirtualMachineInstance", func() {
 		)
 
 		DescribeTable("should",
-			func(vmiBackupName, domainBackupName string, expectUpdate bool) {
-				startTime := metav1.Now()
-
+			func(vmiBackupStatus *v1.VirtualMachineInstanceBackupStatus, domainBackupMetadata *api.BackupMetadata, expectUpdate bool) {
 				vmi := api2.NewMinimalVMI("testvmi")
 				vmi.UID = vmiTestUUID
 				vmi.Status.ChangedBlockTracking = &v1.ChangedBlockTrackingStatus{
 					State: v1.ChangedBlockTrackingEnabled,
-					BackupStatus: &v1.VirtualMachineInstanceBackupStatus{
-						BackupName:     vmiBackupName,
-						StartTimestamp: &startTime,
-					},
 				}
+				vmi.Status.ChangedBlockTracking.BackupStatus = vmiBackupStatus
 
-				domain := api.NewMinimalDomainWithUUID("testvmi", vmiTestUUID)
-				endTime := metav1.NewTime(startTime.Add(5 * time.Minute))
-				checkpointName := "test-checkpoint"
 				backupMsg := "backup completed successfully"
-				domain.Spec.Metadata.KubeVirt.Backup = &api.BackupMetadata{
-					Name:           domainBackupName,
-					StartTimestamp: &startTime,
-					EndTimestamp:   &endTime,
-					Completed:      true,
-					CheckpointName: checkpointName,
-					BackupMsg:      backupMsg,
-				}
+				domain := api.NewMinimalDomainWithUUID("testvmi", vmiTestUUID)
+				domain.Spec.Metadata.KubeVirt.Backup = domainBackupMetadata
 
 				controller.updateBackupStatus(vmi, domain)
 
-				Expect(vmi.Status.ChangedBlockTracking.BackupStatus.BackupName).To(Equal(vmiBackupName))
 				if expectUpdate {
 					Expect(vmi.Status.ChangedBlockTracking.BackupStatus.Completed).To(BeTrue())
 					Expect(vmi.Status.ChangedBlockTracking.BackupStatus.EndTimestamp).ToNot(BeNil())
-					Expect(*vmi.Status.ChangedBlockTracking.BackupStatus.EndTimestamp).To(Equal(endTime))
+					Expect(vmi.Status.ChangedBlockTracking.BackupStatus.EndTimestamp).To(Equal(domainBackupMetadata.EndTimestamp))
 					Expect(vmi.Status.ChangedBlockTracking.BackupStatus.CheckpointName).ToNot(BeNil())
-					Expect(*vmi.Status.ChangedBlockTracking.BackupStatus.CheckpointName).To(Equal(checkpointName))
+					Expect(*vmi.Status.ChangedBlockTracking.BackupStatus.CheckpointName).To(Equal(domainBackupMetadata.CheckpointName))
 					Expect(vmi.Status.ChangedBlockTracking.BackupStatus.BackupMsg).ToNot(BeNil())
 					Expect(*vmi.Status.ChangedBlockTracking.BackupStatus.BackupMsg).To(Equal(backupMsg))
+					Expect(vmi.Status.ChangedBlockTracking.BackupStatus.Volumes).To(HaveLen(2))
+					Expect(vmi.Status.ChangedBlockTracking.BackupStatus.Volumes[0].VolumeName).To(Equal("rootdisk"))
+					Expect(vmi.Status.ChangedBlockTracking.BackupStatus.Volumes[0].DiskTarget).To(Equal("vda"))
+					Expect(vmi.Status.ChangedBlockTracking.BackupStatus.Volumes[1].VolumeName).To(Equal("datadisk"))
+					Expect(vmi.Status.ChangedBlockTracking.BackupStatus.Volumes[1].DiskTarget).To(Equal("vdb"))
+					Expect(*vmi.Status.ChangedBlockTracking.BackupStatus.BackupMsg).To(Equal(domainBackupMetadata.BackupMsg))
 				} else {
 					Expect(vmi.Status.ChangedBlockTracking.BackupStatus.Completed).To(BeFalse())
 					Expect(vmi.Status.ChangedBlockTracking.BackupStatus.EndTimestamp).To(BeNil())
 					Expect(vmi.Status.ChangedBlockTracking.BackupStatus.CheckpointName).To(BeNil())
+					Expect(vmi.Status.ChangedBlockTracking.BackupStatus.Volumes).To(BeNil())
 				}
 			},
-			Entry("not update backupStatus when backupStatus name and backupMetadata name do not match (race condition)", "new-backup", "old-backup", false),
-			Entry("update backupStatus when backupStatus name and backupMetadata name match", "test-backup", "test-backup", true),
+			Entry("not update backupStatus when backupStatus name and backupMetadata name do not match (race condition)",
+				&v1.VirtualMachineInstanceBackupStatus{
+					BackupName:     "new-backup",
+					StartTimestamp: &startTime,
+				}, &api.BackupMetadata{
+					Name:           "old-backup",
+					StartTimestamp: &startTime,
+					EndTimestamp:   &endTime,
+					CheckpointName: "test-checkpoint",
+					BackupMsg:      "backup completed successfully",
+					Completed:      true,
+					Volumes:        `[{"volumeName":"rootdisk","diskTarget":"vda"},{"volumeName":"datadisk","diskTarget":"vdb"}]`,
+				}, false,
+			),
+			Entry("not update backupStatus when backupStatus StartTimestamp and backupMetadata StartTimestamp do not match (race condition)",
+				&v1.VirtualMachineInstanceBackupStatus{
+					BackupName:     "test-backup",
+					StartTimestamp: &startTime,
+				}, &api.BackupMetadata{
+					Name:           "test-backup",
+					EndTimestamp:   &endTime,
+					CheckpointName: "test-checkpoint",
+					BackupMsg:      "backup completed successfully",
+					Completed:      true,
+					Volumes:        `[{"volumeName":"rootdisk","diskTarget":"vda"},{"volumeName":"datadisk","diskTarget":"vdb"}]`,
+				}, false,
+			),
+			Entry("update backupStatus when backupStatus name and backupMetadata name match",
+				&v1.VirtualMachineInstanceBackupStatus{
+					BackupName:     "test-backup",
+					StartTimestamp: &startTime,
+				}, &api.BackupMetadata{
+					Name:           "test-backup",
+					StartTimestamp: &startTime,
+					EndTimestamp:   &endTime,
+					CheckpointName: "test-checkpoint",
+					BackupMsg:      "backup completed successfully",
+					Completed:      true,
+					Volumes:        `[{"volumeName":"rootdisk","diskTarget":"vda"},{"volumeName":"datadisk","diskTarget":"vdb"}]`,
+				}, true,
+			),
 		)
 	})
 })

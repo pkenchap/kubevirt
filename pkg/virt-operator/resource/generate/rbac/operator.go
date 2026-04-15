@@ -314,6 +314,70 @@ func NewOperatorClusterRole() *rbacv1.ClusterRole {
 					"patch",
 				},
 			},
+			{
+				APIGroups: []string{
+					"template.kubevirt.io",
+				},
+				Resources: []string{
+					"virtualmachinetemplates",
+					"virtualmachinetemplaterequests",
+				},
+				Verbs: []string{
+					"create",
+					"delete",
+					"deletecollection",
+					"get",
+					"list",
+					"patch",
+					"update",
+					"watch",
+				},
+			},
+			{
+				APIGroups: []string{
+					"template.kubevirt.io",
+				},
+				Resources: []string{
+					"virtualmachinetemplates/status",
+					"virtualmachinetemplaterequests/status",
+				},
+				Verbs: []string{
+					"get",
+					"patch",
+				},
+			},
+			{
+				APIGroups: []string{
+					"template.kubevirt.io",
+				},
+				Resources: []string{
+					"virtualmachinetemplates/finalizers",
+					"virtualmachinetemplaterequests/finalizers",
+				},
+				Verbs: []string{
+					"update",
+				},
+			},
+			{
+				APIGroups: []string{
+					"template.kubevirt.io",
+				},
+				Resources: []string{
+					"virtualmachinetemplaterequests/source",
+				},
+				Verbs: []string{
+					"create",
+				},
+			},
+			{
+				// for ClusterRole virt-template-metrics-reader
+				NonResourceURLs: []string{
+					"/metrics",
+				},
+				Verbs: []string{
+					"get",
+				},
+			},
 		},
 	}
 
@@ -327,7 +391,7 @@ func getKubeVirtComponentsClusterRules() []rbacv1.PolicyRule {
 
 	// namespace doesn't matter, we are only interested in the rules of ClusterRoles
 	all := GetAllApiServer("")
-	all = append(all, GetAllController("")...)
+	all = append(all, GetAllController("", true)...)
 	all = append(all, GetAllHandler("")...)
 	all = append(all, GetAllExportProxy("")...)
 	all = append(all, GetAllSynchronizationController("")...)
@@ -378,7 +442,7 @@ func getKubeVirtComponentsRules() []rbacv1.PolicyRule {
 
 	// namespace doesn't matter, we are only interested in the rules
 	all := GetAllApiServer("")
-	all = append(all, GetAllController("")...)
+	all = append(all, GetAllController("", true)...)
 	all = append(all, GetAllHandler("")...)
 	all = append(all, GetAllExportProxy("")...)
 	all = append(all, GetAllSynchronizationController("")...)
@@ -475,6 +539,7 @@ func NewOperatorRole(namespace string) *rbacv1.Role {
 				ResourceNames: []string{
 					components.KubeVirtCASecretName,
 					components.KubeVirtExportCASecretName,
+					components.KubeVirtBackupCASecretName,
 					components.VirtHandlerCertSecretName,
 					components.VirtHandlerServerCertSecretName,
 					components.VirtHandlerMigrationClientCertSecretName,
@@ -485,6 +550,9 @@ func NewOperatorRole(namespace string) *rbacv1.Role {
 					components.VirtExportProxyCertSecretName,
 					components.VirtSynchronizationControllerCertSecretName,
 					components.VirtSynchronizationControllerServerCertSecretName,
+					components.VirtTemplateApiCertSecretName,
+					components.VirtTemplateWebhookCertSecretName,
+					components.VirtTemplateControllerMetricsCertSecretName,
 				},
 				Verbs: []string{
 					"create",

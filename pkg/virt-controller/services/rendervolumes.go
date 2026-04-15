@@ -23,17 +23,21 @@ import (
 	"kubevirt.io/kubevirt/pkg/storage/cbt"
 	"kubevirt.io/kubevirt/pkg/storage/types"
 	"kubevirt.io/kubevirt/pkg/util"
-	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	"kubevirt.io/kubevirt/pkg/virtiofs"
+	"kubevirt.io/kubevirt/pkg/vmitrait"
 )
 
 type VolumeRendererOption func(renderer *VolumeRenderer) error
+
+type imagePullPolicyGetter interface {
+	GetImagePullPolicy() k8sv1.PullPolicy
+}
 
 type VolumeRenderer struct {
 	useImageVolumes       bool
 	launcherImage         string
 	imageIDs              map[string]string
-	clusterConfig         *virtconfig.ClusterConfig
+	imagePullPolicyGetter imagePullPolicyGetter
 	containerDiskDir      string
 	ephemeralDiskDir      string
 	virtShareDir          string
@@ -44,16 +48,16 @@ type VolumeRenderer struct {
 	volumeDevices         []k8sv1.VolumeDevice
 }
 
-func NewVolumeRenderer(clusterConfig *virtconfig.ClusterConfig, imageVolumeFeatureGateEnabled bool, launcherImage string, imageIDs map[string]string, namespace string, ephemeralDisk string, containerDiskDir string, virtShareDir string, volumeOptions ...VolumeRendererOption) (*VolumeRenderer, error) {
+func NewVolumeRenderer(imagePullPolicyGetter imagePullPolicyGetter, imageVolumeFeatureGateEnabled bool, launcherImage string, imageIDs map[string]string, namespace string, ephemeralDisk string, containerDiskDir string, virtShareDir string, volumeOptions ...VolumeRendererOption) (*VolumeRenderer, error) {
 	volumeRenderer := &VolumeRenderer{
-		useImageVolumes:  imageVolumeFeatureGateEnabled,
-		launcherImage:    launcherImage,
-		imageIDs:         imageIDs,
-		clusterConfig:    clusterConfig,
-		containerDiskDir: containerDiskDir,
-		ephemeralDiskDir: ephemeralDisk,
-		namespace:        namespace,
-		virtShareDir:     virtShareDir,
+		useImageVolumes:       imageVolumeFeatureGateEnabled,
+		launcherImage:         launcherImage,
+		imageIDs:              imageIDs,
+		imagePullPolicyGetter: imagePullPolicyGetter,
+		containerDiskDir:      containerDiskDir,
+		ephemeralDiskDir:      ephemeralDisk,
+		namespace:             namespace,
+		virtShareDir:          virtShareDir,
 	}
 	for _, volumeOption := range volumeOptions {
 		if err := volumeOption(volumeRenderer); err != nil {
@@ -379,33 +383,6 @@ func withAccessCredentials(accessCredentials []v1.AccessCredential) VolumeRender
 	}
 }
 
-func PathForSwtpm(vmi *v1.VirtualMachineInstance) string {
-	swtpmPath := "/var/lib/libvirt/swtpm"
-	if util.IsNonRootVMI(vmi) {
-		swtpmPath = filepath.Join(util.VirtPrivateDir, "libvirt", "qemu", "swtpm")
-	}
-
-	return swtpmPath
-}
-
-func PathForSwtpmLocalca(vmi *v1.VirtualMachineInstance) string {
-	localCaPath := "/var/lib/swtpm-localca"
-	if util.IsNonRootVMI(vmi) {
-		localCaPath = filepath.Join(util.VirtPrivateDir, "var", "lib", "swtpm-localca")
-	}
-
-	return localCaPath
-}
-
-func PathForNVram(vmi *v1.VirtualMachineInstance) string {
-	nvramPath := "/var/lib/libvirt/qemu/nvram"
-	if util.IsNonRootVMI(vmi) {
-		nvramPath = filepath.Join(util.VirtPrivateDir, "libvirt", "qemu", "nvram")
-	}
-
-	return nvramPath
-}
-
 func withBackendStorage(vmi *v1.VirtualMachineInstance, backendStoragePVCName string) VolumeRendererOption {
 	return func(renderer *VolumeRenderer) error {
 		if !backendstorage.IsBackendStorageNeeded(vmi) {
@@ -430,7 +407,7 @@ func withBackendStorage(vmi *v1.VirtualMachineInstance, backendStoragePVCName st
 			SubPath:   "meta",
 		})
 
-		if util.IsNonRootVMI(vmi) {
+		if vmitrait.IsNonRoot(vmi) {
 			// For non-root VMIs, the TPM state lives under /var/run/kubevirt-private/libvirt/qemu/swtpm
 			// To persist it, we need the persistent PVC to be mounted under that location.
 			// /var/run/kubevirt-private is an emptyDir, and k8s would automatically create the right sub-directories under it.
@@ -455,12 +432,12 @@ func withBackendStorage(vmi *v1.VirtualMachineInstance, backendStoragePVCName st
 			renderer.podVolumeMounts = append(renderer.podVolumeMounts, k8sv1.VolumeMount{
 				Name:      volumeName,
 				ReadOnly:  false,
-				MountPath: PathForSwtpm(vmi),
+				MountPath: util.PathForSwtpm(vmi),
 				SubPath:   "swtpm",
 			}, k8sv1.VolumeMount{
 				Name:      volumeName,
 				ReadOnly:  false,
-				MountPath: PathForSwtpmLocalca(vmi),
+				MountPath: util.PathForSwtpmLocalca(vmi),
 				SubPath:   "swtpm-localca",
 			})
 		}
@@ -469,7 +446,7 @@ func withBackendStorage(vmi *v1.VirtualMachineInstance, backendStoragePVCName st
 			renderer.podVolumeMounts = append(renderer.podVolumeMounts, k8sv1.VolumeMount{
 				Name:      volumeName,
 				ReadOnly:  false,
-				MountPath: PathForNVram(vmi),
+				MountPath: util.PathForNVram(vmi),
 				SubPath:   "nvram",
 			})
 		}
@@ -798,7 +775,7 @@ func (vr *VolumeRenderer) addLauncherBinaryVolume() {
 		VolumeSource: k8sv1.VolumeSource{
 			Image: &k8sv1.ImageVolumeSource{
 				Reference:  vr.launcherImage,
-				PullPolicy: vr.clusterConfig.GetImagePullPolicy(),
+				PullPolicy: vr.imagePullPolicyGetter.GetImagePullPolicy(),
 			},
 		},
 	})

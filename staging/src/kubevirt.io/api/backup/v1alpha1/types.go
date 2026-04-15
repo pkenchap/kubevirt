@@ -31,11 +31,30 @@ const (
 	// PushMode defines backup which pushes the backup output
 	// to a provided PVC - this is the default behavior
 	PushMode BackupMode = "Push"
+	// PullMode defines backup which exposes a pull endpoint
+	// containing the backup disks and metadata
+	PullMode BackupMode = "Pull"
 )
+
+// BackupVolumeInfo contains information about a volume included in a backup
+type BackupVolumeInfo struct {
+	// VolumeName is the volume name from VMI spec
+	VolumeName string `json:"volumeName"`
+	// DiskTarget is the disk target device name at backup time
+	DiskTarget string `json:"diskTarget"`
+	// DataEndpoint is the URL of the endpoint for read for pull mode
+	DataEndpoint string `json:"dataEndpoint,omitempty"`
+	// MapEndpoint is the URL of the endpoint for map for pull mode
+	MapEndpoint string `json:"mapEndpoint,omitempty"`
+}
 
 type BackupCheckpoint struct {
 	Name         string       `json:"name,omitempty"`
 	CreationTime *metav1.Time `json:"creationTime,omitempty"`
+	// Volumes lists volumes and their disk targets at backup time
+	// +optional
+	// +listType=atomic
+	Volumes []BackupVolumeInfo `json:"volumes,omitempty"`
 }
 
 // BackupType is the const type for the backup possible types
@@ -53,18 +72,25 @@ const (
 type BackupCmd string
 
 const (
-	Start BackupCmd = "Start"
+	Start  BackupCmd = "Start"
+	Abort  BackupCmd = "Abort"
+	Export BackupCmd = "Export"
 )
 
 // BackupOptions are options used to configure virtual machine backup job
 type BackupOptions struct {
-	BackupName      string       `json:"backupName,omitempty"`
-	Cmd             BackupCmd    `json:"cmd,omitempty"`
-	Mode            BackupMode   `json:"mode,omitempty"`
-	BackupStartTime *metav1.Time `json:"backupStartTime,omitempty"`
-	Incremental     *string      `json:"incremental,omitempty"`
-	PushPath        *string      `json:"pushPath,omitempty"`
-	SkipQuiesce     bool         `json:"skipQuiesce,omitempty"`
+	BackupName       string       `json:"backupName,omitempty"`
+	Cmd              BackupCmd    `json:"cmd,omitempty"`
+	Mode             BackupMode   `json:"mode,omitempty"`
+	BackupStartTime  *metav1.Time `json:"backupStartTime,omitempty"`
+	Incremental      *string      `json:"incremental,omitempty"`
+	TargetPath       *string      `json:"targetPath,omitempty"`
+	SkipQuiesce      bool         `json:"skipQuiesce,omitempty"`
+	ExportServerAddr *string      `json:"exportServerAddr,omitempty"`
+	ExportServerName *string      `json:"exportServerName,omitempty"`
+	BackupKey        *string      `json:"backupKey,omitempty"`
+	BackupCert       *string      `json:"backupCert,omitempty"`
+	CACert           *string      `json:"caCert,omitempty"`
 }
 
 // VirtualMachineBackupTracker defines the way to track the latest checkpoint of
@@ -95,8 +121,14 @@ type VirtualMachineBackupTrackerSpec struct {
 type VirtualMachineBackupTrackerStatus struct {
 	// +optional
 	// LatestCheckpoint is the metadata of the checkpoint of
-	// the latest preformed backup
+	// the latest performed backup
 	LatestCheckpoint *BackupCheckpoint `json:"latestCheckpoint,omitempty"`
+
+	// +optional
+	// CheckpointRedefinitionRequired is set to true by virt-handler when the VM
+	// restarts and has a checkpoint that needs to be redefined in libvirt.
+	// virt-controller will process this flag, attempt redefinition, and clear it.
+	CheckpointRedefinitionRequired *bool `json:"checkpointRedefinitionRequired,omitempty"`
 }
 
 // VirtualMachineBackupTrackerList is a list of VirtualMachineBackupTracker resources
@@ -133,7 +165,8 @@ type VirtualMachineBackupList struct {
 
 // VirtualMachineBackupSpec is the spec for a VirtualMachineBackup resource
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable after creation"
-// +kubebuilder:validation:XValidation:rule="(has(self.mode) && self.mode != 'Push') || (has(self.pvcName) && self.pvcName != \"\")",message="pvcName must be provided when mode is unset or Push"
+// +kubebuilder:validation:XValidation:rule="has(self.pvcName) && self.pvcName != \"\"",message="pvcName is required"
+// +kubebuilder:validation:XValidation:rule="!has(self.mode) || self.mode != 'Pull' || (has(self.tokenSecretRef) && self.tokenSecretRef != \"\")",message="tokenSecretRef is required when mode is Pull"
 type VirtualMachineBackupSpec struct {
 	// Source specifies the backup source - either a VirtualMachine or a VirtualMachineBackupTracker.
 	// When Kind is VirtualMachine: performs a backup of the specified VM.
@@ -146,7 +179,7 @@ type VirtualMachineBackupSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self.name != ''",message="name is required"
 	Source corev1.TypedLocalObjectReference `json:"source"`
 	// +optional
-	// +kubebuilder:validation:Enum=Push
+	// +kubebuilder:validation:Enum=Push;Pull
 	// Mode specifies the way the backup output will be recieved
 	Mode *BackupMode `json:"mode,omitempty"`
 	// +optional
@@ -159,6 +192,17 @@ type VirtualMachineBackupSpec struct {
 	// +optional
 	// ForceFullBackup indicates that a full backup is desired
 	ForceFullBackup bool `json:"forceFullBackup,omitempty"`
+	// +optional
+	// TokenSecretRef is the name of the secret that
+	// will be used to pull the backup from an associated endpoint
+	TokenSecretRef string `json:"tokenSecretRef,omitempty"`
+	// +optional
+	// TtlDuration limits the lifetime of a pull mode backup and its export
+	// If this field is set, after this duration has passed from counting from CreationTimestamp,
+	// the backup is eligible to be automatically considered as complete.
+	// If this field is omitted, a reasonable default is applied.
+	// +optional
+	TTLDuration *metav1.Duration `json:"ttlDuration,omitempty"`
 }
 
 // VirtualMachineBackupStatus is the status for a VirtualMachineBackup resource
@@ -172,6 +216,14 @@ type VirtualMachineBackupStatus struct {
 	// +optional
 	// CheckpointName the name of the checkpoint created for the current backup
 	CheckpointName *string `json:"checkpointName,omitempty"`
+	// +optional
+	// EndpointCert is the raw CACert that is to be used when connecting
+	// to an exported backup endpoint in pull mode.
+	EndpointCert *string `json:"endpointCert,omitempty"`
+	// +optional
+	// +listType=atomic
+	// IncludedVolumes lists the volumes that were included in the backup
+	IncludedVolumes []BackupVolumeInfo `json:"includedVolumes,omitempty"`
 }
 
 // ConditionType is the const type for Conditions
@@ -187,8 +239,17 @@ const (
 	// ConditionInitializing indicates the backup is initializing
 	ConditionInitializing ConditionType = "Initializing"
 
+	// ConditionExportInitiated indicates the backup export has been initiated
+	ConditionExportInitiated ConditionType = "ExportInitiated"
+
+	// ConditionExportReady indicates the backup export is ready
+	ConditionExportReady ConditionType = "ExportReady"
+
 	// ConditionDeleting indicates the backup is deleteing
 	ConditionDeleting ConditionType = "Deleting"
+
+	// ConditionAborting indicates the backup is aborting
+	ConditionAborting ConditionType = "Aborting"
 )
 
 // Condition defines conditions

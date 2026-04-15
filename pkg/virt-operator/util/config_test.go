@@ -125,6 +125,50 @@ var _ = Describe("Operator Config", func() {
 			Expect(idFilled).ToNot(Equal(idEmpty))
 		})
 
+		It("should result in different ID when OptOutRoleAggregation is enabled", func() {
+			kv := &v1.KubeVirt{}
+			cfgWithout := GetTargetConfigFromKV(kv)
+
+			manual := v1.RoleAggregationStrategyManual
+			kv.Spec.Configuration.DeveloperConfiguration = &v1.DeveloperConfiguration{
+				FeatureGates: []string{"OptOutRoleAggregation"},
+			}
+			kv.Spec.Configuration.RoleAggregationStrategy = &manual
+			cfgWith := GetTargetConfigFromKV(kv)
+
+			Expect(cfgWithout.ID).ToNot(BeEmpty())
+			Expect(cfgWith.ID).ToNot(BeEmpty())
+			Expect(cfgWith.ID).ToNot(Equal(cfgWithout.ID))
+		})
+
+		DescribeTable("should result in different ID when component images change", func(setImage func(*KubeVirtDeploymentConfig, string)) {
+			cfgA := &KubeVirtDeploymentConfig{}
+			cfgA.AdditionalProperties = make(map[string]string)
+			setImage(cfgA, "registry:5000/kubevirt/image:v1")
+			cfgA.generateInstallStrategyID()
+
+			cfgB := &KubeVirtDeploymentConfig{}
+			cfgB.AdditionalProperties = make(map[string]string)
+			setImage(cfgB, "registry:5000/kubevirt/image:v2")
+			cfgB.generateInstallStrategyID()
+
+			Expect(cfgA.ID).ToNot(BeEmpty())
+			Expect(cfgB.ID).ToNot(BeEmpty())
+			Expect(cfgA.ID).ToNot(Equal(cfgB.ID))
+		},
+			Entry("VirtOperatorImage", func(c *KubeVirtDeploymentConfig, img string) { c.VirtOperatorImage = img }),
+			Entry("VirtApiImage", func(c *KubeVirtDeploymentConfig, img string) { c.VirtApiImage = img }),
+			Entry("VirtControllerImage", func(c *KubeVirtDeploymentConfig, img string) { c.VirtControllerImage = img }),
+			Entry("VirtHandlerImage", func(c *KubeVirtDeploymentConfig, img string) { c.VirtHandlerImage = img }),
+			Entry("VirtLauncherImage", func(c *KubeVirtDeploymentConfig, img string) { c.VirtLauncherImage = img }),
+			Entry("VirtExportProxyImage", func(c *KubeVirtDeploymentConfig, img string) { c.VirtExportProxyImage = img }),
+			Entry("VirtExportServerImage", func(c *KubeVirtDeploymentConfig, img string) { c.VirtExportServerImage = img }),
+			Entry("VirtSynchronizationControllerImage", func(c *KubeVirtDeploymentConfig, img string) { c.VirtSynchronizationControllerImage = img }),
+			Entry("GsImage", func(c *KubeVirtDeploymentConfig, img string) { c.GsImage = img }),
+			Entry("PrHelperImage", func(c *KubeVirtDeploymentConfig, img string) { c.PrHelperImage = img }),
+			Entry("SidecarShimImage", func(c *KubeVirtDeploymentConfig, img string) { c.SidecarShimImage = img }),
+		)
+
 	})
 
 	Context("Product Names and Versions", func() {
@@ -194,6 +238,8 @@ var _ = Describe("Operator Config", func() {
 			launcherImage := setCustomImageForComponent("virt-launcher")
 			exportProxyImage := setCustomImageForComponent("virt-exportproxy")
 			exportServerImage := setCustomImageForComponent("virt-exportserver")
+			virtTemplateApiserverImage := setCustomImageForComponent("virt-template-apiserver")
+			virtTemplateControllerImage := setCustomImageForComponent("virt-template-controller")
 			gsImage := setCustomImageForComponent("gs")
 
 			err := VerifyEnv()
@@ -211,6 +257,8 @@ var _ = Describe("Operator Config", func() {
 			Expect(parsedConfig.VirtLauncherImage).To(Equal(launcherImage), errMsg)
 			Expect(parsedConfig.VirtExportProxyImage).To(Equal(exportProxyImage), errMsg)
 			Expect(parsedConfig.VirtExportServerImage).To(Equal(exportServerImage), errMsg)
+			Expect(parsedConfig.VirtTemplateApiserverImage).To(Equal(virtTemplateApiserverImage), errMsg)
+			Expect(parsedConfig.VirtTemplateControllerImage).To(Equal(virtTemplateControllerImage), errMsg)
 			Expect(parsedConfig.GsImage).To(Equal(gsImage), errMsg)
 		})
 

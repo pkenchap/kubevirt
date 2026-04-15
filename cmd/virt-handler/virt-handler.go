@@ -36,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/fields"
 	"libvirt.org/go/libvirtxml"
 
+	netresources "kubevirt.io/kubevirt/pkg/network/resources"
 	"kubevirt.io/kubevirt/pkg/virt-handler/ksm"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -68,7 +69,6 @@ import (
 	metrics "kubevirt.io/kubevirt/pkg/monitoring/metrics/virt-handler"
 	metricshandler "kubevirt.io/kubevirt/pkg/monitoring/metrics/virt-handler/handler"
 	"kubevirt.io/kubevirt/pkg/monitoring/profiler"
-	"kubevirt.io/kubevirt/pkg/network/netbinding"
 	"kubevirt.io/kubevirt/pkg/network/passt"
 	netsetup "kubevirt.io/kubevirt/pkg/network/setup"
 	"kubevirt.io/kubevirt/pkg/service"
@@ -260,6 +260,7 @@ func (app *virtHandlerApp) Run() {
 	vmiInformer := factory.VMI()
 	vmiSourceInformer := factory.VMISourceHost(app.HostOverride)
 	vmiTargetInformer := factory.VMITargetHost(app.HostOverride)
+	backupTrackerInformer := factory.VirtualMachineBackupTracker()
 
 	// Wire Domain controller
 	domainSharedInformer := virtcache.NewSharedInformer(app.VirtShareDir, int(app.WatchdogTimeoutDuration.Seconds()), recorder, vmiInformer.GetStore(), time.Duration(app.domainResyncPeriodSeconds)*time.Second)
@@ -370,7 +371,24 @@ func (app *virtHandlerApp) Run() {
 
 	netConf := netsetup.NewNetConf(app.clusterConfig)
 	netStat := netsetup.NewNetStat()
-	passtRepairHandler := passt.NewRepairManager(app.clusterConfig)
+	passtRepairHandler := passt.NewRepairManager()
+
+	// Bootstrapping. From here on the startup order matters
+
+	factory.Start(stop)
+	go domainSharedInformer.Run(stop)
+	go nodeInformer.Run(stop)
+	cache.WaitForCacheSync(
+		stop,
+		vmiInformer.HasSynced,
+		vmiSourceInformer.HasSynced,
+		vmiTargetInformer.HasSynced,
+		domainSharedInformer.HasSynced,
+		factory.CRD().HasSynced,
+		factory.KubeVirt().HasSynced,
+		nodeInformer.HasSynced,
+		backupTrackerInformer.HasSynced,
+	)
 
 	migrationSourceController, err := virthandler.NewMigrationSourceController(
 		recorder,
@@ -407,12 +425,14 @@ func (app *virtHandlerApp) Run() {
 		&capabilities,
 		netConf,
 		netStat,
-		netbinding.MemoryCalculator{},
+		netresources.MemoryCalculator{},
 		passtRepairHandler,
 	)
 	if err != nil {
 		panic(err)
 	}
+
+	cbtHandler := virthandler.NewCBTHandler(app.virtCli, backupTrackerInformer)
 
 	vmController, err := virthandler.NewVirtualMachineController(
 		recorder,
@@ -434,6 +454,7 @@ func (app *virtHandlerApp) Run() {
 		hostCpuModel,
 		netConf,
 		netStat,
+		cbtHandler,
 	)
 	if err != nil {
 		panic(err)
@@ -452,12 +473,6 @@ func (app *virtHandlerApp) Run() {
 	go app.servercertmanager.Start()
 	go app.migrationCertManager.Start()
 	go app.vsockClientCertManager.Start()
-
-	// Bootstrapping. From here on the startup order matters
-
-	factory.Start(stop)
-	go domainSharedInformer.Run(stop)
-	go nodeInformer.Run(stop)
 
 	se, exists, err := selinux.NewSELinux()
 	if err == nil && exists {
@@ -479,17 +494,6 @@ func (app *virtHandlerApp) Run() {
 		//an error occurred
 		panic(fmt.Errorf("failed to detect the presence of selinux: %v", err))
 	}
-
-	cache.WaitForCacheSync(
-		stop,
-		vmiInformer.HasSynced,
-		vmiSourceInformer.HasSynced,
-		vmiTargetInformer.HasSynced,
-		domainSharedInformer.HasSynced,
-		factory.CRD().HasSynced,
-		factory.KubeVirt().HasSynced,
-		nodeInformer.HasSynced,
-	)
 
 	if err := metrics.SetupMetrics(app.HostOverride, app.MaxRequestsInFlight, vmiSourceInformer, machines); err != nil {
 		panic(err)
@@ -625,6 +629,7 @@ func (app *virtHandlerApp) runServer(errCh chan error, consoleHandler *rest.Cons
 	ws.Route(ws.GET("/v1/namespaces/{namespace}/virtualmachineinstances/{name}/vnc/screenshot").To(lifecycleHandler.ScreenshotRequestHandler))
 	ws.Route(ws.GET("/v1/namespaces/{namespace}/virtualmachineinstances/{name}/usbredir").To(consoleHandler.USBRedirHandler))
 	ws.Route(ws.PUT("/v1/namespaces/{namespace}/virtualmachineinstances/{name}/backup").To(lifecycleHandler.BackupHandler))
+	ws.Route(ws.PUT("/v1/namespaces/{namespace}/virtualmachineinstances/{name}/redefine-checkpoint").To(lifecycleHandler.RedefineCheckpointHandler))
 	ws.Route(ws.PUT("/v1/namespaces/{namespace}/virtualmachineinstances/{name}/pause").To(lifecycleHandler.PauseHandler))
 	ws.Route(ws.PUT("/v1/namespaces/{namespace}/virtualmachineinstances/{name}/unpause").To(lifecycleHandler.UnpauseHandler))
 	ws.Route(ws.PUT("/v1/namespaces/{namespace}/virtualmachineinstances/{name}/freeze").To(lifecycleHandler.FreezeHandler).Reads(v1.FreezeUnfreezeTimeout{}))

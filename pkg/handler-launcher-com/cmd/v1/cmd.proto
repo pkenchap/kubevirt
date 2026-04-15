@@ -38,6 +38,7 @@ service Cmd {
   rpc GetDomainDirtyRateStats(EmptyRequest) returns (DirtyRateStatsResponse) {}
   rpc GetScreenshot(VMIRequest) returns (ScreenshotResponse) {}
   rpc BackupVirtualMachine(BackupRequest) returns (Response) {}
+  rpc RedefineCheckpoint(RedefineCheckpointRequest) returns (RedefineCheckpointResponse) {}
 }
 
 message QemuVersionResponse {
@@ -98,10 +99,13 @@ message DiskInfo {
 }
 
 message ClusterConfig{
+  // Deprecated
   bool ExpandDisksEnabled = 1;
   bool FreePageReportingDisabled = 2;
   bool BochsDisplayForEFIGuests = 3;
   bool SerialConsoleLogDisabled = 4;
+  bool PCINUMAAwareTopologyEnabled = 5;
+  bool VGPULiveMigrationEnabled = 6;
 }
 
 message InterfaceBindingMigration{
@@ -224,4 +228,14 @@ message ScreenshotResponse {
 message BackupRequest {
   VMI vmi = 1;
   bytes options = 2;
+}
+
+message RedefineCheckpointRequest {
+  VMI vmi = 1;
+  bytes checkpoint = 2;
+}
+
+message RedefineCheckpointResponse {
+  Response response = 1;
+  bool checkpointInvalid = 2;
 }

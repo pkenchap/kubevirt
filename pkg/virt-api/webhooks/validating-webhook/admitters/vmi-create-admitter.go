@@ -236,6 +236,8 @@ func ValidateVirtualMachineInstanceSpec(field *k8sfield.Path, spec *v1.VirtualMa
 	causes = append(causes, validateFilesystemsWithVirtIOFSEnabled(field, spec, config)...)
 	causes = append(causes, validateVideoConfig(field, spec, config)...)
 	causes = append(causes, validatePanicDevices(field, spec, config)...)
+	causes = append(causes, validateRebootPolicy(field, spec, config)...)
+	causes = append(causes, validateReservedOverheadMemlock(field, spec, config)...)
 
 	return causes
 }
@@ -283,14 +285,15 @@ func validateDownwardMetrics(field *k8sfield.Path, spec *v1.VirtualMachineInstan
 func validateVirtualMachineInstanceSpecVolumeDisks(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec) []metav1.StatusCause {
 	var causes []metav1.StatusCause
 
-	diskAndFilesystemNames := make(map[string]struct{})
+	diskNames := make(map[string]struct{})
+	filesystemNames := make(map[string]struct{})
 
 	for _, disk := range spec.Domain.Devices.Disks {
-		diskAndFilesystemNames[disk.Name] = struct{}{}
+		diskNames[disk.Name] = struct{}{}
 	}
 
 	for _, fs := range spec.Domain.Devices.Filesystems {
-		diskAndFilesystemNames[fs.Name] = struct{}{}
+		filesystemNames[fs.Name] = struct{}{}
 	}
 
 	// Validate that volumes match disks and filesystems correctly
@@ -298,12 +301,46 @@ func validateVirtualMachineInstanceSpecVolumeDisks(field *k8sfield.Path, spec *v
 		if volume.MemoryDump != nil {
 			continue
 		}
-		if _, matchingDiskExists := diskAndFilesystemNames[volume.Name]; !matchingDiskExists {
+
+		_, matchingDiskExists := diskNames[volume.Name]
+		_, matchingFilesystemExists := filesystemNames[volume.Name]
+
+		if !matchingDiskExists && !matchingFilesystemExists {
 			causes = append(causes, metav1.StatusCause{
 				Type:    metav1.CauseTypeFieldValueInvalid,
 				Message: fmt.Sprintf(nameOfTypeNotFoundMessagePattern, field.Child("domain", "volumes").Index(idx).Child("name").String(), volume.Name),
 				Field:   field.Child("domain", "volumes").Index(idx).Child("name").String(),
 			})
+		}
+
+		// ContainerPath volumes must be mapped to a filesystem (virtiofs), not a disk
+		if volume.ContainerPath != nil {
+			if matchingDiskExists {
+				causes = append(causes, metav1.StatusCause{
+					Type:    metav1.CauseTypeFieldValueInvalid,
+					Message: fmt.Sprintf("ContainerPath volume '%s' must be mapped to a filesystem, not a disk", volume.Name),
+					Field:   field.Child("domain", "volumes").Index(idx).String(),
+				})
+			}
+			if !matchingFilesystemExists {
+				causes = append(causes, metav1.StatusCause{
+					Type:    metav1.CauseTypeFieldValueInvalid,
+					Message: fmt.Sprintf("ContainerPath volume '%s' must have a matching filesystem defined in spec.domain.devices.filesystems", volume.Name),
+					Field:   field.Child("domain", "volumes").Index(idx).String(),
+				})
+			}
+			// Block reserved paths used by KubeVirt internally
+			reservedPrefixes := []string{"/var/run/kubevirt", "/var/run/libvirt"}
+			for _, prefix := range reservedPrefixes {
+				if strings.HasPrefix(volume.ContainerPath.Path, prefix) {
+					causes = append(causes, metav1.StatusCause{
+						Type:    metav1.CauseTypeFieldValueInvalid,
+						Message: fmt.Sprintf("ContainerPath volume '%s' uses reserved path prefix '%s'", volume.Name, prefix),
+						Field:   field.Child("domain", "volumes").Index(idx).Child("containerPath", "path").String(),
+					})
+					break
+				}
+			}
 		}
 	}
 	return causes
@@ -678,7 +715,7 @@ func validateCPUIsolatorThread(field *k8sfield.Path, spec *v1.VirtualMachineInst
 func validateCpuPinning(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause {
 	var causes []metav1.StatusCause
 	if spec.Domain.CPU != nil && spec.Domain.CPU.DedicatedCPUPlacement {
-		causes = append(causes, validateMemoryLimitAndRequestProvided(field, spec)...)
+		causes = append(causes, validateMemoryIsProvided(field, spec)...)
 		causes = append(causes, validateCPURequestIsInteger(field, spec)...)
 		causes = append(causes, validateCPULimitIsInteger(field, spec)...)
 		causes = append(causes, validateMemoryRequestsAndLimits(field, spec)...)
@@ -875,11 +912,9 @@ func validateCPURequestIsInteger(field *k8sfield.Path, spec *v1.VirtualMachineIn
 	return causes
 }
 
-func validateMemoryLimitAndRequestProvided(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec) []metav1.StatusCause {
-	var causes []metav1.StatusCause
-	if spec.Domain.Resources.Limits.Memory().Value() == 0 && spec.Domain.Resources.Requests.Memory().Value() == 0 &&
-		spec.Domain.Memory.Hugepages == nil && spec.Domain.Memory.Guest.Value() == 0 {
-		causes = append(causes, metav1.StatusCause{
+func validateMemoryIsProvided(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec) []metav1.StatusCause {
+	generateErrorCause := func() []metav1.StatusCause {
+		return []metav1.StatusCause{{
 			Type: metav1.CauseTypeFieldValueInvalid,
 			Message: fmt.Sprintf("%s, %s, %s or %s should be provided",
 				field.Child("domain", "resources", "requests", "memory").String(),
@@ -888,9 +923,30 @@ func validateMemoryLimitAndRequestProvided(field *k8sfield.Path, spec *v1.Virtua
 				field.Child("domain", "memory", "guest").String(),
 			),
 			Field: field.Child("domain", "resources", "limits", "memory").String(),
-		})
+		}}
 	}
-	return causes
+
+	if !spec.Domain.Resources.Limits.Memory().IsZero() {
+		return nil
+	}
+
+	if !spec.Domain.Resources.Requests.Memory().IsZero() {
+		return nil
+	}
+
+	if spec.Domain.Memory == nil {
+		return generateErrorCause()
+	}
+
+	if spec.Domain.Memory.Hugepages != nil {
+		return nil
+	}
+
+	if spec.Domain.Memory.Guest == nil || spec.Domain.Memory.Guest.IsZero() {
+		return generateErrorCause()
+	}
+
+	return nil
 }
 
 func validateCpuRequestDoesNotExceedLimit(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec) []metav1.StatusCause {
@@ -1631,6 +1687,9 @@ func validateVolumes(field *k8sfield.Path, volumes []v1.Volume, config *virtconf
 			memoryDumpVolumeCount++
 			volumeSourceSetCount++
 		}
+		if volume.ContainerPath != nil {
+			volumeSourceSetCount++
+		}
 
 		if volumeSourceSetCount != 1 {
 			causes = append(causes, metav1.StatusCause{
@@ -2033,14 +2092,6 @@ func validatePanicDevices(field *k8sfield.Path, spec *v1.VirtualMachineInstanceS
 	if len(spec.Domain.Devices.PanicDevices) == 0 {
 		return causes
 	}
-	if spec.Domain.Devices.PanicDevices != nil && !config.PanicDevicesEnabled() {
-		causes = append(causes, metav1.StatusCause{
-			Type:    metav1.CauseTypeFieldValueInvalid,
-			Message: "Panic Devices feature gate is not enabled in kubevirt-config",
-			Field:   field.Child("domain", "devices", "panicDevices").String(),
-		})
-		return causes
-	}
 
 	arch := spec.Architecture
 	if arch == "" {
@@ -2059,6 +2110,44 @@ func validatePanicDevices(field *k8sfield.Path, spec *v1.VirtualMachineInstanceS
 		if cause := validatePanicDeviceModel(field.Child("domain", "devices", "panicDevices").Index(idx).Child("model"), panicDevice.Model); cause != nil {
 			causes = append(causes, *cause)
 		}
+	}
+
+	return causes
+}
+
+func validateRebootPolicy(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause {
+	var causes []metav1.StatusCause
+
+	if spec.Domain.RebootPolicy == nil {
+		return causes
+	}
+
+	if !config.RebootPolicyEnabled() {
+		causes = append(causes, metav1.StatusCause{
+			Type:    metav1.CauseTypeFieldValueInvalid,
+			Message: fmt.Sprintf("RebootPolicy is specified but the %s feature gate is not enabled", featuregate.RebootPolicy),
+			Field:   field.Child("domain", "rebootPolicy").String(),
+		})
+		return causes
+	}
+
+	return causes
+}
+
+func validateReservedOverheadMemlock(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause {
+	var causes []metav1.StatusCause
+
+	if spec.Domain.Memory == nil {
+		return causes
+	}
+
+	if spec.Domain.Memory.ReservedOverhead != nil && !config.ReservedOverheadMemlockEnabled() {
+		causes = append(causes, metav1.StatusCause{
+			Type:    metav1.CauseTypeFieldValueInvalid,
+			Message: "Reserved overhead memlock feature gate is not enabled in kubevirt-config",
+			Field:   field.Child("domain", "memory", "reservedOverhead").String(),
+		})
+		return causes
 	}
 
 	return causes

@@ -40,7 +40,19 @@ func (r *Reconciler) updateKubeVirtSystem(controllerDeploymentsRolledOver bool) 
 
 	// create/update ExportProxy Deployments
 	for _, deployment := range r.targetStrategy.ExportProxyDeployments() {
-		if r.exportProxyEnabled() {
+		deployment, err := r.syncDeployment(deployment)
+		if err != nil {
+			return false, err
+		}
+		err = r.syncPodDisruptionBudgetForDeployment(deployment)
+		if err != nil {
+			return false, err
+		}
+	}
+
+	// create/update Synchronization controller Deployments
+	for _, deployment := range r.targetStrategy.SynchronizationControllerDeployments() {
+		if r.isFeatureGateEnabled(featuregate.DecentralizedLiveMigration) {
 			deployment, err := r.syncDeployment(deployment)
 			if err != nil {
 				return false, err
@@ -54,9 +66,9 @@ func (r *Reconciler) updateKubeVirtSystem(controllerDeploymentsRolledOver bool) 
 		}
 	}
 
-	// create/update Synchronization controller Deployments
-	for _, deployment := range r.targetStrategy.SynchronizationControllerDeployments() {
-		if r.isFeatureGateEnabled(featuregate.DecentralizedLiveMigration) {
+	// create/update virt-template Deployments
+	for _, deployment := range r.targetStrategy.VirtTemplateDeployments() {
+		if r.virtTemplateDeploymentEnabled() {
 			deployment, err := r.syncDeployment(deployment)
 			if err != nil {
 				return false, err
