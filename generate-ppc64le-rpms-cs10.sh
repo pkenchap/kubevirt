@@ -74,7 +74,8 @@ generate_rpmtree "testimage_ppc64le_cs10" \
 # 2. libvirt-devel_ppc64le_cs10
 echo "2/11: libvirt-devel_ppc64le_cs10"
 generate_rpmtree "libvirt-devel_ppc64le_cs10" \
-    libvirt-devel
+    libvirt-devel \
+    lz4-libs
 
 # 3. libnbd-devel_ppc64le_cs10
 echo "3/11: libnbd-devel_ppc64le_cs10"
