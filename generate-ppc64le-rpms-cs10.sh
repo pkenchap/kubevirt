@@ -96,6 +96,11 @@ generate_rpmtree "launcherbase_ppc64le_cs10" \
     glibc-minimal-langpack \
     iproute \
     iptables-nft \
+    libvirt-client \
+    libvirt-daemon-common \
+    libvirt-daemon-driver-qemu \
+    libvirt-daemon-log \
+    libvirt-libs \
     nftables \
     passt \
     procps-ng \
