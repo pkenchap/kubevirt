@@ -88,34 +88,185 @@ generate_rpmtree "sandboxroot_ppc64le_cs10" \
     libvirt-devel \
     libnbd-devel
 
-# 5. launcherbase_ppc64le_cs10
+# 5. launcherbase_ppc64le_cs10 - Complete package list (x86-specific packages removed, ppc64le additions included)
 echo "5/11: launcherbase_ppc64le_cs10"
 generate_rpmtree "launcherbase_ppc64le_cs10" \
     acl \
+    alternatives \
+    audit-libs \
+    authselect \
+    authselect-libs \
+    basesystem \
+    bash \
+    bzip2 \
+    bzip2-libs \
+    ca-certificates \
+    capstone \
+    centos-gpg-keys \
+    centos-stream-release \
+    centos-stream-repos \
+    coreutils-single \
+    cracklib \
+    cracklib-dicts \
+    crypto-policies \
+    curl \
+    cyrus-sasl-gssapi \
+    cyrus-sasl-lib \
+    dbus \
+    dbus-broker \
+    dbus-common \
+    diffutils \
+    duktape \
+    elfutils-libelf \
+    expat \
+    filesystem \
     findutils \
     gawk \
+    gdbm \
+    gdbm-libs \
+    gettext \
+    gettext-envsubst \
+    gettext-libs \
+    gettext-runtime \
+    glib2 \
+    glibc \
+    glibc-common \
     glibc-minimal-langpack \
+    gmp \
+    gnutls \
+    gnutls-dane \
+    gnutls-utils \
+    grep \
+    gzip \
     iproute \
-    iptables-nft \
+    iproute-tc \
+    iptables-libs \
+    jansson \
+    json-c \
+    json-glib \
+    keyutils-libs \
+    kmod \
+    krb5-libs \
+    libacl \
+    libaio \
+    libatomic \
+    libattr \
+    libblkid \
+    libbpf \
+    libburn \
+    libcap \
+    libcap-ng \
+    libcbor \
+    libcom_err \
+    libcurl-minimal \
+    libeconf \
+    libevent \
+    libfdisk \
+    libfdt \
+    libffi \
+    libfido2 \
+    libgcc \
+    libgomp \
+    libibverbs \
+    libidn2 \
+    libisoburn \
+    libisofs \
+    libmnl \
+    libmount \
     libnbd \
+    libnetfilter_conntrack \
+    libnfnetlink \
+    libnftnl \
+    libnghttp2 \
+    libnl3 \
+    libpcap \
+    libpng \
+    libpwquality \
+    libseccomp \
+    libselinux \
+    libselinux-utils \
+    libsemanage \
+    libsepol \
+    libslirp \
+    libsmartcols \
+    libssh \
+    libssh-config \
+    libstdc++ \
+    libtasn1 \
+    libtirpc \
+    libtpms \
+    libunistring \
+    liburing \
+    libusb1 \
+    libutempter \
+    libuuid \
+    libverto \
     libvirt-client \
-    libvirt-daemon \
     libvirt-daemon-common \
     libvirt-daemon-driver-qemu \
     libvirt-daemon-log \
     libvirt-libs \
+    libxcrypt \
+    libxml2 \
+    libzstd \
     lz4-libs \
+    lzo \
+    lzop \
+    mpfr \
+    ncurses-base \
+    ncurses-libs \
     nftables \
+    nmap-ncat \
+    numactl-libs \
+    openssl-fips-provider \
+    openssl-libs \
+    p11-kit \
+    p11-kit-trust \
+    pam \
+    pam-libs \
     passt \
+    pcre2 \
+    pcre2-syntax \
+    pixman \
+    policycoreutils \
+    polkit \
+    polkit-libs \
+    popt \
     procps-ng \
+    protobuf-c \
+    psmisc \
     qemu-img \
+    qemu-kvm-common \
     qemu-kvm-core \
+    qemu-kvm-device-display-virtio-gpu \
+    qemu-kvm-device-usb-host \
+    readline \
+    sed \
     selinux-policy \
     selinux-policy-targeted \
+    setup \
     shadow-utils \
+    snappy \
+    swtpm \
+    swtpm-libs \
+    swtpm-tools \
+    systemd \
+    systemd-container \
+    systemd-libs \
+    systemd-pam \
     tar \
+    tpm2-tss \
+    unbound-libs \
     util-linux \
-    vim-minimal
+    util-linux-core \
+    vim-data \
+    vim-minimal \
+    virtiofsd \
+    xorriso \
+    xz \
+    xz-libs \
+    zlib-ng-compat \
+    zstd
 
 # 6. passt_tree_ppc64le_cs10
 echo "6/11: passt_tree_ppc64le_cs10"
