@@ -97,6 +97,7 @@ generate_rpmtree "launcherbase_ppc64le_cs10" \
     glibc-minimal-langpack \
     iproute \
     iptables-nft \
+    libnbd \
     libvirt-client \
     libvirt-daemon \
     libvirt-daemon-common \
