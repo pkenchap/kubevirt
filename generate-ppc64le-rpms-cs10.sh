@@ -194,7 +194,6 @@ generate_rpmtree "launcherbase_ppc64le_cs10" \
     libstdc++ \
     libtasn1 \
     libtirpc \
-    libtpms \
     libunistring \
     liburing \
     libusb1 \
@@ -247,15 +246,11 @@ generate_rpmtree "launcherbase_ppc64le_cs10" \
     setup \
     shadow-utils \
     snappy \
-    swtpm \
-    swtpm-libs \
-    swtpm-tools \
     systemd \
     systemd-container \
     systemd-libs \
     systemd-pam \
     tar \
-    tpm2-tss \
     unbound-libs \
     util-linux \
     util-linux-core \
