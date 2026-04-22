@@ -200,10 +200,6 @@ generate_rpmtree "launcherbase_ppc64le_cs10" \
     libutempter \
     libuuid \
     libverto \
-    libvirt-client \
-    libvirt-daemon-common \
-    libvirt-daemon-driver-qemu \
-    libvirt-daemon-log \
     libvirt-libs \
     libxcrypt \
     libxml2 \
