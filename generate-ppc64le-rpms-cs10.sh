@@ -200,6 +200,21 @@ generate_rpmtree "launcherbase_ppc64le_cs10" \
     libutempter \
     libuuid \
     libverto \
+    libvirt \
+    libvirt-client \
+    libvirt-daemon \
+    libvirt-daemon-common \
+    libvirt-daemon-config-network \
+    libvirt-daemon-config-nwfilter \
+    libvirt-daemon-driver-interface \
+    libvirt-daemon-driver-network \
+    libvirt-daemon-driver-nodedev \
+    libvirt-daemon-driver-nwfilter \
+    libvirt-daemon-driver-qemu \
+    libvirt-daemon-driver-secret \
+    libvirt-daemon-driver-storage \
+    libvirt-daemon-driver-storage-core \
+    libvirt-daemon-log \
     libvirt-libs \
     libxcrypt \
     libxml2 \
@@ -231,10 +246,7 @@ generate_rpmtree "launcherbase_ppc64le_cs10" \
     protobuf-c \
     psmisc \
     qemu-img \
-    qemu-kvm-common \
-    qemu-kvm-core \
-    qemu-kvm-device-display-virtio-gpu \
-    qemu-kvm-device-usb-host \
+    qemu-kvm \
     readline \
     sed \
     selinux-policy \
