@@ -43,6 +43,7 @@ generate_rpmtree() {
         --buildfile "${BUILDFILE}" \
         --name "${name}" \
         --public \
+        --nobest \
         "${packages[@]}" || {
         echo "ERROR: Failed to generate ${name}"
         return 1

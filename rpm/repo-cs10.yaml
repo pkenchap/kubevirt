@@ -43,12 +43,10 @@ repositories:
   baseurl: https://mirror.stream.centos.org/SIGs/10-stream/virt/ppc64le/kvm-power/
   name: centos/stream10-virt-kvm-power-ppc64le
   gpgkey: https://www.centos.org/keys/RPM-GPG-KEY-CentOS-SIG-Virtualization-RH
-# Temporarily disabled AppStream for ppc64le to avoid qemu-img version conflicts
-# The kvm-power repo provides all needed virtualization packages
-# - arch: ppc64le
-#   baseurl: https://mirror.stream.centos.org/10-stream/AppStream/ppc64le/os/
-#   name: centos/stream10-appstream-ppc64le
-#   gpgkey: https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official
+- arch: ppc64le
+  baseurl: https://mirror.stream.centos.org/10-stream/AppStream/ppc64le/os/
+  name: centos/stream10-appstream-ppc64le
+  gpgkey: https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official
 - arch: ppc64le
   baseurl: https://mirror.stream.centos.org/10-stream/CRB/ppc64le/os/
   name: centos/stream10-crb-ppc64le
