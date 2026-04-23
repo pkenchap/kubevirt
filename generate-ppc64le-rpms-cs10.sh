@@ -229,7 +229,6 @@ generate_rpmtree "launcherbase_ppc64le_cs10" \
     procps-ng \
     protobuf-c \
     psmisc \
-    qemu-img \
     qemu-kvm \
     readline \
     sed \
