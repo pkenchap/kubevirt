@@ -230,9 +230,9 @@ generate_rpmtree "launcherbase_ppc64le_cs10" \
     procps-ng \
     protobuf-c \
     psmisc \
-    libvirt-client \
+    qemu-kvm-core \
     libvirt-daemon-driver-qemu \
-    qemu-kvm \
+    libvirt-client \
     readline \
     sed \
     selinux-policy \
