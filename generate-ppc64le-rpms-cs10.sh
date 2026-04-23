@@ -230,6 +230,7 @@ generate_rpmtree "launcherbase_ppc64le_cs10" \
     procps-ng \
     protobuf-c \
     psmisc \
+    libvirt-client \
     libvirt-daemon-driver-qemu \
     qemu-kvm \
     readline \
