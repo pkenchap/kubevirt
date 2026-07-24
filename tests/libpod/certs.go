@@ -33,6 +33,7 @@ import (
 
 	k8sv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/httpstream"
 
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
@@ -70,7 +71,8 @@ func getCert(pod *k8sv1.Pod, port string) []byte {
 	mutex := &sync.Mutex{}
 	conf := &tls.Config{
 		//nolint:gosec
-		InsecureSkipVerify: true,
+		InsecureSkipVerify:     true,
+		SessionTicketsDisabled: true,
 		VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 			mutex.Lock()
 			defer mutex.Unlock()
@@ -88,7 +90,7 @@ func getCert(pod *k8sv1.Pod, port string) []byte {
 		localPort, err := ForwardPorts(pod, []string{"0:" + port}, stopChan, timeout*time.Second)
 		ExpectWithOffset(offset, err).ToNot(HaveOccurred())
 
-		conn, err := tls.Dial("tcp4", fmt.Sprintf("localhost:%d", localPort), conf)
+		conn, err := (&tls.Dialer{Config: conf}).DialContext(context.Background(), "tcp4", fmt.Sprintf("localhost:%d", localPort))
 		if err == nil {
 			defer conn.Close()
 		}
@@ -126,12 +128,18 @@ func ForwardPorts(pod *k8sv1.Pod, ports []string, stop chan struct{}, readyTimeo
 			errChan <- err
 			return
 		}
-		transport, upgrader, err := spdy.RoundTripperFor(kubevirtClientConfig)
+		spdyTransport, upgrader, err := spdy.RoundTripperFor(kubevirtClientConfig)
 		if err != nil {
 			errChan <- err
 			return
 		}
-		dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, "POST", req.URL())
+		spdyDialer := spdy.NewDialer(upgrader, &http.Client{Transport: spdyTransport}, "POST", req.URL())
+		wsDialer, err := portforward.NewSPDYOverWebsocketDialer(req.URL(), kubevirtClientConfig)
+		if err != nil {
+			errChan <- err
+			return
+		}
+		dialer := portforward.NewFallbackDialer(wsDialer, spdyDialer, httpstream.IsUpgradeFailure)
 		forwarder, err = portforward.New(dialer, ports, stop, readyChan, GinkgoWriter, GinkgoWriter)
 		if err != nil {
 			errChan <- err

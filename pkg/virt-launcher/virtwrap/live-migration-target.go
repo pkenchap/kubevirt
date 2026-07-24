@@ -31,12 +31,13 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/watch"
 
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
 
 	"libvirt.org/go/libvirt"
+
+	pluginv1alpha1 "kubevirt.io/api/plugin/v1alpha1"
 
 	virtwait "kubevirt.io/kubevirt/pkg/apimachinery/wait"
 	diskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
@@ -51,6 +52,7 @@ import (
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/cli"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/plugins"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/storage"
 )
 
@@ -219,6 +221,14 @@ func (l *LibvirtDomainManager) prepareMigrationTarget(
 	if err != nil {
 		return fmt.Errorf("executing custom preStart hooks failed: %v", err)
 	}
+	if pluginList := plugins.GetPlugins(); len(pluginList) > 0 {
+		updatedSpec, _, err := plugins.ApplyDomainHooks(pluginList, vmi, &dom.Spec,
+			pluginv1alpha1.InvocationContextMigrationTarget)
+		if err != nil {
+			return fmt.Errorf("applying plugin domain hooks failed: %v", err)
+		}
+		updatedSpec.DeepCopyInto(&dom.Spec)
+	}
 
 	if shouldBlockMigrationTargetPreparation(vmi) {
 		return fmt.Errorf("Blocking preparation of migration target in order to satisfy a functional test condition")
@@ -339,12 +349,6 @@ type TargetMigrationMonitor struct {
 	logger        *log.FilteredLogger
 	domain        *api.Domain
 	metadataCache *metadata.Cache
-	notifier      MigrationEventNotifier
-}
-
-type MigrationEventNotifier interface {
-	SendEvent(event watch.Event) error
-	UpdateEvents(event watch.Event)
 }
 
 func NewTargetMigrationMonitor(
@@ -352,14 +356,13 @@ func NewTargetMigrationMonitor(
 	logger *log.FilteredLogger,
 	domain *api.Domain,
 	metadataCache *metadata.Cache,
-	notifier MigrationEventNotifier,
 ) *TargetMigrationMonitor {
 	return &TargetMigrationMonitor{
 		c:             c,
 		logger:        logger,
 		domain:        domain,
 		metadataCache: metadataCache,
-		notifier:      notifier}
+	}
 }
 
 var retryDelays = []time.Duration{1 * time.Second, 2 * time.Second, 3 * time.Second}
@@ -400,9 +403,6 @@ func (m *TargetMigrationMonitor) StartMonitor() {
 			m.logger.Info("Incoming migration job completed, setting EndTimestamp")
 		}
 		setEndTimestamp(m.metadataCache)
-		event := watch.Event{Type: watch.Modified, Object: m.domain}
-		m.notifier.SendEvent(event)
-		m.notifier.UpdateEvents(event)
 	}()
 }
 

@@ -131,7 +131,7 @@ var _ = Describe(SIG("DataVolume Integration", func() {
 					Fail("Fail test when Block storage is not present")
 				}
 			} else {
-				sc, exists = libstorage.GetRWOFileSystemStorageClass()
+				sc, exists = libstorage.GetCSIStorageClass()
 				if !exists {
 					Fail("Fail test when Filesystem storage is not present")
 				}
@@ -141,7 +141,7 @@ var _ = Describe(SIG("DataVolume Integration", func() {
 				Fail("Fail when volume expansion storage class not available")
 			}
 
-			imageUrl := cd.DataVolumeImportUrlForContainerDisk(cd.ContainerDiskAlpine)
+			imageUrl := cd.DataVolumeImportUrlForContainerDisk(cd.ContainerDiskAlpineTestTooling)
 			dataVolume := libdv.NewDataVolume(
 				libdv.WithRegistryURLSourceAndPullMethod(imageUrl, cdiv1.RegistryPullNode),
 				libdv.WithStorage(
@@ -189,7 +189,7 @@ var _ = Describe(SIG("DataVolume Integration", func() {
 			}, 360).Should(Succeed())
 
 			Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
-				&expect.BSnd{S: "sudo /sbin/resize-filesystem /dev/root /run/resize.rootfs /dev/console && echo $?\n"},
+				&expect.BSnd{S: "resize2fs /dev/root && echo $?\n"},
 				&expect.BExp{R: "0"},
 			}, 30)).To(Succeed(), "failed to resize root")
 
@@ -206,8 +206,7 @@ var _ = Describe(SIG("DataVolume Integration", func() {
 		)
 
 		It("Check disk expansion accounts for actual usable size", func() {
-
-			sc, exists := libstorage.GetRWOFileSystemStorageClass()
+			sc, exists := libstorage.GetCSIStorageClass()
 			if !exists {
 				Fail("Fail test when Filesystem storage is not present")
 			}
@@ -242,6 +241,8 @@ var _ = Describe(SIG("DataVolume Integration", func() {
 			_, err = fmt.Sscanf(fstatOutput, "%d %d", &freeBlocks, &ioBlockSize)
 			Expect(err).ToNot(HaveOccurred())
 			freeSize := freeBlocks * ioBlockSize
+			err = virtClient.CoreV1().Pods(executorPod.Namespace).Delete(context.Background(), executorPod.Name, metav1.DeleteOptions{})
+			Expect(err).ToNot(HaveOccurred())
 
 			vmi := libstorage.RenderVMIWithDataVolume(dataVolume.Name, dataVolume.Namespace)
 			vmi = libvmops.RunVMIAndExpectLaunch(vmi, 500)
@@ -1016,7 +1017,7 @@ var _ = Describe(SIG("DataVolume Integration", func() {
 			dv.Annotations["user.custom.annotation/storage.thick-provisioned"] = "false"
 			return dv
 		}
-		DescribeTable("[rfe_id:5070][crit:medium][vendor:cnv-qe@redhat.com][level:component]fstrim from the VM influences disk.img", func(dvChange func(*cdiv1.DataVolume) *cdiv1.DataVolume, expectSmaller bool) {
+		DescribeTable("[rfe_id:5070][crit:medium][vendor:cnv-qe@redhat.com][level:component]fstrim from the VM influences disk.img", decorators.RequiresDiscardSupport, func(dvChange func(*cdiv1.DataVolume) *cdiv1.DataVolume, expectSmaller bool) {
 			sc, exists := libstorage.GetCSIStorageClass()
 			if !exists {
 				Fail("Fail test when Filesystem storage is not present")
@@ -1038,7 +1039,7 @@ var _ = Describe(SIG("DataVolume Integration", func() {
 
 			vmi := libstorage.RenderVMIWithDataVolume(dataVolume.Name, testsuite.GetTestNamespace(nil),
 				libvmi.WithCloudInitNoCloud(libvmifact.WithDummyCloudForFastBoot()),
-				libvmi.WithMemoryRequest("512Mi"),
+				libvmi.WithMemoryRequest(libvmifact.FedoraMemory),
 			)
 
 			dataVolume, err = virtClient.CdiClient().CdiV1beta1().DataVolumes(testsuite.GetTestNamespace(nil)).Create(context.Background(), dataVolume, metav1.CreateOptions{})
@@ -1249,5 +1250,12 @@ func renderVMWithRegistryImportDataVolume(containerDisk cd.ContainerDisk, storag
 			libdv.StorageWithVolumeSize(cd.ContainerDiskSizeBySourceURL(importUrl)),
 		),
 	)
-	return libstorage.RenderVMWithDataVolumeTemplate(dv)
+	var vmiOpts []libvmi.Option
+	if containerDisk == cd.ContainerDiskFedoraTestTooling {
+		vmiOpts = append(vmiOpts, libvmi.WithMemoryRequest(libvmifact.FedoraMemory))
+	}
+	return libvmi.NewVirtualMachine(
+		libstorage.RenderVMIWithDataVolume(dv.Name, dv.Namespace, vmiOpts...),
+		libvmi.WithDataVolumeTemplate(dv),
+	)
 }

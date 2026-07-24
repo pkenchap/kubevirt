@@ -1203,8 +1203,10 @@ var CRDsValidation map[string]string = map[string]string{
               type: array
               x-kubernetes-list-type: atomic
             imagePullPolicy:
-              description: PullPolicy describes a policy for if/when to pull a container
-                image
+              description: |-
+                The ImagePullPolicy to use for user workload pods and their containers
+                (launcher pods, exporter pods, etc.).
+                For KubeVirt infrastructure images, use spec.imagePullPolicy instead.
               type: string
             instancetype:
               description: Instancetype configuration
@@ -1417,6 +1419,14 @@ var CRDsValidation map[string]string = map[string]string{
                     That will ensure the target virt-launcher doesn't share categories with another pod on the node.
                     However, migrations will fail when using RWX volumes that don't automatically deal with SELinux levels.
                   type: boolean
+                maxDowntimeMs:
+                  description: |-
+                    MaxDowntimeMs specifies the maximum tolerable downtime (in milliseconds) during switchover.
+                    Defaults to 900
+                  format: int64
+                  maximum: 2000000
+                  minimum: 1
+                  type: integer
                 network:
                   description: |-
                     Network is the name of the CNI network to use for live migrations. By default, migrations go
@@ -1632,14 +1642,27 @@ var CRDsValidation map[string]string = map[string]string{
                   type: array
                   x-kubernetes-list-type: atomic
               type: object
+            persistentReservationConfiguration:
+              description: PersistentReservationConfiguration controls the deployment
+                of additional resources required for using SCSI persistent reservation
+                in VMs
+              nullable: true
+              properties:
+                enabled:
+                  description: |-
+                    Enabled controls the deployment of additional resources like the pr-helper container
+                    for enabling the use of the SCSI persistent reservation VMs, defaults to False.
+                  nullable: true
+                  type: boolean
+              type: object
             roleAggregationStrategy:
               description: |-
                 RoleAggregationStrategy controls whether RBAC cluster roles should be aggregated
                 to the default Kubernetes roles (admin, edit, view).
                 When set to "AggregateToDefault" (default) or not specified, the aggregate-to-* labels are added to the cluster roles.
                 When set to "Manual", the labels are not added, and roles will not be aggregated to the default roles.
-                Setting this field to "Manual" requires the OptOutRoleAggregation feature gate to be enabled.
-                This is an Alpha feature and subject to change.
+                Setting RoleAggregationStrategy to "Manual" requires the OptOutRoleAggregation feature gate
+                to be enabled (Beta, enabled by default since v1.9.0).
               enum:
               - AggregateToDefault
               - Manual
@@ -1876,7 +1899,11 @@ var CRDsValidation map[string]string = map[string]string{
               x-kubernetes-list-type: atomic
           type: object
         imagePullPolicy:
-          description: The ImagePullPolicy to use.
+          description: |-
+            The ImagePullPolicy to use for KubeVirt operator-managed infrastructure
+            images (virt-api, virt-controller, virt-handler, virt-exportproxy, etc.).
+            For pull policy of user workload pods, see
+            spec.configuration.imagePullPolicy.
           type: string
         imagePullSecrets:
           description: |-
@@ -4108,6 +4135,88 @@ var CRDsValidation map[string]string = map[string]string{
         completionTimeoutPerGiB:
           format: int64
           type: integer
+        experimental:
+          description: |-
+            ExperimentalMigrationOptions is an alpha API. It is intended for experimental
+            purposes only and will be removed in the future.
+          properties:
+            compression:
+              description: |-
+                Compression selects the algorithm for compressing the live migration
+                data stream. When omitted (nil) or set to "none", compression is
+                disabled.
+              enum:
+              - none
+              - zstd
+              type: string
+            stallDetector:
+              properties:
+                completionTimeoutFactor:
+                  description: |-
+                    CompletionTimeoutFactor multiplies the computed migration completion timeout to determine
+                    the total time budget for deciding whether a forced switchover can still finish in time,
+                    and to extend the abort deadline after initiating a completion-timeout-driven switchover.
+                    Defaults to "2".
+                  type: string
+                ewmaAlpha:
+                  description: |-
+                    EwmaAlpha is the smoothing factor for the exponentially weighted moving average of
+                    observed migration bandwidth. Must be in the range (0, 1]; zero is invalid because
+                    the estimate would never incorporate new samples. Higher values weight recent samples
+                    more heavily.
+                    Defaults to "0.4".
+                  type: string
+                patienceWindowDecayFactor:
+                  description: |-
+                    PatienceWindowDecayFactor is the factor by which the relaxation patience window is
+                    multiplied after each best-remaining-bytes relaxation step.
+                    Defaults to "0.5".
+                  type: string
+                precopyPossibleFactor:
+                  description: |-
+                    PrecopyPossibleFactor is the maximum factor by which estimated downtime may exceed
+                    MaxDowntime while still attempting a soft stop-and-copy instead of aborting the migration.
+                    Defaults to "1.5".
+                  type: string
+                searchLocalMinima:
+                  description: |-
+                    SearchLocalMinima controls whether convergence actions are delayed until remaining bytes
+                    reach a local minimum near the best observed value. When false, actions may trigger
+                    as soon as a stall is detected.
+                    Defaults to true.
+                  type: boolean
+                stallMargin:
+                  description: |-
+                    StallMargin is the fractional tolerance, expressed as a percentage, used when
+                    comparing remaining migration bytes against the best observed value to detect stalls
+                    and local minima. A stall is reported when remaining bytes stay above
+                    (1 - StallMargin/100) of the outside-window minimum.
+                    Defaults to 4.
+                  format: int64
+                  maximum: 100
+                  minimum: 0
+                  type: integer
+                stallProgressTimeout:
+                  description: |-
+                    StallProgressTimeout is the duration in seconds of the sliding window used to track
+                    minimum remaining-bytes and detect when migration progress has stalled.
+                    Defaults to 40.
+                  format: int64
+                  type: integer
+                switchoverTimeout:
+                  description: |-
+                    SwitchoverTimeout is the duration in seconds allowed for a stop-and-copy or post-copy
+                    switchover to complete after being triggered before the migration is aborted.
+                    Defaults to 60.
+                  format: int64
+                  type: integer
+              type: object
+          type: object
+        maxDowntimeMs:
+          format: int64
+          maximum: 2000000
+          minimum: 1
+          type: integer
         selectors:
           properties:
             namespaceSelector:
@@ -4124,6 +4233,209 @@ var CRDsValidation map[string]string = map[string]string{
       type: object
     status:
       nullable: true
+      type: object
+  required:
+  - spec
+  type: object
+`,
+	"plugin": `openAPIV3Schema:
+  description: |-
+    Plugin defines a KubeVirt extension that can modify VM domain XML,
+    hook into VM lifecycle events, and reference admission objects.
+  properties:
+    apiVersion:
+      description: |-
+        APIVersion defines the versioned schema of this representation of an object.
+        Servers should convert recognized schemas to the latest internal value, and
+        may reject unrecognized values.
+        More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+      type: string
+    kind:
+      description: |-
+        Kind is a string value representing the REST resource this object represents.
+        Servers may infer this from the endpoint the client submits requests to.
+        Cannot be updated.
+        In CamelCase.
+        More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+      type: string
+    metadata:
+      type: object
+    spec:
+      description: Spec defines the plugin's hooks and admission references.
+      properties:
+        condition:
+          description: |-
+            Condition is a CEL expression that determines whether this plugin applies to a given VM.
+            When set, this acts as a baseline filter for all hooks in the plugin.
+            Individual hooks may further narrow the scope with their own Condition fields.
+          type: string
+        domainHooks:
+          description: |-
+            DomainHooks defines hooks that modify the libvirt domain XML.
+            Hooks are applied in declaration order within each plugin.
+            Across plugins, hooks are applied in alphabetical order by plugin name.
+          items:
+            description: |-
+              DomainHook defines a hook that modifies the libvirt domain XML.
+              Exactly one of cel or sidecar must be specified.
+            properties:
+              cel:
+                description: CEL defines a CEL expression that transforms the domain
+                  XML.
+                properties:
+                  expression:
+                    description: Expression is the CEL expression applied to the domain
+                      XML.
+                    minLength: 1
+                    type: string
+                required:
+                - expression
+                type: object
+              condition:
+                description: Condition is a CEL expression that determines whether
+                  this hook applies to a given VM.
+                type: string
+              failureStrategy:
+                description: FailureStrategy specifies how to handle hook failures
+                  (Fail or Ignore).
+                type: string
+              sidecar:
+                description: Sidecar defines a sidecar-based hook that transforms
+                  the domain XML via a Unix socket.
+                properties:
+                  socketPath:
+                    description: SocketPath is the path to the Unix socket used to
+                      communicate with the sidecar.
+                    minLength: 1
+                    type: string
+                required:
+                - socketPath
+                type: object
+              timeout:
+                description: Timeout specifies the maximum duration to wait for the
+                  hook to complete.
+                type: string
+            type: object
+          type: array
+          x-kubernetes-list-type: atomic
+        failureStrategy:
+          description: |-
+            FailureStrategy specifies the default behavior when the plugin itself is unhealthy
+            (e.g. a referenced webhook is not ready, or a sidecar socket is unreachable).
+            Individual hooks may override this with their own FailureStrategy.
+          type: string
+        mutatingAdmissionPolicies:
+          description: MutatingAdmissionPolicies references MutatingAdmissionPolicy
+            objects managed by the plugin.
+          items:
+            description: AdmissionReference is a reference to an admission object
+              by name.
+            properties:
+              name:
+                description: Name is the name of the admission object.
+                minLength: 1
+                type: string
+            required:
+            - name
+            type: object
+          type: array
+          x-kubernetes-list-type: atomic
+        mutatingAdmissionWebhooks:
+          description: MutatingAdmissionWebhooks references MutatingWebhookConfiguration
+            objects managed by the plugin.
+          items:
+            description: AdmissionReference is a reference to an admission object
+              by name.
+            properties:
+              name:
+                description: Name is the name of the admission object.
+                minLength: 1
+                type: string
+            required:
+            - name
+            type: object
+          type: array
+          x-kubernetes-list-type: atomic
+        nodeHooks:
+          description: |-
+            NodeHooks defines hooks that execute during VM lifecycle events.
+            Hooks are applied in declaration order within each plugin.
+            Across plugins, hooks are applied in alphabetical order by plugin name.
+          items:
+            description: |-
+              NodeHook defines a hook that runs an executable on the hosting node during VM lifecycle events.
+              Unlike DomainHooks which modify the libvirt domain XML, NodeHooks perform node-level operations
+              such as configuring networking, storage preparation, or device management.
+              Hooks may fire multiple times for the same lifecycle event due to reconciliation retries.
+              Implementations must be idempotent.
+            properties:
+              condition:
+                description: Condition is a CEL expression that determines whether
+                  this hook applies to a given VM.
+                type: string
+              failureStrategy:
+                description: FailureStrategy specifies how to handle hook failures
+                  (Fail or Ignore).
+                type: string
+              permittedHooks:
+                description: PermittedHooks lists the VM lifecycle events this hook
+                  handles.
+                items:
+                  description: NodeHookPoint identifies a VM lifecycle event for node-level
+                    hooks.
+                  type: string
+                minItems: 1
+                type: array
+                x-kubernetes-list-type: atomic
+              socket:
+                description: Socket is the path to the Unix socket for hook communication.
+                minLength: 1
+                type: string
+              timeout:
+                description: Timeout specifies the maximum duration to wait for the
+                  hook to complete.
+                type: string
+            required:
+            - permittedHooks
+            - socket
+            type: object
+          type: array
+          x-kubernetes-list-type: atomic
+        validatingAdmissionPolicies:
+          description: ValidatingAdmissionPolicies references ValidatingAdmissionPolicy
+            objects managed by the plugin.
+          items:
+            description: AdmissionReference is a reference to an admission object
+              by name.
+            properties:
+              name:
+                description: Name is the name of the admission object.
+                minLength: 1
+                type: string
+            required:
+            - name
+            type: object
+          type: array
+          x-kubernetes-list-type: atomic
+        validatingAdmissionWebhooks:
+          description: ValidatingAdmissionWebhooks references ValidatingWebhookConfiguration
+            objects managed by the plugin.
+          items:
+            description: AdmissionReference is a reference to an admission object
+              by name.
+            properties:
+              name:
+                description: Name is the name of the admission object.
+                minLength: 1
+                type: string
+            required:
+            - name
+            type: object
+          type: array
+          x-kubernetes-list-type: atomic
+      type: object
+    status:
+      description: Status reflects the observed state of the plugin.
       type: object
   required:
   - spec
@@ -6629,9 +6941,43 @@ var CRDsValidation map[string]string = map[string]string{
                                   will be placed on the guests pci address with the
                                   specified PCI address. For example: 0000:81:01.10'
                                 type: string
+                              portRanges:
+                                description: |-
+                                  List of port ranges to be forwarded to the virtual machine.
+                                  Mutually exclusive with ports. Only supported on masquerade interfaces.
+                                  This feature is in Alpha.
+                                items:
+                                  description: |-
+                                    PortRange represents a range of ports to be forwarded to the virtual machine.
+                                    All fields are mandatory.
+                                  properties:
+                                    end:
+                                      description: |-
+                                        Last port of the range to expose for the virtual machine.
+                                        This must be a valid port number, 0 < x < 65536.
+                                        Must be greater than or equal to start.
+                                      format: int32
+                                      type: integer
+                                    protocol:
+                                      description: Required. Must be UDP or TCP.
+                                      type: string
+                                    start:
+                                      description: |-
+                                        First port of the range to expose for the virtual machine.
+                                        This must be a valid port number, 0 < x < 65536.
+                                      format: int32
+                                      type: integer
+                                  required:
+                                  - end
+                                  - protocol
+                                  - start
+                                  type: object
+                                type: array
+                                x-kubernetes-list-type: atomic
                               ports:
-                                description: List of ports to be forwarded to the
-                                  virtual machine.
+                                description: |-
+                                  List of ports to be forwarded to the virtual machine.
+                                  Mutually exclusive with portRanges.
                                 items:
                                   description: |-
                                     Port represents a port to expose from the virtual machine.
@@ -7526,6 +7872,28 @@ var CRDsValidation map[string]string = map[string]string{
                               Default 10.0.2.0/24 if not specified.
                             type: string
                         type: object
+                      resourceClaim:
+                        description: |-
+                          ResourceClaim represents a network resource requested
+                          via a VMI spec.resourceClaims[] entry, backed by either a
+                          Kubernetes ResourceClaim or ResourceClaimTemplate.
+                          This field should only be configured if the NetworkDevicesWithDRA feature-gate is enabled.
+                          This feature is in alpha.
+                        properties:
+                          claimName:
+                            description: |-
+                              ClaimName references the name of an entry in the
+                              VMI's spec.resourceClaims[] array. The referenced
+                              entry may use either resourceClaimName or
+                              resourceClaimTemplateName.
+                            type: string
+                          requestName:
+                            description: |-
+                              RequestName specifies which request from the
+                              ResourceClaim/ResourceClaimTemplate spec.devices.requests array this
+                              claim request corresponds to.
+                            type: string
+                        type: object
                     required:
                     - name
                     type: object
@@ -7696,26 +8064,20 @@ var CRDsValidation map[string]string = map[string]string{
                     This is an alpha field and requires enabling the
                     DynamicResourceAllocation feature gate in kubernetes
                      https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/
-                    This field should only be configured if one of the feature-gates GPUsWithDRA or HostDevicesWithDRA is enabled.
+                    This field should only be configured if one of the feature-gates GPUsWithDRA, HostDevicesWithDRA,
+                    or NetworkDevicesWithDRA is enabled.
                     This feature is in alpha.
                   items:
-                    description: |-
-                      PodResourceClaim references exactly one ResourceClaim, either directly
-                      or by naming a ResourceClaimTemplate which is then turned into a ResourceClaim
-                      for the pod.
-
-                      It adds a name to it that uniquely identifies the ResourceClaim inside the Pod.
-                      Containers that need access to the ResourceClaim reference it with this name.
                     properties:
                       name:
                         description: |-
-                          Name uniquely identifies this resource claim inside the pod.
-                          This must be a DNS_LABEL.
+                          Name uniquely identifies this resource claim inside the VMI.
+                          This field is required and must be a DNS_LABEL.
                         type: string
                       resourceClaimName:
                         description: |-
                           ResourceClaimName is the name of a ResourceClaim object in the same
-                          namespace as this pod.
+                          namespace as this VMI.
 
                           Exactly one of ResourceClaimName and ResourceClaimTemplateName must
                           be set.
@@ -7723,17 +8085,14 @@ var CRDsValidation map[string]string = map[string]string{
                       resourceClaimTemplateName:
                         description: |-
                           ResourceClaimTemplateName is the name of a ResourceClaimTemplate
-                          object in the same namespace as this pod.
+                          object in the same namespace as this VMI.
 
-                          The template will be used to create a new ResourceClaim, which will
-                          be bound to this pod. When this pod is deleted, the ResourceClaim
-                          will also be deleted. The pod name and resource name, along with a
-                          generated component, will be used to form a unique name for the
-                          ResourceClaim, which will be recorded in pod.status.resourceClaimStatuses.
-
-                          This field is immutable and no changes will be made to the
-                          corresponding ResourceClaim by the control plane after creating the
-                          ResourceClaim.
+                          The template name is passed through to the generated virt-launcher Pod
+                          spec. From the Pod spec, the template is used to create a new
+                          ResourceClaim, which is bound to the virt-launcher Pod. When the
+                          virt-launcher Pod is deleted, the ResourceClaim is also deleted. The
+                          generated ResourceClaim name is unique and is recorded in
+                          pod.status.resourceClaimStatuses.
 
                           Exactly one of ResourceClaimName and ResourceClaimTemplateName must
                           be set.
@@ -7749,6 +8108,13 @@ var CRDsValidation map[string]string = map[string]string{
                   description: |-
                     If specified, the VMI will be dispatched by specified scheduler.
                     If not specified, the VMI will be dispatched by default scheduler.
+                  type: string
+                serviceAccountName:
+                  description: |-
+                    ServiceAccountName is the name of the ServiceAccount to use to run the
+                    virt-launcher pod. This sets pod.spec.serviceAccountName but does NOT
+                    automatically expose the service account token to the VM guest.
+                    To expose the token to the VM, use a serviceAccount volume.
                   type: string
                 startStrategy:
                   description: StartStrategy can be set to "Paused" if Virtual Machine
@@ -8552,6 +8918,10 @@ var CRDsValidation map[string]string = map[string]string{
                 failed:
                   description: Failed indicates that the backup failed
                   type: boolean
+                quiesceStatus:
+                  description: QuiesceStatus indicates whether filesystem freeze succeeded,
+                    failed, or was skipped.
+                  type: string
                 startTimestamp:
                   description: StartTimestamp is the timestamp when the backup started
                   format: date-time
@@ -9361,6 +9731,11 @@ var CRDsValidation map[string]string = map[string]string{
             EndpointCert is the raw CACert that is to be used when connecting
             to an exported backup endpoint in pull mode.
           type: string
+        exportUID:
+          description: |-
+            ExportUID tracks the UID of the associated VMExport for pull-mode backups
+            used to detect VMExport recreation and re-initiate the export handshake
+          type: string
         includedVolumes:
           description: IncludedVolumes lists the volumes that were included in the
             backup
@@ -9880,7 +10255,10 @@ var CRDsValidation map[string]string = map[string]string{
           description: Optionally defines the IOThreadsPolicy to be used by the instancetype.
           type: string
         launchSecurity:
-          description: Optionally defines the LaunchSecurity to be used by the instancetype.
+          description: |-
+            Optionally defines the LaunchSecurity to be used by the instancetype.
+
+            Deprecated: Will be removed with v1beta2 or v1
           properties:
             sev:
               description: AMD Secure Encrypted Virtualization (SEV).
@@ -10637,6 +11015,40 @@ var CRDsValidation map[string]string = map[string]string{
           description: PreferredArchitecture defines a prefeerred architecture for
             the VirtualMachine
           type: string
+        preferredLaunchSecurity:
+          description: Optionally defines the preferred LaunchSecurity
+          properties:
+            sev:
+              description: AMD Secure Encrypted Virtualization (SEV).
+              properties:
+                attestation:
+                  description: If specified, run the attestation process for a vmi.
+                  type: object
+                dhCert:
+                  description: Base64 encoded guest owner's Diffie-Hellman key.
+                  type: string
+                policy:
+                  description: |-
+                    Guest policy flags as defined in AMD SEV API specification.
+                    Note: due to security reasons it is not allowed to enable guest debugging. Therefore NoDebug flag is not exposed to users and is always true.
+                  properties:
+                    encryptedState:
+                      description: |-
+                        SEV-ES is required.
+                        Defaults to false.
+                      type: boolean
+                  type: object
+                session:
+                  description: Base64 encoded session blob.
+                  type: string
+              type: object
+            snp:
+              description: AMD SEV-SNP flags defined by the SEV-SNP specifications.
+              type: object
+            tdx:
+              description: Intel Trust Domain Extensions (TDX).
+              type: object
+          type: object
         preferredSubdomain:
           description: Subdomain of the VirtualMachineInstance
           type: string
@@ -12759,9 +13171,43 @@ var CRDsValidation map[string]string = map[string]string{
                           will be placed on the guests pci address with the specified
                           PCI address. For example: 0000:81:01.10'
                         type: string
+                      portRanges:
+                        description: |-
+                          List of port ranges to be forwarded to the virtual machine.
+                          Mutually exclusive with ports. Only supported on masquerade interfaces.
+                          This feature is in Alpha.
+                        items:
+                          description: |-
+                            PortRange represents a range of ports to be forwarded to the virtual machine.
+                            All fields are mandatory.
+                          properties:
+                            end:
+                              description: |-
+                                Last port of the range to expose for the virtual machine.
+                                This must be a valid port number, 0 < x < 65536.
+                                Must be greater than or equal to start.
+                              format: int32
+                              type: integer
+                            protocol:
+                              description: Required. Must be UDP or TCP.
+                              type: string
+                            start:
+                              description: |-
+                                First port of the range to expose for the virtual machine.
+                                This must be a valid port number, 0 < x < 65536.
+                              format: int32
+                              type: integer
+                          required:
+                          - end
+                          - protocol
+                          - start
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
                       ports:
-                        description: List of ports to be forwarded to the virtual
-                          machine.
+                        description: |-
+                          List of ports to be forwarded to the virtual machine.
+                          Mutually exclusive with portRanges.
                         items:
                           description: |-
                             Port represents a port to expose from the virtual machine.
@@ -13644,6 +14090,28 @@ var CRDsValidation map[string]string = map[string]string{
                       Default 10.0.2.0/24 if not specified.
                     type: string
                 type: object
+              resourceClaim:
+                description: |-
+                  ResourceClaim represents a network resource requested
+                  via a VMI spec.resourceClaims[] entry, backed by either a
+                  Kubernetes ResourceClaim or ResourceClaimTemplate.
+                  This field should only be configured if the NetworkDevicesWithDRA feature-gate is enabled.
+                  This feature is in alpha.
+                properties:
+                  claimName:
+                    description: |-
+                      ClaimName references the name of an entry in the
+                      VMI's spec.resourceClaims[] array. The referenced
+                      entry may use either resourceClaimName or
+                      resourceClaimTemplateName.
+                    type: string
+                  requestName:
+                    description: |-
+                      RequestName specifies which request from the
+                      ResourceClaim/ResourceClaimTemplate spec.devices.requests array this
+                      claim request corresponds to.
+                    type: string
+                type: object
             required:
             - name
             type: object
@@ -13814,26 +14282,20 @@ var CRDsValidation map[string]string = map[string]string{
             This is an alpha field and requires enabling the
             DynamicResourceAllocation feature gate in kubernetes
              https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/
-            This field should only be configured if one of the feature-gates GPUsWithDRA or HostDevicesWithDRA is enabled.
+            This field should only be configured if one of the feature-gates GPUsWithDRA, HostDevicesWithDRA,
+            or NetworkDevicesWithDRA is enabled.
             This feature is in alpha.
           items:
-            description: |-
-              PodResourceClaim references exactly one ResourceClaim, either directly
-              or by naming a ResourceClaimTemplate which is then turned into a ResourceClaim
-              for the pod.
-
-              It adds a name to it that uniquely identifies the ResourceClaim inside the Pod.
-              Containers that need access to the ResourceClaim reference it with this name.
             properties:
               name:
                 description: |-
-                  Name uniquely identifies this resource claim inside the pod.
-                  This must be a DNS_LABEL.
+                  Name uniquely identifies this resource claim inside the VMI.
+                  This field is required and must be a DNS_LABEL.
                 type: string
               resourceClaimName:
                 description: |-
                   ResourceClaimName is the name of a ResourceClaim object in the same
-                  namespace as this pod.
+                  namespace as this VMI.
 
                   Exactly one of ResourceClaimName and ResourceClaimTemplateName must
                   be set.
@@ -13841,17 +14303,14 @@ var CRDsValidation map[string]string = map[string]string{
               resourceClaimTemplateName:
                 description: |-
                   ResourceClaimTemplateName is the name of a ResourceClaimTemplate
-                  object in the same namespace as this pod.
+                  object in the same namespace as this VMI.
 
-                  The template will be used to create a new ResourceClaim, which will
-                  be bound to this pod. When this pod is deleted, the ResourceClaim
-                  will also be deleted. The pod name and resource name, along with a
-                  generated component, will be used to form a unique name for the
-                  ResourceClaim, which will be recorded in pod.status.resourceClaimStatuses.
-
-                  This field is immutable and no changes will be made to the
-                  corresponding ResourceClaim by the control plane after creating the
-                  ResourceClaim.
+                  The template name is passed through to the generated virt-launcher Pod
+                  spec. From the Pod spec, the template is used to create a new
+                  ResourceClaim, which is bound to the virt-launcher Pod. When the
+                  virt-launcher Pod is deleted, the ResourceClaim is also deleted. The
+                  generated ResourceClaim name is unique and is recorded in
+                  pod.status.resourceClaimStatuses.
 
                   Exactly one of ResourceClaimName and ResourceClaimTemplateName must
                   be set.
@@ -13867,6 +14326,13 @@ var CRDsValidation map[string]string = map[string]string{
           description: |-
             If specified, the VMI will be dispatched by specified scheduler.
             If not specified, the VMI will be dispatched by default scheduler.
+          type: string
+        serviceAccountName:
+          description: |-
+            ServiceAccountName is the name of the ServiceAccount to use to run the
+            virt-launcher pod. This sets pod.spec.serviceAccountName but does NOT
+            automatically expose the service account token to the VM guest.
+            To expose the token to the VM, use a serviceAccount volume.
           type: string
         startStrategy:
           description: StartStrategy can be set to "Paused" if Virtual Machine should
@@ -14663,6 +15129,10 @@ var CRDsValidation map[string]string = map[string]string{
                 failed:
                   description: Failed indicates that the backup failed
                   type: boolean
+                quiesceStatus:
+                  description: QuiesceStatus indicates whether filesystem freeze succeeded,
+                    failed, or was skipped.
+                  type: string
                 startTimestamp:
                   description: StartTimestamp is the timestamp when the backup started
                   format: date-time
@@ -15093,6 +15563,83 @@ var CRDsValidation map[string]string = map[string]string{
                     When set to true, DisableTLS will disable the additional layer of live migration encryption
                     provided by KubeVirt. This is usually a bad idea. Defaults to false
                   type: boolean
+                experimental:
+                  description: |-
+                    ExperimentalMigrationOptions is an alpha API. It is intended for experimental
+                    purposes only and will be removed in the future.
+                  properties:
+                    compression:
+                      description: |-
+                        Compression selects the algorithm for compressing the live migration
+                        data stream. When omitted (nil) or set to "none", compression is
+                        disabled.
+                      enum:
+                      - none
+                      - zstd
+                      type: string
+                    stallDetector:
+                      properties:
+                        completionTimeoutFactor:
+                          description: |-
+                            CompletionTimeoutFactor multiplies the computed migration completion timeout to determine
+                            the total time budget for deciding whether a forced switchover can still finish in time,
+                            and to extend the abort deadline after initiating a completion-timeout-driven switchover.
+                            Defaults to "2".
+                          type: string
+                        ewmaAlpha:
+                          description: |-
+                            EwmaAlpha is the smoothing factor for the exponentially weighted moving average of
+                            observed migration bandwidth. Must be in the range (0, 1]; zero is invalid because
+                            the estimate would never incorporate new samples. Higher values weight recent samples
+                            more heavily.
+                            Defaults to "0.4".
+                          type: string
+                        patienceWindowDecayFactor:
+                          description: |-
+                            PatienceWindowDecayFactor is the factor by which the relaxation patience window is
+                            multiplied after each best-remaining-bytes relaxation step.
+                            Defaults to "0.5".
+                          type: string
+                        precopyPossibleFactor:
+                          description: |-
+                            PrecopyPossibleFactor is the maximum factor by which estimated downtime may exceed
+                            MaxDowntime while still attempting a soft stop-and-copy instead of aborting the migration.
+                            Defaults to "1.5".
+                          type: string
+                        searchLocalMinima:
+                          description: |-
+                            SearchLocalMinima controls whether convergence actions are delayed until remaining bytes
+                            reach a local minimum near the best observed value. When false, actions may trigger
+                            as soon as a stall is detected.
+                            Defaults to true.
+                          type: boolean
+                        stallMargin:
+                          description: |-
+                            StallMargin is the fractional tolerance, expressed as a percentage, used when
+                            comparing remaining migration bytes against the best observed value to detect stalls
+                            and local minima. A stall is reported when remaining bytes stay above
+                            (1 - StallMargin/100) of the outside-window minimum.
+                            Defaults to 4.
+                          format: int64
+                          maximum: 100
+                          minimum: 0
+                          type: integer
+                        stallProgressTimeout:
+                          description: |-
+                            StallProgressTimeout is the duration in seconds of the sliding window used to track
+                            minimum remaining-bytes and detect when migration progress has stalled.
+                            Defaults to 40.
+                          format: int64
+                          type: integer
+                        switchoverTimeout:
+                          description: |-
+                            SwitchoverTimeout is the duration in seconds allowed for a stop-and-copy or post-copy
+                            switchover to complete after being triggered before the migration is aborted.
+                            Defaults to 60.
+                          format: int64
+                          type: integer
+                      type: object
+                  type: object
                 matchSELinuxLevelOnMigration:
                   description: |-
                     By default, the SELinux level of target virt-launcher pods is forced to the level of the source virt-launcher.
@@ -15100,6 +15647,14 @@ var CRDsValidation map[string]string = map[string]string{
                     That will ensure the target virt-launcher doesn't share categories with another pod on the node.
                     However, migrations will fail when using RWX volumes that don't automatically deal with SELinux levels.
                   type: boolean
+                maxDowntimeMs:
+                  description: |-
+                    MaxDowntimeMs specifies the maximum tolerable downtime (in milliseconds) during switchover.
+                    Defaults to 900
+                  format: int64
+                  maximum: 2000000
+                  minimum: 1
+                  type: integer
                 network:
                   description: |-
                     Network is the name of the CNI network to use for live migrations. By default, migrations go
@@ -15696,6 +16251,83 @@ var CRDsValidation map[string]string = map[string]string{
                     When set to true, DisableTLS will disable the additional layer of live migration encryption
                     provided by KubeVirt. This is usually a bad idea. Defaults to false
                   type: boolean
+                experimental:
+                  description: |-
+                    ExperimentalMigrationOptions is an alpha API. It is intended for experimental
+                    purposes only and will be removed in the future.
+                  properties:
+                    compression:
+                      description: |-
+                        Compression selects the algorithm for compressing the live migration
+                        data stream. When omitted (nil) or set to "none", compression is
+                        disabled.
+                      enum:
+                      - none
+                      - zstd
+                      type: string
+                    stallDetector:
+                      properties:
+                        completionTimeoutFactor:
+                          description: |-
+                            CompletionTimeoutFactor multiplies the computed migration completion timeout to determine
+                            the total time budget for deciding whether a forced switchover can still finish in time,
+                            and to extend the abort deadline after initiating a completion-timeout-driven switchover.
+                            Defaults to "2".
+                          type: string
+                        ewmaAlpha:
+                          description: |-
+                            EwmaAlpha is the smoothing factor for the exponentially weighted moving average of
+                            observed migration bandwidth. Must be in the range (0, 1]; zero is invalid because
+                            the estimate would never incorporate new samples. Higher values weight recent samples
+                            more heavily.
+                            Defaults to "0.4".
+                          type: string
+                        patienceWindowDecayFactor:
+                          description: |-
+                            PatienceWindowDecayFactor is the factor by which the relaxation patience window is
+                            multiplied after each best-remaining-bytes relaxation step.
+                            Defaults to "0.5".
+                          type: string
+                        precopyPossibleFactor:
+                          description: |-
+                            PrecopyPossibleFactor is the maximum factor by which estimated downtime may exceed
+                            MaxDowntime while still attempting a soft stop-and-copy instead of aborting the migration.
+                            Defaults to "1.5".
+                          type: string
+                        searchLocalMinima:
+                          description: |-
+                            SearchLocalMinima controls whether convergence actions are delayed until remaining bytes
+                            reach a local minimum near the best observed value. When false, actions may trigger
+                            as soon as a stall is detected.
+                            Defaults to true.
+                          type: boolean
+                        stallMargin:
+                          description: |-
+                            StallMargin is the fractional tolerance, expressed as a percentage, used when
+                            comparing remaining migration bytes against the best observed value to detect stalls
+                            and local minima. A stall is reported when remaining bytes stay above
+                            (1 - StallMargin/100) of the outside-window minimum.
+                            Defaults to 4.
+                          format: int64
+                          maximum: 100
+                          minimum: 0
+                          type: integer
+                        stallProgressTimeout:
+                          description: |-
+                            StallProgressTimeout is the duration in seconds of the sliding window used to track
+                            minimum remaining-bytes and detect when migration progress has stalled.
+                            Defaults to 40.
+                          format: int64
+                          type: integer
+                        switchoverTimeout:
+                          description: |-
+                            SwitchoverTimeout is the duration in seconds allowed for a stop-and-copy or post-copy
+                            switchover to complete after being triggered before the migration is aborted.
+                            Defaults to 60.
+                          format: int64
+                          type: integer
+                      type: object
+                  type: object
                 matchSELinuxLevelOnMigration:
                   description: |-
                     By default, the SELinux level of target virt-launcher pods is forced to the level of the source virt-launcher.
@@ -15703,6 +16335,14 @@ var CRDsValidation map[string]string = map[string]string{
                     That will ensure the target virt-launcher doesn't share categories with another pod on the node.
                     However, migrations will fail when using RWX volumes that don't automatically deal with SELinux levels.
                   type: boolean
+                maxDowntimeMs:
+                  description: |-
+                    MaxDowntimeMs specifies the maximum tolerable downtime (in milliseconds) during switchover.
+                    Defaults to 900
+                  format: int64
+                  maximum: 2000000
+                  minimum: 1
+                  type: integer
                 network:
                   description: |-
                     Network is the name of the CNI network to use for live migrations. By default, migrations go
@@ -16642,9 +17282,43 @@ var CRDsValidation map[string]string = map[string]string{
                           will be placed on the guests pci address with the specified
                           PCI address. For example: 0000:81:01.10'
                         type: string
+                      portRanges:
+                        description: |-
+                          List of port ranges to be forwarded to the virtual machine.
+                          Mutually exclusive with ports. Only supported on masquerade interfaces.
+                          This feature is in Alpha.
+                        items:
+                          description: |-
+                            PortRange represents a range of ports to be forwarded to the virtual machine.
+                            All fields are mandatory.
+                          properties:
+                            end:
+                              description: |-
+                                Last port of the range to expose for the virtual machine.
+                                This must be a valid port number, 0 < x < 65536.
+                                Must be greater than or equal to start.
+                              format: int32
+                              type: integer
+                            protocol:
+                              description: Required. Must be UDP or TCP.
+                              type: string
+                            start:
+                              description: |-
+                                First port of the range to expose for the virtual machine.
+                                This must be a valid port number, 0 < x < 65536.
+                              format: int32
+                              type: integer
+                          required:
+                          - end
+                          - protocol
+                          - start
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
                       ports:
-                        description: List of ports to be forwarded to the virtual
-                          machine.
+                        description: |-
+                          List of ports to be forwarded to the virtual machine.
+                          Mutually exclusive with portRanges.
                         items:
                           description: |-
                             Port represents a port to expose from the virtual machine.
@@ -19204,9 +19878,43 @@ var CRDsValidation map[string]string = map[string]string{
                                   will be placed on the guests pci address with the
                                   specified PCI address. For example: 0000:81:01.10'
                                 type: string
+                              portRanges:
+                                description: |-
+                                  List of port ranges to be forwarded to the virtual machine.
+                                  Mutually exclusive with ports. Only supported on masquerade interfaces.
+                                  This feature is in Alpha.
+                                items:
+                                  description: |-
+                                    PortRange represents a range of ports to be forwarded to the virtual machine.
+                                    All fields are mandatory.
+                                  properties:
+                                    end:
+                                      description: |-
+                                        Last port of the range to expose for the virtual machine.
+                                        This must be a valid port number, 0 < x < 65536.
+                                        Must be greater than or equal to start.
+                                      format: int32
+                                      type: integer
+                                    protocol:
+                                      description: Required. Must be UDP or TCP.
+                                      type: string
+                                    start:
+                                      description: |-
+                                        First port of the range to expose for the virtual machine.
+                                        This must be a valid port number, 0 < x < 65536.
+                                      format: int32
+                                      type: integer
+                                  required:
+                                  - end
+                                  - protocol
+                                  - start
+                                  type: object
+                                type: array
+                                x-kubernetes-list-type: atomic
                               ports:
-                                description: List of ports to be forwarded to the
-                                  virtual machine.
+                                description: |-
+                                  List of ports to be forwarded to the virtual machine.
+                                  Mutually exclusive with portRanges.
                                 items:
                                   description: |-
                                     Port represents a port to expose from the virtual machine.
@@ -20101,6 +20809,28 @@ var CRDsValidation map[string]string = map[string]string{
                               Default 10.0.2.0/24 if not specified.
                             type: string
                         type: object
+                      resourceClaim:
+                        description: |-
+                          ResourceClaim represents a network resource requested
+                          via a VMI spec.resourceClaims[] entry, backed by either a
+                          Kubernetes ResourceClaim or ResourceClaimTemplate.
+                          This field should only be configured if the NetworkDevicesWithDRA feature-gate is enabled.
+                          This feature is in alpha.
+                        properties:
+                          claimName:
+                            description: |-
+                              ClaimName references the name of an entry in the
+                              VMI's spec.resourceClaims[] array. The referenced
+                              entry may use either resourceClaimName or
+                              resourceClaimTemplateName.
+                            type: string
+                          requestName:
+                            description: |-
+                              RequestName specifies which request from the
+                              ResourceClaim/ResourceClaimTemplate spec.devices.requests array this
+                              claim request corresponds to.
+                            type: string
+                        type: object
                     required:
                     - name
                     type: object
@@ -20271,26 +21001,20 @@ var CRDsValidation map[string]string = map[string]string{
                     This is an alpha field and requires enabling the
                     DynamicResourceAllocation feature gate in kubernetes
                      https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/
-                    This field should only be configured if one of the feature-gates GPUsWithDRA or HostDevicesWithDRA is enabled.
+                    This field should only be configured if one of the feature-gates GPUsWithDRA, HostDevicesWithDRA,
+                    or NetworkDevicesWithDRA is enabled.
                     This feature is in alpha.
                   items:
-                    description: |-
-                      PodResourceClaim references exactly one ResourceClaim, either directly
-                      or by naming a ResourceClaimTemplate which is then turned into a ResourceClaim
-                      for the pod.
-
-                      It adds a name to it that uniquely identifies the ResourceClaim inside the Pod.
-                      Containers that need access to the ResourceClaim reference it with this name.
                     properties:
                       name:
                         description: |-
-                          Name uniquely identifies this resource claim inside the pod.
-                          This must be a DNS_LABEL.
+                          Name uniquely identifies this resource claim inside the VMI.
+                          This field is required and must be a DNS_LABEL.
                         type: string
                       resourceClaimName:
                         description: |-
                           ResourceClaimName is the name of a ResourceClaim object in the same
-                          namespace as this pod.
+                          namespace as this VMI.
 
                           Exactly one of ResourceClaimName and ResourceClaimTemplateName must
                           be set.
@@ -20298,17 +21022,14 @@ var CRDsValidation map[string]string = map[string]string{
                       resourceClaimTemplateName:
                         description: |-
                           ResourceClaimTemplateName is the name of a ResourceClaimTemplate
-                          object in the same namespace as this pod.
+                          object in the same namespace as this VMI.
 
-                          The template will be used to create a new ResourceClaim, which will
-                          be bound to this pod. When this pod is deleted, the ResourceClaim
-                          will also be deleted. The pod name and resource name, along with a
-                          generated component, will be used to form a unique name for the
-                          ResourceClaim, which will be recorded in pod.status.resourceClaimStatuses.
-
-                          This field is immutable and no changes will be made to the
-                          corresponding ResourceClaim by the control plane after creating the
-                          ResourceClaim.
+                          The template name is passed through to the generated virt-launcher Pod
+                          spec. From the Pod spec, the template is used to create a new
+                          ResourceClaim, which is bound to the virt-launcher Pod. When the
+                          virt-launcher Pod is deleted, the ResourceClaim is also deleted. The
+                          generated ResourceClaim name is unique and is recorded in
+                          pod.status.resourceClaimStatuses.
 
                           Exactly one of ResourceClaimName and ResourceClaimTemplateName must
                           be set.
@@ -20324,6 +21045,13 @@ var CRDsValidation map[string]string = map[string]string{
                   description: |-
                     If specified, the VMI will be dispatched by specified scheduler.
                     If not specified, the VMI will be dispatched by default scheduler.
+                  type: string
+                serviceAccountName:
+                  description: |-
+                    ServiceAccountName is the name of the ServiceAccount to use to run the
+                    virt-launcher pod. This sets pod.spec.serviceAccountName but does NOT
+                    automatically expose the service account token to the VM guest.
+                    To expose the token to the VM, use a serviceAccount volume.
                   type: string
                 startStrategy:
                   description: StartStrategy can be set to "Paused" if Virtual Machine
@@ -21322,7 +22050,10 @@ var CRDsValidation map[string]string = map[string]string{
           description: Optionally defines the IOThreadsPolicy to be used by the instancetype.
           type: string
         launchSecurity:
-          description: Optionally defines the LaunchSecurity to be used by the instancetype.
+          description: |-
+            Optionally defines the LaunchSecurity to be used by the instancetype.
+
+            Deprecated: Will be removed with v1beta2 or v1
           properties:
             sev:
               description: AMD Secure Encrypted Virtualization (SEV).
@@ -24329,9 +25060,44 @@ var CRDsValidation map[string]string = map[string]string{
                                           address with the specified PCI address.
                                           For example: 0000:81:01.10'
                                         type: string
+                                      portRanges:
+                                        description: |-
+                                          List of port ranges to be forwarded to the virtual machine.
+                                          Mutually exclusive with ports. Only supported on masquerade interfaces.
+                                          This feature is in Alpha.
+                                        items:
+                                          description: |-
+                                            PortRange represents a range of ports to be forwarded to the virtual machine.
+                                            All fields are mandatory.
+                                          properties:
+                                            end:
+                                              description: |-
+                                                Last port of the range to expose for the virtual machine.
+                                                This must be a valid port number, 0 < x < 65536.
+                                                Must be greater than or equal to start.
+                                              format: int32
+                                              type: integer
+                                            protocol:
+                                              description: Required. Must be UDP or
+                                                TCP.
+                                              type: string
+                                            start:
+                                              description: |-
+                                                First port of the range to expose for the virtual machine.
+                                                This must be a valid port number, 0 < x < 65536.
+                                              format: int32
+                                              type: integer
+                                          required:
+                                          - end
+                                          - protocol
+                                          - start
+                                          type: object
+                                        type: array
+                                        x-kubernetes-list-type: atomic
                                       ports:
-                                        description: List of ports to be forwarded
-                                          to the virtual machine.
+                                        description: |-
+                                          List of ports to be forwarded to the virtual machine.
+                                          Mutually exclusive with portRanges.
                                         items:
                                           description: |-
                                             Port represents a port to expose from the virtual machine.
@@ -25239,6 +26005,28 @@ var CRDsValidation map[string]string = map[string]string{
                                       Default 10.0.2.0/24 if not specified.
                                     type: string
                                 type: object
+                              resourceClaim:
+                                description: |-
+                                  ResourceClaim represents a network resource requested
+                                  via a VMI spec.resourceClaims[] entry, backed by either a
+                                  Kubernetes ResourceClaim or ResourceClaimTemplate.
+                                  This field should only be configured if the NetworkDevicesWithDRA feature-gate is enabled.
+                                  This feature is in alpha.
+                                properties:
+                                  claimName:
+                                    description: |-
+                                      ClaimName references the name of an entry in the
+                                      VMI's spec.resourceClaims[] array. The referenced
+                                      entry may use either resourceClaimName or
+                                      resourceClaimTemplateName.
+                                    type: string
+                                  requestName:
+                                    description: |-
+                                      RequestName specifies which request from the
+                                      ResourceClaim/ResourceClaimTemplate spec.devices.requests array this
+                                      claim request corresponds to.
+                                    type: string
+                                type: object
                             required:
                             - name
                             type: object
@@ -25409,26 +26197,20 @@ var CRDsValidation map[string]string = map[string]string{
                             This is an alpha field and requires enabling the
                             DynamicResourceAllocation feature gate in kubernetes
                              https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/
-                            This field should only be configured if one of the feature-gates GPUsWithDRA or HostDevicesWithDRA is enabled.
+                            This field should only be configured if one of the feature-gates GPUsWithDRA, HostDevicesWithDRA,
+                            or NetworkDevicesWithDRA is enabled.
                             This feature is in alpha.
                           items:
-                            description: |-
-                              PodResourceClaim references exactly one ResourceClaim, either directly
-                              or by naming a ResourceClaimTemplate which is then turned into a ResourceClaim
-                              for the pod.
-
-                              It adds a name to it that uniquely identifies the ResourceClaim inside the Pod.
-                              Containers that need access to the ResourceClaim reference it with this name.
                             properties:
                               name:
                                 description: |-
-                                  Name uniquely identifies this resource claim inside the pod.
-                                  This must be a DNS_LABEL.
+                                  Name uniquely identifies this resource claim inside the VMI.
+                                  This field is required and must be a DNS_LABEL.
                                 type: string
                               resourceClaimName:
                                 description: |-
                                   ResourceClaimName is the name of a ResourceClaim object in the same
-                                  namespace as this pod.
+                                  namespace as this VMI.
 
                                   Exactly one of ResourceClaimName and ResourceClaimTemplateName must
                                   be set.
@@ -25436,17 +26218,14 @@ var CRDsValidation map[string]string = map[string]string{
                               resourceClaimTemplateName:
                                 description: |-
                                   ResourceClaimTemplateName is the name of a ResourceClaimTemplate
-                                  object in the same namespace as this pod.
+                                  object in the same namespace as this VMI.
 
-                                  The template will be used to create a new ResourceClaim, which will
-                                  be bound to this pod. When this pod is deleted, the ResourceClaim
-                                  will also be deleted. The pod name and resource name, along with a
-                                  generated component, will be used to form a unique name for the
-                                  ResourceClaim, which will be recorded in pod.status.resourceClaimStatuses.
-
-                                  This field is immutable and no changes will be made to the
-                                  corresponding ResourceClaim by the control plane after creating the
-                                  ResourceClaim.
+                                  The template name is passed through to the generated virt-launcher Pod
+                                  spec. From the Pod spec, the template is used to create a new
+                                  ResourceClaim, which is bound to the virt-launcher Pod. When the
+                                  virt-launcher Pod is deleted, the ResourceClaim is also deleted. The
+                                  generated ResourceClaim name is unique and is recorded in
+                                  pod.status.resourceClaimStatuses.
 
                                   Exactly one of ResourceClaimName and ResourceClaimTemplateName must
                                   be set.
@@ -25462,6 +26241,13 @@ var CRDsValidation map[string]string = map[string]string{
                           description: |-
                             If specified, the VMI will be dispatched by specified scheduler.
                             If not specified, the VMI will be dispatched by default scheduler.
+                          type: string
+                        serviceAccountName:
+                          description: |-
+                            ServiceAccountName is the name of the ServiceAccount to use to run the
+                            virt-launcher pod. This sets pod.spec.serviceAccountName but does NOT
+                            automatically expose the service account token to the VM guest.
+                            To expose the token to the VM, use a serviceAccount volume.
                           type: string
                         startStrategy:
                           description: StartStrategy can be set to "Paused" if Virtual
@@ -26945,6 +27731,40 @@ var CRDsValidation map[string]string = map[string]string{
           description: PreferredArchitecture defines a prefeerred architecture for
             the VirtualMachine
           type: string
+        preferredLaunchSecurity:
+          description: Optionally defines the preferred LaunchSecurity
+          properties:
+            sev:
+              description: AMD Secure Encrypted Virtualization (SEV).
+              properties:
+                attestation:
+                  description: If specified, run the attestation process for a vmi.
+                  type: object
+                dhCert:
+                  description: Base64 encoded guest owner's Diffie-Hellman key.
+                  type: string
+                policy:
+                  description: |-
+                    Guest policy flags as defined in AMD SEV API specification.
+                    Note: due to security reasons it is not allowed to enable guest debugging. Therefore NoDebug flag is not exposed to users and is always true.
+                  properties:
+                    encryptedState:
+                      description: |-
+                        SEV-ES is required.
+                        Defaults to false.
+                      type: boolean
+                  type: object
+                session:
+                  description: Base64 encoded session blob.
+                  type: string
+              type: object
+            snp:
+              description: AMD SEV-SNP flags defined by the SEV-SNP specifications.
+              type: object
+            tdx:
+              description: Intel Trust Domain Extensions (TDX).
+              type: object
+          type: object
         preferredSubdomain:
           description: Subdomain of the VirtualMachineInstance
           type: string
@@ -29923,9 +30743,44 @@ var CRDsValidation map[string]string = map[string]string{
                                               the guests pci address with the specified
                                               PCI address. For example: 0000:81:01.10'
                                             type: string
+                                          portRanges:
+                                            description: |-
+                                              List of port ranges to be forwarded to the virtual machine.
+                                              Mutually exclusive with ports. Only supported on masquerade interfaces.
+                                              This feature is in Alpha.
+                                            items:
+                                              description: |-
+                                                PortRange represents a range of ports to be forwarded to the virtual machine.
+                                                All fields are mandatory.
+                                              properties:
+                                                end:
+                                                  description: |-
+                                                    Last port of the range to expose for the virtual machine.
+                                                    This must be a valid port number, 0 < x < 65536.
+                                                    Must be greater than or equal to start.
+                                                  format: int32
+                                                  type: integer
+                                                protocol:
+                                                  description: Required. Must be UDP
+                                                    or TCP.
+                                                  type: string
+                                                start:
+                                                  description: |-
+                                                    First port of the range to expose for the virtual machine.
+                                                    This must be a valid port number, 0 < x < 65536.
+                                                  format: int32
+                                                  type: integer
+                                              required:
+                                              - end
+                                              - protocol
+                                              - start
+                                              type: object
+                                            type: array
+                                            x-kubernetes-list-type: atomic
                                           ports:
-                                            description: List of ports to be forwarded
-                                              to the virtual machine.
+                                            description: |-
+                                              List of ports to be forwarded to the virtual machine.
+                                              Mutually exclusive with portRanges.
                                             items:
                                               description: |-
                                                 Port represents a port to expose from the virtual machine.
@@ -30838,6 +31693,28 @@ var CRDsValidation map[string]string = map[string]string{
                                           Default 10.0.2.0/24 if not specified.
                                         type: string
                                     type: object
+                                  resourceClaim:
+                                    description: |-
+                                      ResourceClaim represents a network resource requested
+                                      via a VMI spec.resourceClaims[] entry, backed by either a
+                                      Kubernetes ResourceClaim or ResourceClaimTemplate.
+                                      This field should only be configured if the NetworkDevicesWithDRA feature-gate is enabled.
+                                      This feature is in alpha.
+                                    properties:
+                                      claimName:
+                                        description: |-
+                                          ClaimName references the name of an entry in the
+                                          VMI's spec.resourceClaims[] array. The referenced
+                                          entry may use either resourceClaimName or
+                                          resourceClaimTemplateName.
+                                        type: string
+                                      requestName:
+                                        description: |-
+                                          RequestName specifies which request from the
+                                          ResourceClaim/ResourceClaimTemplate spec.devices.requests array this
+                                          claim request corresponds to.
+                                        type: string
+                                    type: object
                                 required:
                                 - name
                                 type: object
@@ -31009,26 +31886,20 @@ var CRDsValidation map[string]string = map[string]string{
                                 This is an alpha field and requires enabling the
                                 DynamicResourceAllocation feature gate in kubernetes
                                  https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/
-                                This field should only be configured if one of the feature-gates GPUsWithDRA or HostDevicesWithDRA is enabled.
+                                This field should only be configured if one of the feature-gates GPUsWithDRA, HostDevicesWithDRA,
+                                or NetworkDevicesWithDRA is enabled.
                                 This feature is in alpha.
                               items:
-                                description: |-
-                                  PodResourceClaim references exactly one ResourceClaim, either directly
-                                  or by naming a ResourceClaimTemplate which is then turned into a ResourceClaim
-                                  for the pod.
-
-                                  It adds a name to it that uniquely identifies the ResourceClaim inside the Pod.
-                                  Containers that need access to the ResourceClaim reference it with this name.
                                 properties:
                                   name:
                                     description: |-
-                                      Name uniquely identifies this resource claim inside the pod.
-                                      This must be a DNS_LABEL.
+                                      Name uniquely identifies this resource claim inside the VMI.
+                                      This field is required and must be a DNS_LABEL.
                                     type: string
                                   resourceClaimName:
                                     description: |-
                                       ResourceClaimName is the name of a ResourceClaim object in the same
-                                      namespace as this pod.
+                                      namespace as this VMI.
 
                                       Exactly one of ResourceClaimName and ResourceClaimTemplateName must
                                       be set.
@@ -31036,17 +31907,14 @@ var CRDsValidation map[string]string = map[string]string{
                                   resourceClaimTemplateName:
                                     description: |-
                                       ResourceClaimTemplateName is the name of a ResourceClaimTemplate
-                                      object in the same namespace as this pod.
+                                      object in the same namespace as this VMI.
 
-                                      The template will be used to create a new ResourceClaim, which will
-                                      be bound to this pod. When this pod is deleted, the ResourceClaim
-                                      will also be deleted. The pod name and resource name, along with a
-                                      generated component, will be used to form a unique name for the
-                                      ResourceClaim, which will be recorded in pod.status.resourceClaimStatuses.
-
-                                      This field is immutable and no changes will be made to the
-                                      corresponding ResourceClaim by the control plane after creating the
-                                      ResourceClaim.
+                                      The template name is passed through to the generated virt-launcher Pod
+                                      spec. From the Pod spec, the template is used to create a new
+                                      ResourceClaim, which is bound to the virt-launcher Pod. When the
+                                      virt-launcher Pod is deleted, the ResourceClaim is also deleted. The
+                                      generated ResourceClaim name is unique and is recorded in
+                                      pod.status.resourceClaimStatuses.
 
                                       Exactly one of ResourceClaimName and ResourceClaimTemplateName must
                                       be set.
@@ -31062,6 +31930,13 @@ var CRDsValidation map[string]string = map[string]string{
                               description: |-
                                 If specified, the VMI will be dispatched by specified scheduler.
                                 If not specified, the VMI will be dispatched by default scheduler.
+                              type: string
+                            serviceAccountName:
+                              description: |-
+                                ServiceAccountName is the name of the ServiceAccount to use to run the
+                                virt-launcher pod. This sets pod.spec.serviceAccountName but does NOT
+                                automatically expose the service account token to the VM guest.
+                                To expose the token to the VM, use a serviceAccount volume.
                               type: string
                             startStrategy:
                               description: StartStrategy can be set to "Paused" if
@@ -31890,6 +32765,10 @@ var CRDsValidation map[string]string = map[string]string{
                             failed:
                               description: Failed indicates that the backup failed
                               type: boolean
+                            quiesceStatus:
+                              description: QuiesceStatus indicates whether filesystem
+                                freeze succeeded, failed, or was skipped.
+                              type: string
                             startTimestamp:
                               description: StartTimestamp is the timestamp when the
                                 backup started
