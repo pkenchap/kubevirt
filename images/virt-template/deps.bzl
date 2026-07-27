@@ -6,11 +6,17 @@ load("@rules_img//img:pull.bzl", "pull")
 VIRT_TEMPLATE_APISERVER_DIGEST_AMD64 = "sha256:104545cf22d9d6ea0d675b650742f07fbffad18bdae5454e8ad79c93e0fa3eeb"
 VIRT_TEMPLATE_APISERVER_DIGEST_ARM64 = "sha256:04b06a30b7c03994ec5c2dcd3effbefffde9f2818483dc9273035faec21e4336"
 VIRT_TEMPLATE_APISERVER_DIGEST_S390X = "sha256:db633d78bf352b3109888c1d194507c2cc8940ae911fe550ee3390e4f311163a"
+# TODO: Build ppc64le virt-template-apiserver image from github.com/kubevirt/virt-template
+# and push to quay.io/pkenchap/virt-template-apiserver, then update this digest.
+VIRT_TEMPLATE_APISERVER_DIGEST_PPC64LE = "sha256:104545cf22d9d6ea0d675b650742f07fbffad18bdae5454e8ad79c93e0fa3eeb"
 
 # Image digests for virt-template-controller
 VIRT_TEMPLATE_CONTROLLER_DIGEST_AMD64 = "sha256:1d7a44eeb45987852f796d1f4ac6a3ab9bed7ee9bfa553bb093e3b114dc72c9c"
 VIRT_TEMPLATE_CONTROLLER_DIGEST_ARM64 = "sha256:c29b7231aee92c56ebaea55ca6472c41857757258d0c18037be54dd216226601"
 VIRT_TEMPLATE_CONTROLLER_DIGEST_S390X = "sha256:007ee285eb7a789043babf323458395402dfc70c7e0b4ca3a76c2be3e42b1e2a"
+# TODO: Build ppc64le virt-template-controller image from github.com/kubevirt/virt-template
+# and push to quay.io/pkenchap/virt-template-controller, then update this digest.
+VIRT_TEMPLATE_CONTROLLER_DIGEST_PPC64LE = "sha256:1d7a44eeb45987852f796d1f4ac6a3ab9bed7ee9bfa553bb093e3b114dc72c9c"
 
 def virt_template_images():
     """Pull virt-template images for all architectures."""
@@ -35,6 +41,14 @@ def virt_template_images():
         repository = "kubevirt/virt-template-apiserver",
     )
 
+    # TODO: Update registry/repository to quay.io/pkenchap once ppc64le image is built and pushed
+    pull(
+        name = "virt_template_apiserver_ppc64le",
+        digest = VIRT_TEMPLATE_APISERVER_DIGEST_PPC64LE,
+        registry = "quay.io",
+        repository = "kubevirt/virt-template-apiserver",
+    )
+
     pull(
         name = "virt_template_controller",
         digest = VIRT_TEMPLATE_CONTROLLER_DIGEST_AMD64,
@@ -52,6 +66,14 @@ def virt_template_images():
     pull(
         name = "virt_template_controller_s390x",
         digest = VIRT_TEMPLATE_CONTROLLER_DIGEST_S390X,
+        registry = "quay.io",
+        repository = "kubevirt/virt-template-controller",
+    )
+
+    # TODO: Update registry/repository to quay.io/pkenchap once ppc64le image is built and pushed
+    pull(
+        name = "virt_template_controller_ppc64le",
+        digest = VIRT_TEMPLATE_CONTROLLER_DIGEST_PPC64LE,
         registry = "quay.io",
         repository = "kubevirt/virt-template-controller",
     )
