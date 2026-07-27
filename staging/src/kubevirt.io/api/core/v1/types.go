@@ -33,7 +33,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 
-	backupv1 "kubevirt.io/api/backup/v1alpha1"
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
 )
 
@@ -1166,6 +1165,12 @@ const (
 	// Internal use only.
 	OwnerVMINameAnnotation string = "kubevirt.io/owner-vmi-name"
 	OwnerVMIUIDAnnotation  string = "kubevirt.io/owner-vmi-uid"
+	// ImageVolumeSkipDigestResolutionAnnotation skips the digest-resolving init
+	// containers for containerDisk volumes when the ImageVolume feature gate is
+	// enabled. Required for OCI artifacts (e.g. raw disk images pushed with ORAS)
+	// that are not valid container images. Will be removed once VEP #117 / KEP 5365
+	// provides digest resolution via Pod volume status.
+	ImageVolumeSkipDigestResolutionAnnotation string = "kubevirt.io/image-volume-skip-digest-resolution"
 	// This label is used to indicate that this pod is the target of a migration job.
 	MigrationJobLabel string = "kubevirt.io/migrationJobUID"
 	// This label indicates the migration name that a PDB is protecting.
@@ -2259,10 +2264,17 @@ type VirtualMachineInstanceBackupStatus struct {
 	// Volumes lists the volumes included in the backup
 	// +optional
 	// +listType=atomic
-	Volumes []backupv1.BackupVolumeInfo `json:"volumes,omitempty"`
+	Volumes []VirtualMachineInstanceBackupVolumeInfo `json:"volumes,omitempty"`
 	// QuiesceStatus indicates whether filesystem freeze succeeded, failed, or was skipped.
 	// +optional
 	QuiesceStatus string `json:"quiesceStatus,omitempty"`
+}
+
+// VirtualMachineInstanceBackupVolumeInfo contains information about a volume included in a backup
+// +k8s:openapi-gen=true
+type VirtualMachineInstanceBackupVolumeInfo struct {
+	// VolumeName is the volume name from VMI spec
+	VolumeName string `json:"volumeName"`
 }
 
 // ChangedBlockTrackingStatus represents the status of ChangedBlockTracking for a VM
