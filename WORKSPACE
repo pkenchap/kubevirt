@@ -32,26 +32,84 @@ http_archive(
 )
 
 http_archive(
-    name = "rules_oci",
-    sha256 = "e987cab7a35475cb9c9060fc3f338a1fc8896c240295a3272968b217acefd0cb",
-    strip_prefix = "rules_oci-2.3.0",
-    urls = [
-        "https://github.com/bazel-contrib/rules_oci/releases/download/v2.3.0/rules_oci-v2.3.0.tar.gz",
-        "https://storage.googleapis.com/builddeps/e987cab7a35475cb9c9060fc3f338a1fc8896c240295a3272968b217acefd0cb",
-    ],
+    name = "hermetic_launcher",
+    sha256 = "f6b5dbcf4c87561d85aa2ba9b14d70bd3f619ffb2d6eb3b15d93a6825ef75a7a",
+    urls = ["https://github.com/hermeticbuild/hermetic-launcher/releases/download/v0.0.6/hermetic_launcher-v0.0.6.tar.gz"],
 )
 
-load("@rules_oci//oci:dependencies.bzl", "rules_oci_dependencies")
-
-rules_oci_dependencies()
-
-load("@rules_oci//oci:repositories.bzl", "oci_register_toolchains")
-
-oci_register_toolchains(
-    name = "oci",
+http_file(
+    name = "finalize_stub_x86_64_linux",
+    downloaded_file_path = "finalize-stub-x86_64-linux",
+    executable = True,
+    sha256 = "c7a09c660f998150305b32bdc619820ec1c7b4a8be153901cb1e32c3ba0e44e9",
+    url = "https://github.com/hermeticbuild/hermetic-launcher/releases/download/binaries-20260508/finalize-stub-x86_64-linux",
 )
 
-load("@rules_oci//oci:pull.bzl", "oci_pull")
+http_file(
+    name = "finalize_stub_aarch64_linux",
+    downloaded_file_path = "finalize-stub-aarch64-linux",
+    executable = True,
+    sha256 = "042bf32e5b511a8b2a346f34e79876e0ee252fea03a6c73bd16d23e5785b298c",
+    url = "https://github.com/hermeticbuild/hermetic-launcher/releases/download/binaries-20260508/finalize-stub-aarch64-linux",
+)
+
+http_file(
+    name = "finalize_stub_s390x_linux",
+    downloaded_file_path = "finalize-stub-s390x-linux",
+    executable = True,
+    sha256 = "ecce866232c2d058af04d629f49809775d24a380c33d90317eea4089b10a4bb7",
+    url = "https://github.com/hermeticbuild/hermetic-launcher/releases/download/binaries-20260508/finalize-stub-s390x-linux",
+)
+
+http_file(
+    name = "runfiles_stub_x86_64_linux",
+    downloaded_file_path = "runfiles-stub-x86_64-linux",
+    executable = True,
+    sha256 = "ec2f76990920622168febbf3e68f06b9918e18da7c692728d7c6f8aaedb497c7",
+    url = "https://github.com/hermeticbuild/hermetic-launcher/releases/download/binaries-20260508/runfiles-stub-x86_64-linux",
+)
+
+http_file(
+    name = "runfiles_stub_aarch64_linux",
+    downloaded_file_path = "runfiles-stub-aarch64-linux",
+    executable = True,
+    sha256 = "678fa4c8eba9fddd95acd6588d3e4fe445da6199d8e7f3598373a27912e026e0",
+    url = "https://github.com/hermeticbuild/hermetic-launcher/releases/download/binaries-20260508/runfiles-stub-aarch64-linux",
+)
+
+http_file(
+    name = "runfiles_stub_s390x_linux",
+    downloaded_file_path = "runfiles-stub-s390x-linux",
+    executable = True,
+    sha256 = "cca52171d1a4b513415517ffd31ec8c1954facc7d8513c539187a55bcb3af0c7",
+    url = "https://github.com/hermeticbuild/hermetic-launcher/releases/download/binaries-20260508/runfiles-stub-s390x-linux",
+)
+
+http_archive(
+    name = "rules_img",
+    sha256 = "6ac03edbafc57f66dc267d649b1d4413001b53fa5c8c95ba4c5038a4575b0bb9",
+    urls = ["https://github.com/bazel-contrib/rules_img/releases/download/v0.3.9/rules_img-v0.3.9.tar.gz"],
+)
+
+load("@rules_img//img:dependencies.bzl", "rules_img_dependencies")
+
+rules_img_dependencies()
+
+load("@bazel_features//:deps.bzl", "bazel_features_deps")
+
+bazel_features_deps()
+
+load("@rules_img//img:repositories.bzl", "img_register_prebuilt_toolchains", "pull_tool_register_prebuilt_repositories")
+
+img_register_prebuilt_toolchains()
+
+register_toolchains("@img_toolchain//:all")
+
+register_toolchains("@hermetic_launcher//launcher/private/prebuilt:all")
+
+pull_tool_register_prebuilt_repositories()
+
+load("@rules_img//img:pull.bzl", "pull")
 
 # Bazel buildtools prebuilt binaries
 http_archive(
@@ -350,85 +408,99 @@ go_repository(
 )
 
 # Pull go_image_base
-oci_pull(
+pull(
     name = "go_image_base",
     digest = "sha256:6f23ea6c3ce8b2a62c92e3b59c076118a366fb470af3fbf7d149bb51b98234ed",
-    image = "gcr.io/distroless/base-debian12",
+    registry = "gcr.io",
+    repository = "distroless/base-debian12",
 )
 
-oci_pull(
+pull(
     name = "go_image_base_aarch64",
     digest = "sha256:a09192f27226e9e704bf7b4d0d69368c4fa0df54b21bcaabbaf5cc54dec4d77c",
-    image = "gcr.io/distroless/base-debian12",
+    registry = "gcr.io",
+    repository = "distroless/base-debian12",
 )
 
-oci_pull(
+pull(
     name = "go_image_base_s390x",
     digest = "sha256:4f8248f4911f7109b695a5ad319df70329e117c2ecb9f3632aa73defad8ca1a0",
-    image = "gcr.io/distroless/base-debian12",
+    registry = "gcr.io",
+    repository = "distroless/base-debian12",
 )
 
 # Pull fedora container-disk preconfigured with ci tooling
 # like stress and qemu guest agent pre-configured
-oci_pull(
+# TODO build fedora_with_test_tooling for multi-arch
+pull(
     name = "fedora_with_test_tooling",
     digest = "sha256:a53fd982787799c2d8cfaa37a2b6fbac4f416437768a25d2eb246dff46bb9d79",
-    image = "quay.io/kubevirtci/fedora-with-test-tooling",
+    registry = "quay.io",
+    repository = "kubevirtci/fedora-with-test-tooling",
 )
 
-oci_pull(
+pull(
     name = "alpine_with_test_tooling",
     digest = "sha256:8c8e8bb6cd81c75e492c678abb3e5f186d52eba2174ebabc328316250acfea58",
-    image = "quay.io/kubevirtci/alpine-with-test-tooling-container-disk",
+    registry = "quay.io",
+    repository = "kubevirtci/alpine-with-test-tooling-container-disk",
 )
 
-oci_pull(
+pull(
     name = "alpine_with_test_tooling_arm64",
     digest = "sha256:5b443506b62f29f5ef5ac1bbf709338212b0b289ee2579e4feead42205685f43",
-    image = "quay.io/kubevirtci/alpine-with-test-tooling-container-disk",
+    registry = "quay.io",
+    repository = "kubevirtci/alpine-with-test-tooling-container-disk",
 )
 
-oci_pull(
+pull(
     name = "alpine_with_test_tooling_s390x",
     digest = "sha256:1a52903133c00507607e8a82308a34923e89288d852762b9f4d5da227767e965",
-    image = "quay.io/kubevirtci/alpine-with-test-tooling-container-disk",
+    registry = "quay.io",
+    repository = "kubevirtci/alpine-with-test-tooling-container-disk",
 )
 
-oci_pull(
+pull(
     name = "fedora_with_test_tooling_aarch64",
     digest = "sha256:0b29f1b32b2f8d75e35de165a121a9cb211741978972f27ed47e4879c1122b18",
-    image = "quay.io/kubevirtci/fedora-with-test-tooling",
+    registry = "quay.io",
+    repository = "kubevirtci/fedora-with-test-tooling",
 )
 
-oci_pull(
+pull(
     name = "fedora_with_test_tooling_s390x",
     digest = "sha256:ae6d6510dfb1e1cbcf09ad85c2c0b3e58494fe10bdaa720362934422037d42a2",
-    image = "quay.io/kubevirtci/fedora-with-test-tooling",
+    registry = "quay.io",
+    repository = "kubevirtci/fedora-with-test-tooling",
 )
 
-oci_pull(
+pull(
     name = "s390x-guestless-kernel",
     digest = "sha256:3bf6fc355fc9718c088c4c881b2d35a073ea274f6b16dc42236ef5e29db2215d",
-    image = "quay.io/kubevirt/s390x-guestless-kernel",
+    registry = "quay.io",
+    repository = "kubevirt/s390x-guestless-kernel",
 )
 
-oci_pull(
+pull(
     name = "alpine-ext-kernel-boot-demo-container-base",
     digest = "sha256:bccd990554f55623d96fa70bc7efc553dd617523ebca76919b917ad3ee616c1d",
-    image = "quay.io/kubevirt/alpine-ext-kernel-boot-demo",
+    registry = "quay.io",
+    repository = "kubevirt/alpine-ext-kernel-boot-demo",
 )
 
 # TODO build fedora_realtime for multi-arch
-oci_pull(
+pull(
     name = "fedora_realtime",
     digest = "sha256:f91379d202a5493aba9ce06870b5d1ada2c112f314530c9820a9ad07426aa565",
-    image = "quay.io/kubevirt/fedora-realtime-container-disk",
+    registry = "quay.io",
+    repository = "kubevirt/fedora-realtime-container-disk",
 )
 
-oci_pull(
+pull(
     name = "busybox",
     digest = "sha256:545e6a6310a27636260920bc07b994a299b6708a1b26910cfefd335fdfb60d2b",
-    image = "registry.k8s.io/busybox",
+    registry = "registry.k8s.io",
+    repository = "busybox",
 )
 
 load("//images/virt-template:deps.bzl", "virt_template_images")
@@ -3671,28 +3743,19 @@ rpm(
 rpm(
     name = "glibc-0__2.39-124.el10.aarch64",
     sha256 = "98835b98adc90ed4396e3ad149af18b6f8d1d742dcac6548da8c5cc03fbedce4",
-    urls = [
-        "http://mirror.stream.centos.org/10-stream/BaseOS/aarch64/os/Packages/glibc-2.39-124.el10.aarch64.rpm",
-        "https://storage.googleapis.com/builddeps/98835b98adc90ed4396e3ad149af18b6f8d1d742dcac6548da8c5cc03fbedce4",
-    ],
+    urls = ["https://storage.googleapis.com/builddeps/98835b98adc90ed4396e3ad149af18b6f8d1d742dcac6548da8c5cc03fbedce4"],
 )
 
 rpm(
     name = "glibc-0__2.39-124.el10.s390x",
     sha256 = "78dfca58dc26ee192678e7714a7564d798e530716412ae13e582d8cb0ad22588",
-    urls = [
-        "http://mirror.stream.centos.org/10-stream/BaseOS/s390x/os/Packages/glibc-2.39-124.el10.s390x.rpm",
-        "https://storage.googleapis.com/builddeps/78dfca58dc26ee192678e7714a7564d798e530716412ae13e582d8cb0ad22588",
-    ],
+    urls = ["https://storage.googleapis.com/builddeps/78dfca58dc26ee192678e7714a7564d798e530716412ae13e582d8cb0ad22588"],
 )
 
 rpm(
     name = "glibc-0__2.39-124.el10.x86_64",
     sha256 = "c90fe609c529f1536094a8b6071a99ea6048d73bff6878d4480ff8e17a7a0313",
-    urls = [
-        "http://mirror.stream.centos.org/10-stream/BaseOS/x86_64/os/Packages/glibc-2.39-124.el10.x86_64.rpm",
-        "https://storage.googleapis.com/builddeps/c90fe609c529f1536094a8b6071a99ea6048d73bff6878d4480ff8e17a7a0313",
-    ],
+    urls = ["https://storage.googleapis.com/builddeps/c90fe609c529f1536094a8b6071a99ea6048d73bff6878d4480ff8e17a7a0313"],
 )
 
 rpm(
@@ -3731,28 +3794,19 @@ rpm(
 rpm(
     name = "glibc-common-0__2.39-124.el10.aarch64",
     sha256 = "277ec9b0c2be22dd0641f23b7680c9520b37522e65438d1994ca5a18ef68b7a9",
-    urls = [
-        "http://mirror.stream.centos.org/10-stream/BaseOS/aarch64/os/Packages/glibc-common-2.39-124.el10.aarch64.rpm",
-        "https://storage.googleapis.com/builddeps/277ec9b0c2be22dd0641f23b7680c9520b37522e65438d1994ca5a18ef68b7a9",
-    ],
+    urls = ["https://storage.googleapis.com/builddeps/277ec9b0c2be22dd0641f23b7680c9520b37522e65438d1994ca5a18ef68b7a9"],
 )
 
 rpm(
     name = "glibc-common-0__2.39-124.el10.s390x",
     sha256 = "367ca6b643c35ea214677ec4b74c2af2c3b24b7b8af16d7addb8a4cc758da547",
-    urls = [
-        "http://mirror.stream.centos.org/10-stream/BaseOS/s390x/os/Packages/glibc-common-2.39-124.el10.s390x.rpm",
-        "https://storage.googleapis.com/builddeps/367ca6b643c35ea214677ec4b74c2af2c3b24b7b8af16d7addb8a4cc758da547",
-    ],
+    urls = ["https://storage.googleapis.com/builddeps/367ca6b643c35ea214677ec4b74c2af2c3b24b7b8af16d7addb8a4cc758da547"],
 )
 
 rpm(
     name = "glibc-common-0__2.39-124.el10.x86_64",
     sha256 = "efe77412c5d1cd057c4d4b212f932033e54cf87a343fd4f2a55c1bc698911c4a",
-    urls = [
-        "http://mirror.stream.centos.org/10-stream/BaseOS/x86_64/os/Packages/glibc-common-2.39-124.el10.x86_64.rpm",
-        "https://storage.googleapis.com/builddeps/efe77412c5d1cd057c4d4b212f932033e54cf87a343fd4f2a55c1bc698911c4a",
-    ],
+    urls = ["https://storage.googleapis.com/builddeps/efe77412c5d1cd057c4d4b212f932033e54cf87a343fd4f2a55c1bc698911c4a"],
 )
 
 rpm(
@@ -3785,28 +3839,19 @@ rpm(
 rpm(
     name = "glibc-devel-0__2.39-124.el10.aarch64",
     sha256 = "332f5790df85fbbcdef78e1a1344b3f0a9c7d329f822f7c5ecf698e81ff3efcf",
-    urls = [
-        "http://mirror.stream.centos.org/10-stream/AppStream/aarch64/os/Packages/glibc-devel-2.39-124.el10.aarch64.rpm",
-        "https://storage.googleapis.com/builddeps/332f5790df85fbbcdef78e1a1344b3f0a9c7d329f822f7c5ecf698e81ff3efcf",
-    ],
+    urls = ["https://storage.googleapis.com/builddeps/332f5790df85fbbcdef78e1a1344b3f0a9c7d329f822f7c5ecf698e81ff3efcf"],
 )
 
 rpm(
     name = "glibc-devel-0__2.39-124.el10.s390x",
     sha256 = "66fb444f4d7378cf6a83154e5d7d82b3a8bfc9c4bf4d8248f71df0eed3c6e124",
-    urls = [
-        "http://mirror.stream.centos.org/10-stream/AppStream/s390x/os/Packages/glibc-devel-2.39-124.el10.s390x.rpm",
-        "https://storage.googleapis.com/builddeps/66fb444f4d7378cf6a83154e5d7d82b3a8bfc9c4bf4d8248f71df0eed3c6e124",
-    ],
+    urls = ["https://storage.googleapis.com/builddeps/66fb444f4d7378cf6a83154e5d7d82b3a8bfc9c4bf4d8248f71df0eed3c6e124"],
 )
 
 rpm(
     name = "glibc-devel-0__2.39-124.el10.x86_64",
     sha256 = "91c986c1654b3f2bf12cd61d677a5fc0c937ed86a56472b34243c15aa15a3297",
-    urls = [
-        "http://mirror.stream.centos.org/10-stream/AppStream/x86_64/os/Packages/glibc-devel-2.39-124.el10.x86_64.rpm",
-        "https://storage.googleapis.com/builddeps/91c986c1654b3f2bf12cd61d677a5fc0c937ed86a56472b34243c15aa15a3297",
-    ],
+    urls = ["https://storage.googleapis.com/builddeps/91c986c1654b3f2bf12cd61d677a5fc0c937ed86a56472b34243c15aa15a3297"],
 )
 
 rpm(
@@ -3848,19 +3893,13 @@ rpm(
 rpm(
     name = "glibc-langpack-fi-0__2.39-124.el10.s390x",
     sha256 = "faca72b19ba92f0141c4093460ec33cfabc0500b941b6c1d0b91f64b7fb3e700",
-    urls = [
-        "http://mirror.stream.centos.org/10-stream/BaseOS/s390x/os/Packages/glibc-langpack-fi-2.39-124.el10.s390x.rpm",
-        "https://storage.googleapis.com/builddeps/faca72b19ba92f0141c4093460ec33cfabc0500b941b6c1d0b91f64b7fb3e700",
-    ],
+    urls = ["https://storage.googleapis.com/builddeps/faca72b19ba92f0141c4093460ec33cfabc0500b941b6c1d0b91f64b7fb3e700"],
 )
 
 rpm(
     name = "glibc-langpack-fi-0__2.39-124.el10.x86_64",
     sha256 = "1f466f674ba7f4793ceb4bdd081264d73c4cc376e651f792599d078220577171",
-    urls = [
-        "http://mirror.stream.centos.org/10-stream/BaseOS/x86_64/os/Packages/glibc-langpack-fi-2.39-124.el10.x86_64.rpm",
-        "https://storage.googleapis.com/builddeps/1f466f674ba7f4793ceb4bdd081264d73c4cc376e651f792599d078220577171",
-    ],
+    urls = ["https://storage.googleapis.com/builddeps/1f466f674ba7f4793ceb4bdd081264d73c4cc376e651f792599d078220577171"],
 )
 
 rpm(
@@ -3875,10 +3914,7 @@ rpm(
 rpm(
     name = "glibc-langpack-hak-0__2.39-124.el10.aarch64",
     sha256 = "76f6f824dec8c3bc39bd28ed4c0a4350b706a9ad0ed206acd7280962efbbca59",
-    urls = [
-        "http://mirror.stream.centos.org/10-stream/BaseOS/aarch64/os/Packages/glibc-langpack-hak-2.39-124.el10.aarch64.rpm",
-        "https://storage.googleapis.com/builddeps/76f6f824dec8c3bc39bd28ed4c0a4350b706a9ad0ed206acd7280962efbbca59",
-    ],
+    urls = ["https://storage.googleapis.com/builddeps/76f6f824dec8c3bc39bd28ed4c0a4350b706a9ad0ed206acd7280962efbbca59"],
 )
 
 rpm(
@@ -3917,28 +3953,19 @@ rpm(
 rpm(
     name = "glibc-minimal-langpack-0__2.39-124.el10.aarch64",
     sha256 = "c625e3601b62225aee9150daba3b8c199b9b53ae7dc5b45e05cfc0e3c2e57519",
-    urls = [
-        "http://mirror.stream.centos.org/10-stream/BaseOS/aarch64/os/Packages/glibc-minimal-langpack-2.39-124.el10.aarch64.rpm",
-        "https://storage.googleapis.com/builddeps/c625e3601b62225aee9150daba3b8c199b9b53ae7dc5b45e05cfc0e3c2e57519",
-    ],
+    urls = ["https://storage.googleapis.com/builddeps/c625e3601b62225aee9150daba3b8c199b9b53ae7dc5b45e05cfc0e3c2e57519"],
 )
 
 rpm(
     name = "glibc-minimal-langpack-0__2.39-124.el10.s390x",
     sha256 = "c54131f7ef7f44b3e2e313f38ffbe8cef622620e364eef7bb51760a245010375",
-    urls = [
-        "http://mirror.stream.centos.org/10-stream/BaseOS/s390x/os/Packages/glibc-minimal-langpack-2.39-124.el10.s390x.rpm",
-        "https://storage.googleapis.com/builddeps/c54131f7ef7f44b3e2e313f38ffbe8cef622620e364eef7bb51760a245010375",
-    ],
+    urls = ["https://storage.googleapis.com/builddeps/c54131f7ef7f44b3e2e313f38ffbe8cef622620e364eef7bb51760a245010375"],
 )
 
 rpm(
     name = "glibc-minimal-langpack-0__2.39-124.el10.x86_64",
     sha256 = "c5d787e339171f8d691aebbdc6cc66db9951aaf7b24b22a6036838b2029d6e62",
-    urls = [
-        "http://mirror.stream.centos.org/10-stream/BaseOS/x86_64/os/Packages/glibc-minimal-langpack-2.39-124.el10.x86_64.rpm",
-        "https://storage.googleapis.com/builddeps/c5d787e339171f8d691aebbdc6cc66db9951aaf7b24b22a6036838b2029d6e62",
-    ],
+    urls = ["https://storage.googleapis.com/builddeps/c5d787e339171f8d691aebbdc6cc66db9951aaf7b24b22a6036838b2029d6e62"],
 )
 
 rpm(
@@ -3971,28 +3998,19 @@ rpm(
 rpm(
     name = "glibc-static-0__2.39-124.el10.aarch64",
     sha256 = "7c366f18eb29f63310c38e74257352de896cd13ec38a82efbf0f6abe7a47c9f7",
-    urls = [
-        "http://mirror.stream.centos.org/10-stream/CRB/aarch64/os/Packages/glibc-static-2.39-124.el10.aarch64.rpm",
-        "https://storage.googleapis.com/builddeps/7c366f18eb29f63310c38e74257352de896cd13ec38a82efbf0f6abe7a47c9f7",
-    ],
+    urls = ["https://storage.googleapis.com/builddeps/7c366f18eb29f63310c38e74257352de896cd13ec38a82efbf0f6abe7a47c9f7"],
 )
 
 rpm(
     name = "glibc-static-0__2.39-124.el10.s390x",
     sha256 = "b42abd2dd44169ef18ed7208bbc2fde3cc6758fac3795dfdec46ab0e5b5e9a22",
-    urls = [
-        "http://mirror.stream.centos.org/10-stream/CRB/s390x/os/Packages/glibc-static-2.39-124.el10.s390x.rpm",
-        "https://storage.googleapis.com/builddeps/b42abd2dd44169ef18ed7208bbc2fde3cc6758fac3795dfdec46ab0e5b5e9a22",
-    ],
+    urls = ["https://storage.googleapis.com/builddeps/b42abd2dd44169ef18ed7208bbc2fde3cc6758fac3795dfdec46ab0e5b5e9a22"],
 )
 
 rpm(
     name = "glibc-static-0__2.39-124.el10.x86_64",
     sha256 = "ec989ef10e4dad3278ab23e26d08c8abd0c4592d5ec96c518973274f96bb5961",
-    urls = [
-        "http://mirror.stream.centos.org/10-stream/CRB/x86_64/os/Packages/glibc-static-2.39-124.el10.x86_64.rpm",
-        "https://storage.googleapis.com/builddeps/ec989ef10e4dad3278ab23e26d08c8abd0c4592d5ec96c518973274f96bb5961",
-    ],
+    urls = ["https://storage.googleapis.com/builddeps/ec989ef10e4dad3278ab23e26d08c8abd0c4592d5ec96c518973274f96bb5961"],
 )
 
 rpm(
@@ -5054,28 +5072,19 @@ rpm(
 rpm(
     name = "kernel-headers-0__6.12.0-233.el10.aarch64",
     sha256 = "37bf6765ef7676e5a05e5200a3e9a0d06f542d02e3ee4066c44cf8e66331c26a",
-    urls = [
-        "http://mirror.stream.centos.org/10-stream/AppStream/aarch64/os/Packages/kernel-headers-6.12.0-233.el10.aarch64.rpm",
-        "https://storage.googleapis.com/builddeps/37bf6765ef7676e5a05e5200a3e9a0d06f542d02e3ee4066c44cf8e66331c26a",
-    ],
+    urls = ["https://storage.googleapis.com/builddeps/37bf6765ef7676e5a05e5200a3e9a0d06f542d02e3ee4066c44cf8e66331c26a"],
 )
 
 rpm(
     name = "kernel-headers-0__6.12.0-233.el10.s390x",
     sha256 = "46120491d1ed732a5234b8e17b9d3470f85af4e0971827a1961b312c03bc964a",
-    urls = [
-        "http://mirror.stream.centos.org/10-stream/AppStream/s390x/os/Packages/kernel-headers-6.12.0-233.el10.s390x.rpm",
-        "https://storage.googleapis.com/builddeps/46120491d1ed732a5234b8e17b9d3470f85af4e0971827a1961b312c03bc964a",
-    ],
+    urls = ["https://storage.googleapis.com/builddeps/46120491d1ed732a5234b8e17b9d3470f85af4e0971827a1961b312c03bc964a"],
 )
 
 rpm(
     name = "kernel-headers-0__6.12.0-233.el10.x86_64",
     sha256 = "5c769c60ced5878cc4b89063ea9196445fa9d020c822306050b782d498ca7189",
-    urls = [
-        "http://mirror.stream.centos.org/10-stream/AppStream/x86_64/os/Packages/kernel-headers-6.12.0-233.el10.x86_64.rpm",
-        "https://storage.googleapis.com/builddeps/5c769c60ced5878cc4b89063ea9196445fa9d020c822306050b782d498ca7189",
-    ],
+    urls = ["https://storage.googleapis.com/builddeps/5c769c60ced5878cc4b89063ea9196445fa9d020c822306050b782d498ca7189"],
 )
 
 rpm(
@@ -11363,10 +11372,7 @@ rpm(
 rpm(
     name = "pam-0__1.5.1-23.el9.x86_64",
     sha256 = "fba392096cbf59204549bca23d4060cdf8aaaa9ce35ade8194c111f519033e10",
-    urls = [
-        "http://mirror.stream.centos.org/9-stream/BaseOS/x86_64/os/Packages/pam-1.5.1-23.el9.x86_64.rpm",
-        "https://storage.googleapis.com/builddeps/fba392096cbf59204549bca23d4060cdf8aaaa9ce35ade8194c111f519033e10",
-    ],
+    urls = ["https://storage.googleapis.com/builddeps/fba392096cbf59204549bca23d4060cdf8aaaa9ce35ade8194c111f519033e10"],
 )
 
 rpm(
