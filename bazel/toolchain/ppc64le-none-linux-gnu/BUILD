@@ -58,7 +58,7 @@ toolchain(
     toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
 )
 
-# CS10 toolchain - selected when centos_stream_version=10
+# CS10 toolchain - selected when centos_stream_version=10, cross-compile from x86_64
 toolchain(
     name = "ppc64le_linux_toolchain_cs10",
     exec_compatible_with = [
@@ -71,6 +71,21 @@ toolchain(
     ],
     target_settings = [
         "//rpm:is_cs10",
+    ],
+    toolchain = ":ppc64le_toolchain_cs10",
+    toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+)
+
+# Native ppc64le toolchain - for builds running directly on ppc64le hardware
+toolchain(
+    name = "ppc64le_linux_toolchain_native",
+    exec_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:ppc64le",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:ppc64le",
     ],
     toolchain = ":ppc64le_toolchain_cs10",
     toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
