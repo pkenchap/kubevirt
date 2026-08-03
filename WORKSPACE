@@ -318,6 +318,18 @@ bazeldnf_register_toolchains(
     name = "bazeldnf_prebuilt",
 )
 
+# Fix: bazeldnf upstream registers linux-ppc64le with @platforms//cpu:ppc (wrong).
+# Register a corrected toolchain with @platforms//cpu:ppc64le so native ppc64le
+# builds can resolve the bazeldnf toolchain.
+http_file(
+    name = "bazeldnf_linux_ppc64le_binary",
+    sha256 = "34df014e3bfc96671b09864e532ec2142982b8995d27695488bec45b2a81e1cc",
+    executable = True,
+    url = "https://github.com/brianmcarey/bazeldnf/releases/download/v0.5.9-2/bazeldnf-v0.5.9-2-linux-ppc64le",
+)
+
+load("@bazeldnf//bazeldnf:toolchain.bzl", "bazeldnf_toolchain")
+
 go_rules_dependencies()
 
 go_register_toolchains(
@@ -579,8 +591,19 @@ go_repository(
     version = "v0.3.0",
 )
 
+# Expose bazeldnf_toolchain.BUILD as a Bazel package so we can register
+# the native ppc64le toolchain defined in it.
+new_local_repository(
+    name = "bazeldnf_toolchain_ppc64le",
+    path = ".",
+    build_file = "//:bazeldnf_toolchain.BUILD",
+)
+
 register_toolchains(
     "//:py_toolchain",
+    # Native ppc64le bazeldnf toolchain — workaround for upstream bug where
+    # linux-ppc64le is mapped to @platforms//cpu:ppc instead of ppc64le
+    "@bazeldnf_toolchain_ppc64le//:bazeldnf_ppc64le_native_toolchain",
 )
 
 go_repository(
