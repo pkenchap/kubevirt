@@ -10750,6 +10750,14 @@ rpm(
 )
 
 rpm(
+    name = "libvirt-client-0__12.4.0-1.el10.ppc64le",
+    sha256 = "042f5f6e55a87f9d7954d79088b8e1234f1981a92d71e644a932dd4d20d9532e",
+    urls = [
+        "https://mirror.stream.centos.org/10-stream/AppStream/ppc64le/os/Packages/libvirt-client-12.4.0-1.el10.ppc64le.rpm",
+    ],
+)
+
+rpm(
     name = "libvirt-client-0__11.10.0-12.el9.aarch64",
     sha256 = "58b59ac93cc9e75bb8b00337676526ffedd0d8cc6d8f7a932542dafb340e4582",
     urls = [
