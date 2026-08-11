@@ -3654,6 +3654,7 @@ rpmtree(
         "@libvirt-daemon-driver-qemu-0__12.4.0-1.virt.el10.ppc64le//rpm",
         "@libvirt-daemon-log-0__12.4.0-1.virt.el10.ppc64le//rpm",
         "@libvirt-libs-0__12.4.0-1.virt.el10.ppc64le//rpm",
+        "@libwsman1-0__2.8.1-3.el10.ppc64le//rpm",
         "@libxcrypt-0__4.4.36-10.el10.ppc64le//rpm",
         "@libxml2-0__2.12.5-14.el10.ppc64le//rpm",
         "@libzstd-0__1.5.5-9.el10.ppc64le//rpm",
