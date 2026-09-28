@@ -230,7 +230,8 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 			return nil
 		}
 
-		controller, _ = NewController(
+		mockQueue = testutils.NewMockWorkQueue(testutils.NewFrozenClockRateLimitingQueue("virt-controller-vmi"))
+		controller, _ = NewController(mockQueue,
 			services.NewTemplateService("a", 240, "b", "c", "d", "e", "f", pvcInformer.GetStore(), virtClient, config, qemuGid, "g", rqInformer.GetStore(), nsInformer.GetStore()),
 			vmiInformer,
 			vmInformer,
@@ -256,9 +257,6 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 			[]string{},
 			[]string{},
 		)
-		// Wrap our workqueue to have a way to detect when we are done processing updates
-		mockQueue = testutils.NewMockWorkQueue(controller.Queue)
-		controller.Queue = mockQueue
 
 		sanityExecute = func() {
 			controllertesting.SanityExecute(controller, []cache.Store{
@@ -1912,7 +1910,7 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 			Entry("should be left if VM owner is present", true, true, true),
 		)
 
-		DescribeTable("should do nothing if pod is handed to virt-handler", func(phase k8sv1.PodPhase) {
+		DescribeTable("should do nothing if pod is handed to virt-handler", func(phase k8sv1.PodPhase, expectedVirtActions []expectedAction) {
 			vmi := newPendingVirtualMachine("testvmi")
 			vmi.Status.Phase = virtv1.Scheduled
 			pod := newPodForVirtualMachine(vmi, phase)
@@ -1923,23 +1921,33 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 			}
 			setReadyCondition(vmi, k8sv1.ConditionFalse, unreadyReason)
 
+			addActivePods(vmi, pod.UID, "")
 			addVirtualMachine(vmi)
 			addPod(pod)
-			addActivePods(vmi, pod.UID, "")
 
 			sanityExecute()
-			Expect(virtClientset.Actions()).To(HaveLen(1))
-			Expect(virtClientset.Actions()[0].GetVerb()).To(Equal("create"))
-			Expect(virtClientset.Actions()[0].GetResource().Resource).To(Equal("virtualmachineinstances"))
+			Expect(virtClientset.Actions()).To(WithTransform(actionsSummary, ConsistOf(expectedVirtActions)))
 			Expect(kubeClient.Actions()).To(HaveLen(1))
 			Expect(kubeClient.Actions()[0].GetVerb()).To(Equal("create"))
 			Expect(kubeClient.Actions()[0].GetResource().Resource).To(Equal("pods"))
 		},
-			Entry("and in running state", k8sv1.PodRunning),
-			Entry("and in unknown state", k8sv1.PodUnknown),
-			Entry("and in succeeded state", k8sv1.PodSucceeded),
-			Entry("and in failed state", k8sv1.PodFailed),
-			Entry("and in pending state", k8sv1.PodPending),
+			Entry("and in running state", k8sv1.PodRunning, []expectedAction{
+				{Verb: "create", Resource: "virtualmachineinstances"},
+			}),
+			Entry("and in unknown state", k8sv1.PodUnknown, []expectedAction{
+				{Verb: "create", Resource: "virtualmachineinstances"},
+			}),
+			Entry("and in succeeded state", k8sv1.PodSucceeded, []expectedAction{
+				{Verb: "create", Resource: "virtualmachineinstances"},
+				{Verb: "patch", Resource: "virtualmachineinstances"},
+			}),
+			Entry("and in failed state", k8sv1.PodFailed, []expectedAction{
+				{Verb: "create", Resource: "virtualmachineinstances"},
+				{Verb: "patch", Resource: "virtualmachineinstances"},
+			}),
+			Entry("and in pending state", k8sv1.PodPending, []expectedAction{
+				{Verb: "create", Resource: "virtualmachineinstances"},
+			}),
 		)
 
 		It("should add outdated label if pod's image is outdated and VMI is in running state", func() {
@@ -2137,8 +2145,10 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 		},
 			Entry("ErrImagePull in init container", true, kvcontroller.ErrImagePullReason),
 			Entry("ImagePullBackOff in init container", true, kvcontroller.ImagePullBackOffReason),
+			Entry("InvalidImageName in init container", true, kvcontroller.InvalidImageNameReason),
 			Entry("ErrImagePull in compute container", false, kvcontroller.ErrImagePullReason),
 			Entry("ImagePullBackOff in compute container", false, kvcontroller.ImagePullBackOffReason),
+			Entry("InvalidImageName in compute container", false, kvcontroller.InvalidImageNameReason),
 		)
 
 		DescribeTable("should override Synchronized=False condition reason when it's already set", func(prevReason, newReason string) {
@@ -2178,11 +2188,10 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 			Entry("ErrImagePull --> ImagePullBackOff", kvcontroller.ErrImagePullReason, kvcontroller.ImagePullBackOffReason),
 			Entry("ImagePullBackOff --> ErrImagePull", kvcontroller.ImagePullBackOffReason, kvcontroller.ErrImagePullReason),
 		)
-		It("should add MigrationTransport to VMI status if MigrationTransportUnixAnnotation was set", func() {
+		It("should add MigrationTransport to VMI status", func() {
 			vmi := newPendingVirtualMachine("testvmi")
 			vmi.Status.Phase = virtv1.Scheduling
 			pod := newPodForVirtualMachine(vmi, k8sv1.PodRunning)
-			pod.Annotations[virtv1.MigrationTransportUnixAnnotation] = "true"
 
 			addVirtualMachine(vmi)
 			addPod(pod)
@@ -4593,6 +4602,182 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 			Expect(err).ToNot(HaveOccurred())
 			expectPodExists(oldPod.Namespace, oldPod.Name)
 		})
+
+		DescribeTable("should clean up utility volume attachment pods when replacement pod is running",
+			func(includeUtilityPVC bool, includeUtilityMount bool, expectDelete bool) {
+				vmi := watchtesting.NewRunningVirtualMachine("testvmi", &k8sv1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "testnode",
+					},
+				})
+				vmi.Spec.UtilityVolumes = []virtv1.UtilityVolume{
+					{
+						Name: "utility-vol",
+						PersistentVolumeClaimVolumeSource: k8sv1.PersistentVolumeClaimVolumeSource{
+							ClaimName: "utility-pvc",
+						},
+					},
+				}
+				vmi.Status.VolumeStatus = []virtv1.VolumeStatus{
+					{
+						Name:  "utility-vol",
+						Phase: virtv1.HotplugVolumeMounted,
+						HotplugVolume: &virtv1.HotplugVolumeStatus{
+							AttachPodName: "new-pod",
+							AttachPodUID:  "new-uid",
+						},
+					},
+				}
+
+				oldPod := &k8sv1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "old-pod",
+						Namespace: vmi.Namespace,
+					},
+					Spec: k8sv1.PodSpec{
+						Volumes: []k8sv1.Volume{
+							{
+								Name: "utility-vol",
+								VolumeSource: k8sv1.VolumeSource{
+									PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{
+										ClaimName: "utility-pvc",
+									},
+								},
+							},
+						},
+					},
+					Status: k8sv1.PodStatus{
+						Phase: k8sv1.PodRunning,
+					},
+				}
+
+				currentPodSpec := k8sv1.PodSpec{
+					Volumes: []k8sv1.Volume{
+						{
+							Name: "hotplug-vol",
+							VolumeSource: k8sv1.VolumeSource{
+								PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{
+									ClaimName: "hotplug-pvc",
+								},
+							},
+						},
+					},
+				}
+				if includeUtilityPVC {
+					currentPodSpec.Volumes = append([]k8sv1.Volume{
+						{
+							Name: "utility-vol",
+							VolumeSource: k8sv1.VolumeSource{
+								PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{
+									ClaimName: "utility-pvc",
+								},
+							},
+						},
+					}, currentPodSpec.Volumes...)
+				}
+				if includeUtilityMount {
+					currentPodSpec.Containers = []k8sv1.Container{
+						{
+							Name: "hotplug-disk",
+							VolumeMounts: []k8sv1.VolumeMount{
+								{
+									Name:      "utility-vol",
+									MountPath: "/utility-vol",
+								},
+							},
+						},
+					}
+				}
+				currentPod := &k8sv1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "new-pod",
+						Namespace: vmi.Namespace,
+					},
+					Spec: currentPodSpec,
+					Status: k8sv1.PodStatus{
+						Phase: k8sv1.PodRunning,
+					},
+				}
+
+				addPod(oldPod)
+
+				err := controller.cleanupAttachmentPods(currentPod, []*k8sv1.Pod{oldPod}, vmi, 2)
+				Expect(err).ToNot(HaveOccurred())
+				if expectDelete {
+					testutils.ExpectEvent(recorder, kvcontroller.SuccessfulDeletePodReason)
+					expectPodDoesNotExist(oldPod.Namespace, oldPod.Name)
+				} else {
+					expectPodExists(oldPod.Namespace, oldPod.Name)
+				}
+			},
+			Entry("delete when replacement exposes utility volume", true, true, true),
+			Entry("keep when replacement is missing utility volume", false, false, false),
+			Entry("keep when replacement has utility PVC without container mount", true, false, false),
+		)
+
+		DescribeTable("volumeHandledByCurrentPod",
+			func(currentPod *k8sv1.Pod, volumeName string, specVolumes map[string]struct{}, expected bool) {
+				Expect(volumeHandledByCurrentPod(volumeName, currentPod, specVolumes)).To(Equal(expected))
+			},
+			Entry("nil pod", nil, "vol", map[string]struct{}{"vol": {}}, false),
+			Entry("pending pod", &k8sv1.Pod{Status: k8sv1.PodStatus{Phase: k8sv1.PodPending}}, "vol", map[string]struct{}{"vol": {}}, false),
+			Entry("volume not in spec map", &k8sv1.Pod{Status: k8sv1.PodStatus{Phase: k8sv1.PodRunning}}, "vol", map[string]struct{}{}, false),
+			Entry("pvc without container mount", &k8sv1.Pod{
+				Status: k8sv1.PodStatus{Phase: k8sv1.PodRunning},
+				Spec: k8sv1.PodSpec{
+					Volumes: []k8sv1.Volume{
+						{
+							Name: "vol",
+							VolumeSource: k8sv1.VolumeSource{
+								PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{ClaimName: "pvc"},
+							},
+						},
+					},
+				},
+			}, "vol", map[string]struct{}{"vol": {}}, false),
+			Entry("pvc with volume mount", &k8sv1.Pod{
+				Status: k8sv1.PodStatus{Phase: k8sv1.PodRunning},
+				Spec: k8sv1.PodSpec{
+					Containers: []k8sv1.Container{
+						{
+							Name: "hotplug-disk",
+							VolumeMounts: []k8sv1.VolumeMount{
+								{Name: "vol", MountPath: "/vol"},
+							},
+						},
+					},
+					Volumes: []k8sv1.Volume{
+						{
+							Name: "vol",
+							VolumeSource: k8sv1.VolumeSource{
+								PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{ClaimName: "pvc"},
+							},
+						},
+					},
+				},
+			}, "vol", map[string]struct{}{"vol": {}}, true),
+			Entry("pvc with volume device", &k8sv1.Pod{
+				Status: k8sv1.PodStatus{Phase: k8sv1.PodRunning},
+				Spec: k8sv1.PodSpec{
+					Containers: []k8sv1.Container{
+						{
+							Name: "hotplug-disk",
+							VolumeDevices: []k8sv1.VolumeDevice{
+								{Name: "vol", DevicePath: "/path/vol/uid"},
+							},
+						},
+					},
+					Volumes: []k8sv1.Volume{
+						{
+							Name: "vol",
+							VolumeSource: k8sv1.VolumeSource{
+								PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{ClaimName: "pvc"},
+							},
+						},
+					},
+				},
+			}, "vol", map[string]struct{}{"vol": {}}, true),
+		)
 	})
 
 	Context("topology hints", func() {
@@ -4736,8 +4921,8 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 				pod := newPodForVirtualMachine(vmi, podPhase)
 				pod.Spec.NodeName = "targetnode"
 
-				addVirtualMachine(vmi)
 				addActivePods(vmi, pod.UID, "targetnode")
+				addVirtualMachine(vmi)
 				addPod(pod)
 
 				sanityExecute()
@@ -5315,6 +5500,75 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 			),
 		)
 	})
+
+	Context("setActivePods", func() {
+		type podSpec struct {
+			phase    k8sv1.PodPhase
+			uid      string
+			name     string
+			nodeName string
+		}
+
+		DescribeTable("should only include non-terminated pods", func(pods []podSpec, expectedLen int, expectedEntries map[types.UID]string) {
+			vmi := newPendingVirtualMachine("testvmi")
+			vmi.Status.Phase = virtv1.Running
+
+			for _, ps := range pods {
+				pod := newPodForVirtualMachine(vmi, ps.phase)
+				pod.UID = types.UID(ps.uid)
+				pod.Name = ps.name
+				pod.Spec.NodeName = ps.nodeName
+				Expect(controller.podIndexer.Add(pod)).To(Succeed())
+			}
+
+			updatedVMI, err := controller.setActivePods(vmi)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(updatedVMI.Status.ActivePods).To(HaveLen(expectedLen))
+			for uid, node := range expectedEntries {
+				Expect(updatedVMI.Status.ActivePods).To(HaveKeyWithValue(uid, node))
+			}
+		},
+			Entry("excludes succeeded pods",
+				[]podSpec{
+					{k8sv1.PodRunning, "running-uid", "running-pod", "node1"},
+					{k8sv1.PodSucceeded, "succeeded-uid", "succeeded-pod", "node2"},
+				},
+				1, map[types.UID]string{"running-uid": "node1"},
+			),
+			Entry("excludes failed pods",
+				[]podSpec{
+					{k8sv1.PodRunning, "running-uid", "running-pod", "node1"},
+					{k8sv1.PodFailed, "failed-uid", "failed-pod", "node2"},
+				},
+				1, map[types.UID]string{"running-uid": "node1"},
+			),
+			Entry("keeps only target pod after migration",
+				[]podSpec{
+					{k8sv1.PodSucceeded, "source-uid", "source-pod", "source-node"},
+					{k8sv1.PodRunning, "target-uid", "target-pod", "target-node"},
+				},
+				1, map[types.UID]string{"target-uid": "target-node"},
+			),
+			Entry("includes pending pods",
+				[]podSpec{
+					{k8sv1.PodPending, "pending-uid", "pending-pod", "node1"},
+				},
+				1, map[types.UID]string{"pending-uid": "node1"},
+			),
+			Entry("includes unknown pods",
+				[]podSpec{
+					{k8sv1.PodUnknown, "unknown-uid", "unknown-pod", "node1"},
+				},
+				1, map[types.UID]string{"unknown-uid": "node1"},
+			),
+			Entry("produces empty map when all pods are terminated",
+				[]podSpec{
+					{k8sv1.PodSucceeded, "succeeded-uid", "succeeded-pod", "node1"},
+				},
+				0, map[types.UID]string{},
+			),
+		)
+	})
 })
 
 func newDv(namespace string, name string, phase cdiv1.DataVolumePhase) *cdiv1.DataVolume {
@@ -5668,4 +5922,17 @@ type stubMigrationEvaluator struct {
 
 func (e stubMigrationEvaluator) Evaluate(_ *virtv1.VirtualMachineInstance, _ *k8sv1.Pod) k8sv1.ConditionStatus {
 	return e.result
+}
+
+type expectedAction struct {
+	Verb     string
+	Resource string
+}
+
+func actionsSummary(actions []testing.Action) []expectedAction {
+	result := make([]expectedAction, 0, len(actions))
+	for _, a := range actions {
+		result = append(result, expectedAction{Verb: a.GetVerb(), Resource: a.GetResource().Resource})
+	}
+	return result
 }

@@ -22,6 +22,7 @@ package vmexport
 import (
 	"compress/gzip"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -41,10 +42,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
 	kubectlutil "k8s.io/kubectl/pkg/util"
+	"k8s.io/streaming/pkg/httpstream"
 
 	virtv1 "kubevirt.io/api/core/v1"
 	exportv1 "kubevirt.io/api/export/v1"
@@ -849,11 +850,8 @@ func copyFileWithProgressBar(output io.Writer, resp *http.Response, decompress b
 
 // getOrCreateTokenSecret obtains a token secret to be used along with the virtualMachineExport
 func getOrCreateTokenSecret(client kubecli.KubevirtClient, vmexport *exportv1.VirtualMachineExport) (*k8sv1.Secret, error) {
-	// Securely randomize a 20 char string to be used as a token
-	token, err := util.GenerateVMExportToken()
-	if err != nil {
-		return nil, err
-	}
+	// Securely randomize a string to be used as a token
+	token := rand.Text()
 
 	ownerRef := metav1.NewControllerRef(vmexport, schema.GroupVersionKind{
 		Group:   exportv1.SchemeGroupVersion.Group,
@@ -876,7 +874,7 @@ func getOrCreateTokenSecret(client kubecli.KubevirtClient, vmexport *exportv1.Vi
 		},
 	}
 
-	secret, err = client.CoreV1().Secrets(vmexport.Namespace).Create(context.Background(), secret, metav1.CreateOptions{})
+	secret, err := client.CoreV1().Secrets(vmexport.Namespace).Create(context.Background(), secret, metav1.CreateOptions{})
 	if err != nil && !k8serrors.IsAlreadyExists(err) {
 		return nil, err
 	}

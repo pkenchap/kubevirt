@@ -260,6 +260,8 @@ message AgentTimezoneRequest {}
 message AgentNetworkRouteRequest {}
 message AgentNetworkInterfacesRequest {}
 message AgentMemoryBlocksRequest {}
+message AgentFsInfoRequest {}
+message AgentDevicesRequest {}
 
 message VMStatsRequest {
   DomainStatsRequest domainStats = 1;
@@ -278,6 +280,8 @@ message VMStatsRequest {
   AgentNetworkRouteRequest guestNetworkGetRoute = 14;
   AgentNetworkInterfacesRequest guestNetworkGetInterfaces = 15;
   AgentMemoryBlocksRequest guestGetMemoryBlocks = 16;
+  AgentFsInfoRequest guestGetFsInfo = 17;
+  AgentDevicesRequest guestGetDevices = 18;
 }
 
 message VMStatsResponse {
@@ -300,4 +304,6 @@ message VMStatsResponse {
   Response guestNetworkGetRoute = 16;
   Response guestNetworkGetInterfaces = 17;
   Response guestGetMemoryBlocks = 18;
+  Response guestGetFsInfo = 19;
+  Response guestGetDevices = 20;
 }

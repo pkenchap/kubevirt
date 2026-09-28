@@ -24,11 +24,7 @@ package virtconfig
 */
 
 import (
-	"fmt"
-	"math"
 	"slices"
-	"strconv"
-	"strings"
 
 	"kubevirt.io/client-go/log"
 
@@ -51,8 +47,8 @@ const (
 	DefaultMigrationMaxDowntimeMs            uint64 = 900
 	MigrationUtilityVolumesTimeoutSeconds    int64  = 150
 	DefaultStallMargin                       int64  = 4
-	DefaultStallProgressTimeout              uint64 = 40
-	DefaultSwitchoverTimeout                 uint64 = 60
+	DefaultStallProgressTimeout              int64  = 40
+	DefaultSwitchoverTimeout                 int64  = 60
 	DefaultEwmaAlpha                                = "0.4"
 	DefaultPrecopyPossibleFactor                    = "1.5"
 	DefaultPatienceWindowDecayFactor                = "0.5"
@@ -111,39 +107,6 @@ const (
 	DefaultVMRolloutStrategy = v1.VMRolloutStrategyLiveUpdate
 )
 
-func ParseFactor(s string, precision int) (float64, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return 0, fmt.Errorf("invalid factor %q", s)
-	}
-	if precision < 0 {
-		return 0, fmt.Errorf("invalid precision %d", precision)
-	}
-
-	value, err := strconv.ParseFloat(s, 64)
-	if err != nil {
-		return 0, fmt.Errorf("invalid factor %q: %w", s, err)
-	}
-	if math.IsNaN(value) || math.IsInf(value, 0) {
-		return 0, fmt.Errorf("invalid factor %q", s)
-	}
-	if err := validateFactorValuePrecision(value, precision); err != nil {
-		return 0, fmt.Errorf("invalid factor %q: %w", s, err)
-	}
-	return value, nil
-}
-
-func validateFactorValuePrecision(value float64, precision int) error {
-	rounded, err := strconv.ParseFloat(strconv.FormatFloat(value, 'f', precision, 64), 64)
-	if err != nil {
-		return fmt.Errorf("must have at most %d decimal places", precision)
-	}
-	if math.Abs(value-rounded) > 1e-9 {
-		return fmt.Errorf("must have at most %d decimal places", precision)
-	}
-	return nil
-}
-
 func IsARM64(arch string) bool {
 	return arch == "arm64"
 }
@@ -184,6 +147,23 @@ func (c *ClusterConfig) GetMigrationConfiguration() *v1.MigrationConfiguration {
 		migrationConfig.AllowWorkloadDisruption = &allowPostCopy
 	}
 	return migrationConfig
+}
+
+// GetDecentralizedLiveMigrationDatapath returns Direct when unset.
+func (c *ClusterConfig) GetDecentralizedLiveMigrationDatapath() v1.DecentralizedLiveMigrationDatapath {
+	mig := c.GetConfig().MigrationConfiguration
+	if mig == nil || mig.DecentralizedLiveMigrationDatapath == nil || *mig.DecentralizedLiveMigrationDatapath == "" {
+		return v1.DecentralizedLiveMigrationDatapathDirect
+	}
+	return *mig.DecentralizedLiveMigrationDatapath
+}
+
+// DecentralizedLiveMigrationProxyEnabled reports whether the sync-controller
+// migration-data proxy should run (CrossClusterMigrationProxy feature gate +
+// decentralizedLiveMigrationDatapath=Proxy).
+func (c *ClusterConfig) DecentralizedLiveMigrationProxyEnabled() bool {
+	return c.CrossClusterMigrationProxyEnabled() &&
+		c.GetDecentralizedLiveMigrationDatapath() == v1.DecentralizedLiveMigrationDatapathProxy
 }
 
 func (c *ClusterConfig) GetImagePullPolicy() (policy k8sv1.PullPolicy) {

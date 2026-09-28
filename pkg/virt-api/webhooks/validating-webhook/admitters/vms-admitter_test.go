@@ -36,7 +36,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sfield "k8s.io/apimachinery/pkg/util/validation/field"
-	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
 
 	"kubevirt.io/client-go/api"
@@ -64,7 +63,6 @@ var _ = Describe("Validating VM Admitter", func() {
 		namespaceInformer  cache.SharedIndexInformer
 		mockVMIClient      *kubecli.MockVirtualMachineInstanceInterface
 		virtClient         *kubecli.MockKubevirtClient
-		k8sClient          *k8sfake.Clientset
 	)
 
 	enableFeatureGate := func(featureGates ...string) {
@@ -128,7 +126,6 @@ var _ = Describe("Validating VM Admitter", func() {
 
 		ctrl := gomock.NewController(GinkgoT())
 		mockVMIClient = kubecli.NewMockVirtualMachineInstanceInterface(ctrl)
-		k8sClient = k8sfake.NewSimpleClientset()
 		virtClient = kubecli.NewMockKubevirtClient(ctrl)
 
 		const kubeVirtNamespace = "kubevirt"
@@ -140,7 +137,6 @@ var _ = Describe("Validating VM Admitter", func() {
 			InstancetypeAdmitter:    instancetypeWebhooks.NewAdmitterStub(),
 			KubeVirtServiceAccounts: webhooks.KubeVirtServiceAccounts(kubeVirtNamespace),
 		}
-		virtClient.EXPECT().AuthorizationV1().Return(k8sClient.AuthorizationV1()).AnyTimes()
 	})
 
 	Context("with an invalid VM", func() {
@@ -1594,6 +1590,48 @@ var _ = Describe("Validating VM Admitter", func() {
 			HavePrefix("feature gate test-deprecated is deprecated"),
 			HavePrefix("spec.running is deprecated, please use spec.runStrategy instead.")))
 	})
+
+	DescribeTable("should warn about disabling ACPI on amd64 through the VM admitter", func(spec v1.VirtualMachineInstanceSpec, expectWarning bool) {
+		vm := &v1.VirtualMachine{
+			Spec: v1.VirtualMachineSpec{
+				RunStrategy: pointer.P(v1.RunStrategyHalted),
+				Template: &v1.VirtualMachineInstanceTemplateSpec{
+					Spec: spec,
+				},
+			},
+		}
+
+		resp := admitVm(vmsAdmitter, vm)
+		Expect(resp.Allowed).To(BeTrue())
+		if expectWarning {
+			Expect(resp.Warnings).To(ContainElement(ContainSubstring("disabling ACPI")))
+		} else {
+			Expect(resp.Warnings).NotTo(ContainElement(ContainSubstring("disabling ACPI")))
+		}
+	},
+		Entry("amd64 with ACPI explicitly disabled on BIOS boot", v1.VirtualMachineInstanceSpec{
+			Architecture: "amd64",
+			Domain:       v1.DomainSpec{Features: &v1.Features{ACPI: v1.FeatureState{Enabled: new(false)}}},
+		}, true),
+		Entry("amd64 with ACPI explicitly enabled", v1.VirtualMachineInstanceSpec{
+			Architecture: "amd64",
+			Domain:       v1.DomainSpec{Features: &v1.Features{ACPI: v1.FeatureState{Enabled: new(true)}}},
+		}, false),
+		Entry("amd64 with ACPI unset (defaults enabled)", v1.VirtualMachineInstanceSpec{
+			Architecture: "amd64",
+		}, false),
+		Entry("amd64 with ACPI explicitly disabled on EFI boot", v1.VirtualMachineInstanceSpec{
+			Architecture: "amd64",
+			Domain: v1.DomainSpec{
+				Features: &v1.Features{ACPI: v1.FeatureState{Enabled: new(false)}},
+				Firmware: &v1.Firmware{Bootloader: &v1.Bootloader{EFI: &v1.EFI{SecureBoot: pointer.P(false)}}},
+			},
+		}, false),
+		Entry("arm64 with ACPI explicitly disabled", v1.VirtualMachineInstanceSpec{
+			Architecture: "arm64",
+			Domain:       v1.DomainSpec{Features: &v1.Features{ACPI: v1.FeatureState{Enabled: new(false)}}},
+		}, false),
+	)
 
 	It("should reject request when Discontinued feature is used", func() {
 		const fgName = "test-discontinued"

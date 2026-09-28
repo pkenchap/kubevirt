@@ -61,6 +61,7 @@ import (
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/flowcontrol"
+	"k8s.io/client-go/util/workqueue"
 
 	"kubevirt.io/kubevirt/pkg/util/ratelimiter"
 
@@ -716,14 +717,24 @@ func (vca *VirtControllerApp) initCommon() {
 				return hooks.UnmarshalHookSidecarList(vmi)
 			}),
 		services.WithSidecarCreator(netbinding.NetBindingPluginSidecarList),
-		services.WithNetMemoryCalculator(netresources.MemoryCalculator{}),
+		services.WithMemoryOverheadCalculators(
+			netresources.NewMemoryCalculator(vca.clusterConfig),
+			backup.NewMemoryCalculator(
+				vca.persistentVolumeClaimCache,
+				vca.vmBackupTrackerInformer,
+				vca.clusterConfig),
+		),
 		services.WithAnnotationsGenerators(netAnnotationsGenerator, storageannotations.Generator{}),
-		services.WithNetTargetAnnotationsGenerator(netAnnotationsGenerator),
 	)
 
 	topologyHinter := topology.NewTopologyHinter(vca.nodeInformer.GetStore(), vca.vmiInformer.GetStore(), vca.clusterConfig)
 
-	vca.vmiController, err = vmi.NewController(vca.templateService,
+	vca.vmiController, err = vmi.NewController(
+		workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.DefaultTypedControllerRateLimiter[string](),
+			workqueue.TypedRateLimitingQueueConfig[string]{Name: "virt-controller-vmi"},
+		),
+		vca.templateService,
 		vca.vmiInformer,
 		vca.vmInformer,
 		vca.kvPodInformer,
@@ -791,7 +802,12 @@ func (vca *VirtControllerApp) initCommon() {
 func (vca *VirtControllerApp) initReplicaSet() {
 	var err error
 	recorder := vca.newRecorder(k8sv1.NamespaceAll, "virtualmachinereplicaset-controller")
-	vca.rsController, err = replicaset.NewController(vca.vmiInformer, vca.rsInformer, recorder, vca.clientSet, controller.BurstReplicas)
+	vca.rsController, err = replicaset.NewController(
+		workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.DefaultTypedControllerRateLimiter[string](),
+			workqueue.TypedRateLimitingQueueConfig[string]{Name: "virt-controller-replicaset"},
+		),
+		vca.vmiInformer, vca.rsInformer, recorder, vca.clientSet, controller.BurstReplicas)
 	if err != nil {
 		panic(err)
 	}
@@ -819,6 +835,10 @@ func (vca *VirtControllerApp) initVirtualMachines() {
 	recorder := vca.newRecorder(k8sv1.NamespaceAll, "virtualmachine-controller")
 
 	vca.vmController, err = vm.NewController(
+		workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.DefaultTypedControllerRateLimiter[string](),
+			workqueue.TypedRateLimitingQueueConfig[string]{Name: "virt-controller-vm"},
+		),
 		vca.vmiInformer,
 		vca.vmInformer,
 		vca.dataVolumeInformer,

@@ -208,7 +208,6 @@ rules:
   - serviceaccounts
   - services
   - endpoints
-  - pods/exec
   verbs:
   - get
   - list
@@ -217,6 +216,14 @@ rules:
   - update
   - delete
   - patch
+- apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - get
+  - list
+  - watch
 - apiGroups:
   - ""
   resources:
@@ -397,6 +404,13 @@ rules:
   - template.kubevirt.io
   resources:
   - virtualmachinetemplaterequests/source
+  verbs:
+  - create
+- apiGroups:
+  - subresources.template.kubevirt.io
+  resources:
+  - virtualmachinetemplates/process
+  - virtualmachinetemplates/create
   verbs:
   - create
 - nonResourceURLs:
@@ -886,12 +900,6 @@ rules:
   verbs:
   - list
   - watch
-  - get
-- apiGroups:
-  - k8s.cni.cncf.io
-  resources:
-  - network-attachment-definitions
-  verbs:
   - get
 - apiGroups:
   - kubevirt.io
@@ -1538,6 +1546,12 @@ rules:
   - list
   - watch
   - deletecollection
+- apiGroups:
+  - k8s.cni.cncf.io
+  resources:
+  - network-attachment-definitions
+  verbs:
+  - get
 - apiGroups:
   - authentication.k8s.io
   resources:

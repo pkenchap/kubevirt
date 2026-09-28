@@ -295,32 +295,6 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 				// check VMI, confirm migration state
 				libmigration.ConfirmVMIPostMigration(virtClient, vmi, migration)
 			})
-			It("[test_id:5689]should be successfully migrate with a WriteBack disk cache", decorators.WgS390x, func() {
-				vmi := libvmifact.NewAlpineWithTestTooling(libnet.WithMasqueradeNetworking())
-				vmi.Spec.Domain.Devices.Disks[0].Cache = v1.CacheWriteBack
-
-				By("Starting the VirtualMachineInstance")
-				vmi = libvmops.RunVMIAndExpectLaunch(vmi, flags.StartupTimeoutSecondsHuge())
-
-				By("Checking that the VirtualMachineInstance console has expected output")
-				Expect(console.LoginToAlpine(vmi)).To(Succeed())
-
-				By("starting the migration")
-				migration := libmigration.New(vmi.Name, vmi.Namespace)
-				migration = libmigration.RunMigrationAndExpectToCompleteWithDefaultTimeout(virtClient, migration)
-
-				// check VMI, confirm migration state
-				libmigration.ConfirmVMIPostMigration(virtClient, vmi, migration)
-
-				runningVMISpec, err := libdomain.GetRunningVMIDomainSpec(vmi)
-				Expect(err).ToNot(HaveOccurred())
-
-				disks := runningVMISpec.Devices.Disks
-				By("checking if requested cache 'writeback' has been set")
-				Expect(disks[0].Alias.GetName()).To(Equal("disk0"))
-				Expect(disks[0].Driver.Cache).To(Equal(string(v1.CacheWriteBack)))
-			})
-
 			It("[test_id:6970]should migrate vmi with cdroms on various bus types", decorators.Conformance, func() {
 				vmi := libvmifact.NewAlpineWithTestTooling(
 					libnet.WithMasqueradeNetworking(),
@@ -891,26 +865,72 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(ContainSubstring("DisksNotLiveMigratable"))
 			})
-			It("[test_id:1479][storage-req] should migrate a vmi with a shared block disk", decorators.StorageReq, decorators.RequiresRWXBlock, func() {
-				sc, exists := libstorage.GetRWXBlockStorageClass()
-				if !exists {
-					Fail("Failed test when RWX Block storage is not present")
-				}
+			It("[test_id:1479][test_id:5689][storage-req] should migrate a vmi with shared block disks across all cache modes",
+				decorators.StorageReq, decorators.RequiresRWXBlock, func() {
+					sc, exists := libstorage.GetRWXBlockStorageClass()
+					if !exists {
+						Fail("Failed test when RWX Block storage is not present")
+					}
 
-				By("Starting the VirtualMachineInstance")
-				vmi := newVMIWithDataVolumeForMigration(cd.ContainerDiskAlpine, k8sv1.ReadWriteMany, sc)
-				vmi = libvmops.RunVMIAndExpectLaunch(vmi, flags.StartupTimeoutSecondsXHuge())
+					specs := []struct {
+						name  string
+						cache v1.DriverCache
+					}{
+						{"disk0", v1.CacheNone},
+						{"disk1", v1.CacheDirectSync},
+						{"disk2", v1.CacheWriteThrough},
+						{"disk3", v1.CacheWriteBack},
+					}
 
-				By("Checking that the VirtualMachineInstance console has expected output")
-				Expect(console.LoginToAlpine(vmi)).To(Succeed())
+					By("Creating DataVolumes for each cache mode")
+					sourceURL := cd.DataVolumeImportUrlForContainerDisk(cd.ContainerDiskAlpine)
 
-				By("Starting a Migration")
-				migration := libmigration.New(vmi.Name, vmi.Namespace)
-				migration = libmigration.RunMigrationAndExpectToCompleteWithDefaultTimeout(virtClient, migration)
+					var vmiOpts []libvmi.Option
+					for _, spec := range specs {
+						dv := libdv.NewDataVolume(
+							libdv.WithRegistrySource(
+								libdv.WithURL(sourceURL),
+								libdv.WithPullMethod(cdiv1.RegistryPullNode),
+								libdv.WithPlatformArch(defaultArch),
+							),
+							libdv.WithStorage(
+								libdv.StorageWithStorageClass(sc),
+								libdv.StorageWithVolumeSize(cd.ContainerDiskSizeBySourceURL(sourceURL)),
+								libdv.StorageWithAccessMode(k8sv1.ReadWriteMany),
+								libdv.StorageWithVolumeMode(k8sv1.PersistentVolumeBlock),
+							),
+						)
+						dv, err := virtClient.CdiClient().CdiV1beta1().DataVolumes(testsuite.GetTestNamespace(nil)).Create(
+							context.Background(), dv, metav1.CreateOptions{})
+						Expect(err).ToNot(HaveOccurred())
+						libstorage.EventuallyDV(dv, 240, Or(matcher.HaveSucceeded(), matcher.WaitForFirstConsumer()))
+						vmiOpts = append(vmiOpts, libvmi.WithDataVolume(spec.name, dv.Name, libvmi.WithDiskCache(spec.cache)))
+					}
 
-				// check VMI, confirm migration state
-				libmigration.ConfirmVMIPostMigration(virtClient, vmi, migration)
-			})
+					By("Starting the VirtualMachineInstance")
+					vmi := libvmi.New(append(vmiOpts,
+						libvmi.WithMemoryRequest("256Mi"),
+						libvmi.WithNamespace(testsuite.GetTestNamespace(nil)),
+						libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding()),
+						libvmi.WithNetwork(v1.DefaultPodNetwork()),
+					)...)
+					vmi = libvmops.RunVMIAndExpectLaunch(vmi, flags.StartupTimeoutSecondsXHuge())
+
+					By("Checking that the VirtualMachineInstance console has expected output")
+					Expect(console.LoginToAlpine(vmi)).To(Succeed())
+
+					By("Writing test data before migration")
+					testData := "migration-cache-test-data-1234567890"
+					Expect(console.RunCommand(vmi, fmt.Sprintf("echo '%s' > /testfile", testData), 30*time.Second)).To(Succeed())
+
+					By("Starting a Migration")
+					migration := libmigration.New(vmi.Name, vmi.Namespace)
+					migration = libmigration.RunMigrationAndExpectToCompleteWithDefaultTimeout(virtClient, migration)
+					libmigration.ConfirmVMIPostMigration(virtClient, vmi, migration)
+
+					By("Verifying test data survived migration")
+					Expect(console.RunCommand(vmi, fmt.Sprintf("grep -q '%s' /testfile", testData), 30*time.Second)).To(Succeed())
+				})
 
 			It("[test_id:6974]should reject additional migrations on the same VMI if the first one is not finished", func() {
 				vmi := libvmifact.NewFedora(libnet.WithMasqueradeNetworking(), libvmi.WithMemoryRequest(fedoraVMSize))
@@ -2014,34 +2034,17 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 				)
 			})
 
-			Context("when target pod cannot be scheduled and is stuck in Pending phase", Serial, func() {
-
-				var nodesSetUnschedulable []string
-
-				AfterEach(func() {
-					By("Restoring nodes to be schedulable")
-					for _, schedulableNodeName := range nodesSetUnschedulable {
-						libnode.SetNodeSchedulable(schedulableNodeName, virtClient)
-					}
-				})
+			Context("when target pod cannot be scheduled and is stuck in Pending phase", func() {
 
 				It("should be able to properly abort migration", func() {
-					By("Starting a VirtualMachineInstance")
+					By("Starting a VirtualMachineInstance pinned to a node by affinity")
+					nodes := libnode.GetAllSchedulableNodes(virtClient)
 					vmi := libvmifact.NewGuestless(
 						libvmi.WithInterface(libvmi.NewInterface(v1.DefaultPodNetwork().Name, libvmi.WithMasqueradeBinding())),
 						libvmi.WithNetwork(v1.DefaultPodNetwork()),
+						libvmi.WithNodeAffinityFor(nodes.Items[0].Name),
 					)
 					vmi = libvmops.RunVMIAndExpectLaunch(vmi, flags.StartupTimeoutSecondsHuge())
-
-					By("Making all other nodes unschedulable so migration target cannot be placed")
-					schedulableNodes := libnode.GetAllSchedulableNodes(virtClient).Items
-					for _, schedulableNode := range schedulableNodes {
-						if schedulableNode.Name == vmi.Status.NodeName {
-							continue
-						}
-						libnode.SetNodeUnschedulable(schedulableNode.Name, virtClient)
-						nodesSetUnschedulable = append(nodesSetUnschedulable, schedulableNode.Name)
-					}
 
 					By("Trying to migrate VM and expect for the migration to get stuck")
 					migration := libmigration.New(vmi.Name, vmi.Namespace)
@@ -2145,6 +2148,72 @@ var _ = Describe(SIG("VM Live Migration", decorators.RequiresTwoSchedulableNodes
 				Entry("should not affect cluster-wide policy if not defined", false),
 			)
 
+		})
+
+		Context("with downtime tuning", Serial, func() {
+			BeforeEach(func() {
+				kvconfig.EnableFeatureGate(featuregate.MigrationDowntimeTuning)
+			})
+			AfterEach(func() {
+				kvconfig.DisableFeatureGate(featuregate.MigrationDowntimeTuning)
+			})
+
+			It("should migrate with downtime tuning and confirm via API and logs", func() {
+				vmi := libvmifact.NewFedora(libnet.WithMasqueradeNetworking(), libvmi.WithMemoryRequest("1Gi"))
+
+				By("Creating a migration policy with downtime tuning enabled")
+				policy := GeneratePolicyAndAlignVMI(vmi)
+				policy.Spec.MaxDowntimeMs = pointer.P(uint64(60000))
+				policy.Spec.ExperimentalMigrationOptions = &v1.ExperimentalMigrationOptions{
+					DowntimeTuning: &v1.DowntimeTuningOptions{
+						InitialMs:           pointer.P(int64(10)),
+						Steps:               pointer.P(int32(10)),
+						StartAfterIteration: pointer.P(int64(1)),
+						CooldownSeconds:     pointer.P(int32(5)),
+					},
+				}
+				policy = CreateMigrationPolicy(virtClient, policy)
+
+				By("Verifying downtime tuning fields are set in the migration policy")
+				Expect(policy.Spec.ExperimentalMigrationOptions).ToNot(BeNil())
+				dt := policy.Spec.ExperimentalMigrationOptions.DowntimeTuning
+				Expect(dt).ToNot(BeNil())
+				Expect(dt.InitialMs).To(HaveValue(BeEquivalentTo(10)))
+				Expect(dt.Steps).To(HaveValue(BeEquivalentTo(10)))
+				Expect(dt.StartAfterIteration).To(HaveValue(BeEquivalentTo(1)))
+				Expect(dt.CooldownSeconds).To(HaveValue(BeEquivalentTo(5)))
+
+				By("Starting the VirtualMachineInstance")
+				vmi = libvmops.RunVMIAndExpectLaunch(vmi, flags.StartupTimeoutSecondsHuge())
+
+				Eventually(matcher.ThisVMI(vmi), 5*time.Minute, 2*time.Second).Should(matcher.HaveConditionTrue(v1.VirtualMachineInstanceAgentConnected))
+
+				By("Logging into the guest and running stress-ng with write64 to maximize dirty rate")
+				Expect(console.LoginToFedora(vmi)).To(Succeed())
+				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
+					&expect.BSnd{S: "\n"},
+					&expect.BExp{R: ""},
+					&expect.BSnd{S: "stress-ng --vm 4 --vm-bytes 50% --vm-method write64 --vm-keep &\n"},
+					&expect.BExp{R: ""},
+				}, 15)).To(Succeed(), "should run stress-ng write64")
+				time.Sleep(stressDefaultSleepDuration * time.Second)
+
+				By("Starting the Migration")
+				migration := libmigration.New(vmi.Name, vmi.Namespace)
+				migration = libmigration.RunMigrationAndExpectToCompleteWithDefaultTimeout(virtClient, migration)
+
+				By("Confirming migration completed successfully")
+				vmi = libmigration.ConfirmVMIPostMigration(virtClient, vmi, migration)
+
+				By("Verifying the migration policy was applied")
+				Expect(vmi.Status.MigrationState.MigrationPolicyName).ToNot(BeNil())
+				Expect(*vmi.Status.MigrationState.MigrationPolicyName).To(Equal(policy.Name))
+
+				By("Verifying downtime tuning was applied via launcher logs")
+				logs := getSourceLauncherLogs(virtClient, vmi)
+				Expect(logs).To(ContainSubstring("downtime tuning enabled"))
+				Expect(logs).To(ContainSubstring("downtime tuning: max_downtime 300ms -> 10ms"))
+			})
 		})
 
 		Context("with migration compression", Serial, func() {

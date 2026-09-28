@@ -51,6 +51,7 @@ type Connection interface {
 	Close() (int, error)
 	DomainEventJobCompletedRegister(callback libvirt.DomainEventJobCompletedCallback) error
 	DomainEventLifecycleRegister(callback libvirt.DomainEventLifecycleCallback) error
+	DomainEventRebootRegister(callback libvirt.DomainEventGenericCallback) error
 	DomainEventDeviceAddedRegister(callback libvirt.DomainEventDeviceAddedCallback) error
 	DomainEventDeviceRemovedRegister(callback libvirt.DomainEventDeviceRemovedCallback) error
 	DomainEventMigrationIterationRegister(callback libvirt.DomainEventMigrationIterationCallback) (int, error)
@@ -93,6 +94,7 @@ type LibvirtConnection struct {
 	reconnectLock *sync.Mutex
 
 	domainEventCallbacks                        []libvirt.DomainEventLifecycleCallback
+	domainRebootEventCallbacks                  []libvirt.DomainEventGenericCallback
 	domainEventJobCompletedCallbacks            []libvirt.DomainEventJobCompletedCallback
 	domainDeviceAddedEventCallbacks             []libvirt.DomainEventDeviceAddedCallback
 	domainDeviceRemovedEventCallbacks           []libvirt.DomainEventDeviceRemovedCallback
@@ -169,6 +171,17 @@ func (l *LibvirtConnection) DomainEventLifecycleRegister(callback libvirt.Domain
 
 	l.domainEventCallbacks = append(l.domainEventCallbacks, callback)
 	_, err = l.Connect.DomainEventLifecycleRegister(nil, callback)
+	l.checkConnectionLost(err)
+	return
+}
+
+func (l *LibvirtConnection) DomainEventRebootRegister(callback libvirt.DomainEventGenericCallback) (err error) {
+	if err = l.reconnectIfNecessary(); err != nil {
+		return
+	}
+
+	l.domainRebootEventCallbacks = append(l.domainRebootEventCallbacks, callback)
+	_, err = l.Connect.DomainEventRebootRegister(nil, callback)
 	l.checkConnectionLost(err)
 	return
 }
@@ -556,6 +569,12 @@ func (l *LibvirtConnection) reconnectIfNecessary() (err error) {
 			return err
 		}
 	}
+	for _, callback := range l.domainRebootEventCallbacks {
+		log.Log.Infof("Re-registered domain reboot callback: %p", callback)
+		if _, err = l.Connect.DomainEventRebootRegister(nil, callback); err != nil {
+			return err
+		}
+	}
 	for _, callback := range l.domainEventJobCompletedCallbacks {
 		log.Log.Infof("Re-registered job completed callback: %p", callback)
 		if _, err = l.Connect.DomainEventJobCompletedRegister(nil, callback); err != nil {
@@ -587,7 +606,7 @@ func (l *LibvirtConnection) reconnectIfNecessary() (err error) {
 		}
 	}
 
-	log.Log.Error("Re-registered domain and agent callbacks for new connection")
+	log.Log.Infof("Re-registered domain and agent callbacks for new connection")
 
 	if l.reconnect != nil {
 		// Notify the callback about the reconnect through channel.

@@ -38,7 +38,6 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/json"
-	"k8s.io/utils/ptr"
 
 	backupv1 "kubevirt.io/api/backup/v1alpha1"
 	v1 "kubevirt.io/api/core/v1"
@@ -68,14 +67,14 @@ const StandardInitLauncherSocketFileName = "launcher-init-sock"
 const StandardLauncherUnresponsiveFileName = "launcher-unresponsive"
 
 type StallDetectorOptions struct {
-	StallMargin               float64
-	StallProgressTimeout      uint64
-	SwitchoverTimeout         uint64
-	EwmaAlpha                 float64
-	PrecopyPossibleFactor     float64
-	PatienceWindowDecayFactor float64
+	StallMargin               int64
+	StallProgressTimeout      int64
+	SwitchoverTimeout         int64
+	EwmaAlpha                 resource.Quantity
+	PrecopyPossibleFactor     resource.Quantity
+	PatienceWindowDecayFactor resource.Quantity
 	SearchLocalMinima         bool
-	CompletionTimeoutFactor   float64
+	CompletionTimeoutFactor   resource.Quantity
 }
 
 type MigrationOptions struct {
@@ -90,6 +89,7 @@ type MigrationOptions struct {
 	AllowWorkloadDisruption  bool
 	StallDetectorOptions     *StallDetectorOptions
 	Compression              *string
+	DowntimeTuning           *v1.DowntimeTuningOptions
 }
 
 type LauncherClient interface {
@@ -528,13 +528,14 @@ func (c *VirtLauncherClient) GetVMStats(request *cmdv1.VMStatsRequest) (*stats.V
 	}
 
 	if vmstatsResponse.GetDirtyRateStats() != nil {
-		result.DirtyRateMbps = ptr.To(vmstatsResponse.GetDirtyRateStats().GetDirtyRateMbs())
+		result.DirtyRateMbps = new(vmstatsResponse.GetDirtyRateStats().GetDirtyRateMbs())
 	}
 
 	result.GuestAgentVersion = vmstatsResponse.GetGuestAgentVersion().GetMessage()
 	result.GuestGetLoad = vmstatsResponse.GetGuestGetLoad().GetMessage()
 	result.GuestGetCpuStats = vmstatsResponse.GetGuestGetCpuStats().GetMessage()
 	result.GuestGetDiskStats = vmstatsResponse.GetGuestGetDiskStats().GetMessage()
+	result.GuestGetFsInfo = vmstatsResponse.GetGuestGetFsInfo().GetMessage()
 	result.GuestGetTime = vmstatsResponse.GetGuestGetTime().GetMessage()
 	result.GuestGetVcpus = vmstatsResponse.GetGuestGetVcpus().GetMessage()
 	result.GuestGetMemoryBlockInfo = vmstatsResponse.GetGuestGetMemoryBlockInfo().GetMessage()
@@ -546,6 +547,7 @@ func (c *VirtLauncherClient) GetVMStats(request *cmdv1.VMStatsRequest) (*stats.V
 	result.GuestNetworkGetRoute = vmstatsResponse.GetGuestNetworkGetRoute().GetMessage()
 	result.GuestNetworkGetInterfaces = vmstatsResponse.GetGuestNetworkGetInterfaces().GetMessage()
 	result.GuestGetMemoryBlocks = vmstatsResponse.GetGuestGetMemoryBlocks().GetMessage()
+	result.GuestGetDevices = vmstatsResponse.GetGuestGetDevices().GetMessage()
 
 	return result, err
 }

@@ -27,6 +27,9 @@ export IMAGE_PULL_POLICY="${IMAGE_PULL_POLICY:-IfNotPresent}"
 readonly ARTIFACTS_PATH="${ARTIFACTS-$WORKSPACE/exported-artifacts}"
 readonly TEMPLATES_SERVER="gs://kubevirt-vm-images"
 readonly BAZEL_CACHE="${BAZEL_CACHE:-http://bazel-cache.kubevirt-prow.svc.cluster.local:8080/kubevirt.io/kubevirt}"
+readonly SRIOV_TEST_LANE="$(<./kubevirtci/stable_provider.txt)"
+
+readonly NETWORK_SMOKE_LABELS="conformance"
 
 source hack/config-default.sh
 
@@ -65,13 +68,18 @@ fi
 # as with sig-compute-serial lane all sig-compute periodic lanes need to
 # have the Plugins feature gate enabled as well, since the Serial tests are not
 # split out from the sig-compute as in presubmit jobs
-if [[ $JOB_NAME =~ ^periodic-kubevirt-e2e-k8s-.*-sig-compute$ ]]; then
+if [[ $JOB_NAME =~ ^periodic-kubevirt-e2e-k8s-.*-sig-compute(-root)?$ ]]; then
   add_feature_gate "Plugins"
 fi
 
 case "$TARGET" in
   *windows*)
     echo "picking the default provider for windows tests"
+    ;;
+  *sig-network-smoke*)
+    export KUBEVIRT_NUM_NODES=3
+    export KUBEVIRT_DEPLOY_CDI=false
+    export KUBEVIRT_PROVIDER=${TARGET/-sig-network-smoke*/}
     ;;
   *sig-network*)
     export KUBEVIRT_WITH_DYN_NET_CTRL="${KUBEVIRT_WITH_DYN_NET_CTRL:-false}"
@@ -82,22 +90,17 @@ case "$TARGET" in
     export KUBEVIRT_DEPLOY_ISTIO=true
     export KUBEVIRT_DEPLOY_NETWORK_RESOURCES_INJECTOR=true
     export KUBEVIRT_PROVIDER=${TARGET/-sig-network*/}
-    ;;
-  *emulated-igb*)
-    export KUBEVIRT_PROVIDER=${TARGET/-emulated-igb*/}
-    export KUBEVIRT_FUNC_TEST_SUITE_ARGS="${KUBEVIRT_FUNC_TEST_SUITE_ARGS} -emulated-sriov=true"
-    export KUBEVIRT_WITH_SRIOV=true
-    export KUBEVIRT_NUM_NODES=3
-    export KUBEVIRT_DEPLOY_CDI=false
-    export KUBEVIRT_DEPLOY_NETWORK_RESOURCES_INJECTOR=true
-    export KUBEVIRT_E2E_PARALLEL=false
-    export KUBEVIRT_VERBOSITY=${KUBEVIRT_VERBOSITY:-"virtLauncher:3,virtHandler:3"}
+    if [[ "${KUBEVIRT_PROVIDER}" == "${SRIOV_TEST_LANE}" && $JOB_NAME =~ ^(pull|periodic)-kubevirt-e2e-${SRIOV_TEST_LANE}-sig-network$ ]]; then
+      export KUBEVIRT_WITH_SRIOV=true
+      export KUBEVIRT_FUNC_TEST_SUITE_ARGS="${KUBEVIRT_FUNC_TEST_SUITE_ARGS} -emulated-sriov=true"
+    fi
     ;;
   *sig-storage*)
     export KUBEVIRT_PROVIDER=${TARGET/-sig-storage/}
     export KUBEVIRT_STORAGE="rook-ceph-default"
     export KUBEVIRT_DEPLOY_NFS_CSI=true
     export KUBEVIRT_WITH_ETC_CAPACITY="1G"
+    export FAIL_ON_VM_LOG_ERRORS=true
     ;;
   *sig-compute-realtime*)
     export KUBEVIRT_PROVIDER=${TARGET/-sig-compute-realtime/}
@@ -132,6 +135,10 @@ case "$TARGET" in
     export KUBEVIRT_TEST_CONFIG="${base_dir}/tests/sig-migrations-config.json"
     source hack/config-default.sh
     ;;
+  *sig-compute-root*)
+    export KUBEVIRT_PROVIDER=${TARGET/-sig-compute-root/}
+    add_feature_gate "Plugins"
+    ;;
   *sig-compute-serial*)
     export KUBEVIRT_PROVIDER=${TARGET/-sig-compute-serial/}
     add_feature_gate "Plugins"
@@ -161,9 +168,12 @@ case "$TARGET" in
   *sig-monitoring*)
     export KUBEVIRT_PROVIDER=${TARGET/-sig-monitoring/}
     export KUBEVIRT_DEPLOY_PROMETHEUS=true
+    export KUBEVIRT_STORAGE="rook-ceph-default"
     ;;
   *wg-s390x*)
     export KUBEVIRT_PROVIDER=${TARGET/-wg-s390x}
+    export KUBEVIRT_WITH_CNAO=true
+    export KUBEVIRT_DEPLOY_PROMETHEUS=true
     ;;
   *wg-arm64*)
     export KUBEVIRT_PROVIDER=${TARGET/-wg-arm64}
@@ -180,6 +190,8 @@ case "$TARGET" in
     ;;
 esac
 
+detect_centos_stream_version
+
 # Single-node single-replica test lanes need nfs csi to run sig-storage tests
 if [[ $KUBEVIRT_NUM_NODES = "1" && $KUBEVIRT_INFRA_REPLICAS = "1" ]]; then
   export KUBEVIRT_DEPLOY_NFS_CSI=true
@@ -190,13 +202,7 @@ if [ ! -d "kubevirtci/cluster-up/cluster/$KUBEVIRT_PROVIDER" ]; then
   exit 1
 fi
 
-if [[ $TARGET =~ sriov.* ]]; then
-  if [[ $TARGET =~ kind.* ]]; then
-    export KUBEVIRT_NUM_NODES=3
-  fi
-  export KUBEVIRT_DEPLOY_CDI="false"
-  export KUBEVIRT_VERBOSITY=${KUBEVIRT_VERBOSITY:-"virtLauncher:3,virtHandler:3"}
-elif [[ $TARGET =~ vgpu.* ]]; then
+if [[ $TARGET =~ vgpu.* ]]; then
   export KUBEVIRT_NUM_NODES=1
 else
   export KUBEVIRT_NUM_NODES=${KUBEVIRT_NUM_NODES:-2}
@@ -250,7 +256,7 @@ safe_download() (
     # Remote file includes only sha1 w/o filename suffix
     for i in $(seq 1 $retry);
     do
-      remote_sha1="$(gsutil cat ${remote_sha1_url})"
+      remote_sha1="$(gcloud storage cat ${remote_sha1_url})"
       if [[ "$remote_sha1" != "" ]]; then
         break
       fi
@@ -259,7 +265,7 @@ safe_download() (
     if [[ "$(cat "$local_sha1_file")" != "$remote_sha1" ]]; then
         echo "${download_to} is not up to date, corrupted or doesn't exist."
         echo "Downloading file from: ${remote_sha1_url}"
-        gsutil cp $download_from $download_to
+        gcloud storage cp $download_from $download_to
         sha1sum "$download_to" | cut -d " " -f1 > "$local_sha1_file"
         [[ "$(cat "$local_sha1_file")" == "$remote_sha1" ]] || {
             echo "${download_to} is corrupted"
@@ -548,14 +554,20 @@ if [[ -z ${KUBEVIRT_E2E_FOCUS} && -z ${KUBEVIRT_E2E_SKIP} && -z ${label_filter} 
   elif [[ $TARGET =~ windows.* ]]; then
     # Run only Windows tests
     label_filter='(Windows)'
+  elif [[ $TARGET =~ sig-network-smoke ]]; then
+    label_filter="(sig-network && (${NETWORK_SMOKE_LABELS}))"
   elif [[ $TARGET =~ sig-network ]]; then
     label_filter='(sig-network,netCustomBindingPlugins)'
-    # SR-IOV tests runs on dedicated lane (matching the pattern: *kind-sriov*)
-    add_to_label_filter "(!SRIOV)" "&&"
+    if [[ ! $JOB_NAME =~ ^(pull|periodic)-kubevirt-e2e-${SRIOV_TEST_LANE}-sig-network$ ]]; then
+      add_to_label_filter "(!SRIOV)" "&&"
+    fi
     if [[ $KUBEVIRT_WITH_DYN_NET_CTRL == "true" ]]; then
       add_to_label_filter "(!migration-based-hotplug-NICs)" "&&"
     else
       add_to_label_filter "(!in-place-hotplug-NICs)" "&&"
+    fi
+    if [[ $SKIP_SMOKE == "true" ]]; then
+      add_to_label_filter "(!(${NETWORK_SMOKE_LABELS}))" "&&"
     fi
   elif [[ $TARGET =~ sig-storage ]]; then
     label_filter='(sig-storage)'
@@ -595,10 +607,6 @@ if [[ -z ${KUBEVIRT_E2E_FOCUS} && -z ${KUBEVIRT_E2E_SKIP} && -z ${label_filter} 
     else
       label_filter='(sig-operator)'
     fi
-  elif [[ $TARGET =~ sriov.* ]]; then
-    label_filter='(SRIOV)'
-  elif [[ $TARGET =~ emulated-igb ]]; then
-    label_filter='(SRIOV)'
   elif [[ $TARGET =~ gpu.* ]]; then
     label_filter='(GPU)'
   else
@@ -674,6 +682,13 @@ fi
 
 if [[ -z "$KUBEVIRT_SWAP_ON" || "$KUBEVIRT_SWAP_ON" == "false" ]]; then
   add_to_label_filter '(!SwapTest)' '&&'
+fi
+
+# VSOCK namespace confinement needs nodes with net.vsock.child_ns_mode set to local.
+if [[ "${KUBEVIRT_VSOCK_CHILD_NS_MODE:-}" == "local" ]]; then
+  add_to_label_filter '(!RequiresVSOCKGlobalNamespace)' '&&'
+else
+  add_to_label_filter '(!RequiresVSOCKLocalNamespace)' '&&'
 fi
 
 # OpenShift-specific tests require features not available in KubeVirtCI

@@ -463,10 +463,6 @@ var _ = Describe("Apply Apps", func() {
 				currentDs := daemonSet.DeepCopy()
 				addCustomTargetDeployment(kv, currentDs)
 				currentDs.Status = daemonSet.Status
-				currentDs.Spec.Template.Spec.Containers[0].Args = append(currentDs.Spec.Template.Spec.Containers[0].Args,
-					"--migration-cn-types",
-				)
-				unattachCertificateSecret(&currentDs.Spec.Template.Spec, components.VirtHandlerCertSecretName)
 
 				mockDSCacheStore.get = daemonSet
 				SetGeneration(&kv.Status.Generations, currentDs)
@@ -729,10 +725,6 @@ var _ = Describe("Apply Apps", func() {
 						currentDs.Spec.UpdateStrategy.RollingUpdate = &appsv1.RollingUpdateDaemonSet{
 							MaxUnavailable: &maxUnavailable,
 						}
-						currentDs.Spec.Template.Spec.Containers[0].Args = append(currentDs.Spec.Template.Spec.Containers[0].Args,
-							"--migration-cn-types",
-						)
-						unattachCertificateSecret(&currentDs.Spec.Template.Spec, components.VirtHandlerCertSecretName)
 						return currentDs, newDs
 					},
 					func(kv *v1.KubeVirt, daemonSet *appsv1.DaemonSet) {
@@ -743,57 +735,6 @@ var _ = Describe("Apply Apps", func() {
 						Expect(rollingUpdate.MaxUnavailable.IntValue()).To(Equal(1))
 					},
 					successful, true, false, true, false,
-				),
-
-				Entry("should unattach secret before complete rollout",
-					func(kv *v1.KubeVirt, currentDs *appsv1.DaemonSet) (*appsv1.DaemonSet, *appsv1.DaemonSet) {
-						maxUnavailable := intstr.FromInt(1)
-						currentDs.Spec.UpdateStrategy.RollingUpdate = &appsv1.RollingUpdateDaemonSet{
-							MaxUnavailable: &maxUnavailable,
-						}
-						newDs := daemonSet.DeepCopy()
-						addCustomTargetDeployment(kv, newDs)
-						addCustomTargetDeployment(kv, currentDs)
-						markHandlerReady(daemonSet)
-
-						currentDs.Spec.Template.Spec.Containers[0].Args = append(currentDs.Spec.Template.Spec.Containers[0].Args,
-							"--migration-cn-types",
-						)
-						return currentDs, newDs
-					},
-					func(kv *v1.KubeVirt, daemonSet *appsv1.DaemonSet) {
-						Expect(util.DaemonSetIsUpToDate(kv, daemonSet)).To(BeTrue())
-						rollingUpdate := daemonSet.Spec.UpdateStrategy.RollingUpdate
-						Expect(rollingUpdate).ToNot(BeNil())
-						Expect(rollingUpdate.MaxUnavailable).ToNot(BeNil())
-						Expect(rollingUpdate.MaxUnavailable.IntValue()).To(Equal(1))
-						hasCertificateSecret(&daemonSet.Spec.Template.Spec, components.VirtHandlerCertSecretName)
-					},
-					waiting, false, false, true, false,
-				),
-				Entry("should switch to tls rollout",
-					func(kv *v1.KubeVirt, currentDs *appsv1.DaemonSet) (*appsv1.DaemonSet, *appsv1.DaemonSet) {
-						maxUnavailable := intstr.FromInt(1)
-						currentDs.Spec.UpdateStrategy.RollingUpdate = &appsv1.RollingUpdateDaemonSet{
-							MaxUnavailable: &maxUnavailable,
-						}
-						newDs := daemonSet.DeepCopy()
-						addCustomTargetDeployment(kv, newDs)
-						addCustomTargetDeployment(kv, currentDs)
-						markHandlerReady(daemonSet)
-						currentDs.Status = daemonSet.Status
-
-						return currentDs, newDs
-					},
-					func(kv *v1.KubeVirt, daemonSet *appsv1.DaemonSet) {
-						Expect(util.DaemonSetIsUpToDate(kv, daemonSet)).To(BeTrue())
-						rollingUpdate := daemonSet.Spec.UpdateStrategy.RollingUpdate
-						Expect(rollingUpdate).ToNot(BeNil())
-						Expect(rollingUpdate.MaxUnavailable).ToNot(BeNil())
-						Expect(rollingUpdate.MaxUnavailable.IntValue()).To(Equal(1))
-						Expect(daemonSet.Spec.Template.Spec.Containers[0].Args).To(ContainElements("--migration-cn-types", "migration"))
-					},
-					waiting, false, false, true, false,
 				),
 			)
 		})
@@ -1470,6 +1411,90 @@ var _ = Describe("Apply Apps", func() {
 				Expect(args).NotTo(ContainElement(tlsCipherSuitesArg))
 				Expect(args).NotTo(ContainElement(tlsMinVersionArg))
 			})
+		})
+
+		It("should use SynchronizationPlacement without infra control-plane affinity", func() {
+			syncConfig := &util.KubeVirtDeploymentConfig{
+				Registry:        Registry,
+				KubeVirtVersion: Version,
+				Namespace:       Namespace,
+			}
+			// Generation must not bake in control-plane placement.
+			syncDeployment := components.NewSynchronizationControllerDeployment(syncConfig, "", "", "")
+			Expect(syncDeployment).ToNot(BeNil())
+			Expect(syncDeployment.Spec.Template.Spec.NodeSelector).To(BeNil())
+			Expect(syncDeployment.Spec.Template.Spec.Affinity).ToNot(BeNil())
+			Expect(syncDeployment.Spec.Template.Spec.Affinity.NodeAffinity).To(BeNil())
+			Expect(syncDeployment.Spec.Template.Spec.Affinity.PodAntiAffinity).ToNot(BeNil())
+
+			kv.Spec.SynchronizationPlacement = &v1.ComponentConfig{
+				NodePlacement: &v1.NodePlacement{
+					NodeSelector: map[string]string{
+						"node-role.kubernetes.io/worker": "",
+					},
+				},
+			}
+			kv.Spec.Infra = nil
+
+			injectDeploymentPlacement(kv, syncDeployment)
+			Expect(syncDeployment.Spec.Template.Spec.NodeSelector).To(HaveKey("node-role.kubernetes.io/worker"))
+			Expect(syncDeployment.Spec.Template.Spec.Affinity).ToNot(BeNil())
+			Expect(syncDeployment.Spec.Template.Spec.Affinity.NodeAffinity).To(BeNil())
+			for _, tol := range syncDeployment.Spec.Template.Spec.Tolerations {
+				Expect(tol.Key).NotTo(Equal("node-role.kubernetes.io/control-plane"))
+				Expect(tol.Key).NotTo(Equal("node-role.kubernetes.io/master"))
+			}
+		})
+
+		It("should use Infra placement without default control-plane affinity when SynchronizationPlacement is unset", func() {
+			syncConfig := &util.KubeVirtDeploymentConfig{
+				Registry:        Registry,
+				KubeVirtVersion: Version,
+				Namespace:       Namespace,
+			}
+			// Generation must not bake in control-plane placement; otherwise Infra
+			// worker selectors would stack on required control-plane affinity.
+			syncDeployment := components.NewSynchronizationControllerDeployment(syncConfig, "", "", "")
+			Expect(syncDeployment).ToNot(BeNil())
+			Expect(syncDeployment.Spec.Template.Spec.Affinity).ToNot(BeNil())
+			Expect(syncDeployment.Spec.Template.Spec.Affinity.NodeAffinity).To(BeNil())
+
+			kv.Spec.SynchronizationPlacement = nil
+			kv.Spec.Infra = &v1.ComponentConfig{
+				NodePlacement: &v1.NodePlacement{
+					NodeSelector: map[string]string{
+						"node-role.kubernetes.io/worker": "",
+					},
+				},
+			}
+
+			injectDeploymentPlacement(kv, syncDeployment)
+			Expect(syncDeployment.Spec.Template.Spec.NodeSelector).To(HaveKey("node-role.kubernetes.io/worker"))
+			Expect(syncDeployment.Spec.Template.Spec.Affinity).ToNot(BeNil())
+			Expect(syncDeployment.Spec.Template.Spec.Affinity.NodeAffinity).To(BeNil())
+			for _, tol := range syncDeployment.Spec.Template.Spec.Tolerations {
+				Expect(tol.Key).NotTo(Equal("node-role.kubernetes.io/control-plane"))
+				Expect(tol.Key).NotTo(Equal("node-role.kubernetes.io/master"))
+			}
+		})
+
+		It("should apply default control-plane placement when SynchronizationPlacement and Infra are unset", func() {
+			syncConfig := &util.KubeVirtDeploymentConfig{
+				Registry:        Registry,
+				KubeVirtVersion: Version,
+				Namespace:       Namespace,
+			}
+			syncDeployment := components.NewSynchronizationControllerDeployment(syncConfig, "", "", "")
+			Expect(syncDeployment.Spec.Template.Spec.Affinity).ToNot(BeNil())
+			Expect(syncDeployment.Spec.Template.Spec.Affinity.NodeAffinity).To(BeNil())
+
+			kv.Spec.SynchronizationPlacement = nil
+			kv.Spec.Infra = nil
+
+			injectDeploymentPlacement(kv, syncDeployment)
+			Expect(syncDeployment.Spec.Template.Spec.Affinity).ToNot(BeNil())
+			Expect(syncDeployment.Spec.Template.Spec.Affinity.NodeAffinity).ToNot(BeNil())
+			Expect(syncDeployment.Spec.Template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution).ToNot(BeNil())
 		})
 	})
 })

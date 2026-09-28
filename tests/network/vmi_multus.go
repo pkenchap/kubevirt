@@ -47,7 +47,6 @@ import (
 	"kubevirt.io/kubevirt/tests/console"
 	"kubevirt.io/kubevirt/tests/libnet"
 	"kubevirt.io/kubevirt/tests/libnet/cloudinit"
-	"kubevirt.io/kubevirt/tests/libnode"
 	"kubevirt.io/kubevirt/tests/libpod"
 	"kubevirt.io/kubevirt/tests/libvmifact"
 	"kubevirt.io/kubevirt/tests/libwait"
@@ -102,10 +101,8 @@ var _ = Describe(SIG("Multus", Serial, decorators.Multus, func() {
 	var err error
 	var virtClient kubecli.KubevirtClient
 
-	var nodes *k8sv1.NodeList
-
-	linuxBridgeInterface := libvmi.NewInterface(linuxBridgeIfaceName, libvmi.WithBridgeBinding())
-	linuxBridgeInterfaceWithIPAM := libvmi.NewInterface(linuxBridgeWithIPAMIfaceName, libvmi.WithBridgeBinding())
+	linuxBridgeInterface := libvmi.InterfaceDeviceWithBridgeBinding(linuxBridgeIfaceName)
+	linuxBridgeInterfaceWithIPAM := libvmi.InterfaceDeviceWithBridgeBinding(linuxBridgeWithIPAMIfaceName)
 
 	linuxBridgeNetwork := v1.Network{
 		Name: linuxBridgeIfaceName,
@@ -127,9 +124,6 @@ var _ = Describe(SIG("Multus", Serial, decorators.Multus, func() {
 
 	BeforeEach(func() {
 		virtClient = kubevirt.Client()
-
-		nodes = libnode.GetAllSchedulableNodes(virtClient)
-		Expect(nodes.Items).NotTo(BeEmpty())
 
 		const vlanID100 = 100
 		Expect(createBridgeNetworkAttachmentDefinition(testsuite.GetTestNamespace(nil), linuxBridgeVlan100Network,
@@ -380,7 +374,7 @@ var _ = Describe(SIG("Multus", Serial, decorators.Multus, func() {
 					libvmi.WithInterface(linuxBridgeInterface),
 					libvmi.WithNetwork(&linuxBridgeNetwork),
 					libvmi.WithCloudInitNoCloud(libvmici.WithNoCloudNetworkData(networkData)),
-					libvmi.WithNodeAffinityFor(nodes.Items[0].Name),
+					withCoLocationAffinity("custom-mac"),
 				)
 				vmiTwo, err = virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmiTwo)).Create(context.Background(), vmiTwo, metav1.CreateOptions{})
 				Expect(err).ToNot(HaveOccurred())
@@ -407,7 +401,7 @@ var _ = Describe(SIG("Multus", Serial, decorators.Multus, func() {
 					libvmi.WithInterface(linuxBridgeInterfaceWithCustomMac),
 					libvmi.WithNetwork(&linuxBridgeNetwork),
 					libvmi.WithCloudInitNoCloud(libvmici.WithNoCloudNetworkData(networkData)),
-					libvmi.WithNodeAffinityFor(nodes.Items[0].Name),
+					withCoLocationAffinity("custom-mac"),
 				)
 
 				vmi, err = virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).Create(context.Background(), vmi, metav1.CreateOptions{})
@@ -535,13 +529,9 @@ var _ = Describe(SIG("Multus", Serial, decorators.Multus, func() {
 						bridgeSubnetMask     = "/24"
 					)
 
-					initialMacAddress, err := libnet.GenerateRandomMac()
-					Expect(err).NotTo(HaveOccurred())
-					initialMacAddressStr := initialMacAddress.String()
+					initialMacAddressStr := libnet.GenerateRandomMac().String()
 
-					spoofedMacAddress, err := libnet.GenerateRandomMac()
-					Expect(err).NotTo(HaveOccurred())
-					spoofedMacAddressStr := spoofedMacAddress.String()
+					spoofedMacAddressStr := libnet.GenerateRandomMac().String()
 
 					By("Creating a VM with custom MAC address on its Linux bridge CNI interface.")
 					linuxBridgeInterfaceWithCustomMac := libvmi.NewInterface(
@@ -559,7 +549,7 @@ var _ = Describe(SIG("Multus", Serial, decorators.Multus, func() {
 						libvmi.WithInterface(linuxBridgeInterfaceWithCustomMac),
 						libvmi.WithNetwork(libvmi.MultusNetwork(linuxBridgeWithMACSpoofCheckNetwork, linuxBridgeWithMACSpoofCheckNetwork)),
 						libvmi.WithCloudInitNoCloud(libvmici.WithNoCloudNetworkData(networkData)),
-						libvmi.WithNodeAffinityFor(nodes.Items[0].Name),
+						withCoLocationAffinity("mac-spoof-check"),
 					)
 					vmiUnderTest, err = virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(vmiUnderTest)).Create(context.Background(), vmiUnderTest, metav1.CreateOptions{})
 					ExpectWithOffset(1, err).ToNot(HaveOccurred())
@@ -577,7 +567,7 @@ var _ = Describe(SIG("Multus", Serial, decorators.Multus, func() {
 							linuxBridgeWithMACSpoofCheckNetwork, libvmi.WithBridgeBinding())),
 						libvmi.WithNetwork(libvmi.MultusNetwork(linuxBridgeWithMACSpoofCheckNetwork, linuxBridgeWithMACSpoofCheckNetwork)),
 						libvmi.WithCloudInitNoCloud(libvmici.WithNoCloudNetworkData(targetNetworkData)),
-						libvmi.WithNodeAffinityFor(nodes.Items[0].Name),
+						withCoLocationAffinity("mac-spoof-check"),
 					)
 					targetVmi, err = virtClient.VirtualMachineInstance(testsuite.GetTestNamespace(targetVmi)).Create(context.Background(), targetVmi, metav1.CreateOptions{})
 					ExpectWithOffset(1, err).ToNot(HaveOccurred())
@@ -704,18 +694,19 @@ func configureAlpineInterfaceIP(vmi *v1.VirtualMachineInstance, ifaceName, stati
 }
 
 func activateDHCPOnVMInterfaces(vmi *v1.VirtualMachineInstance, ifacesNames ...string) error {
-	interfacesConfig := "auto lo\\niface lo inet loopback\\n\\n"
+	var interfacesConfig strings.Builder
+	interfacesConfig.WriteString("auto lo\\niface lo inet loopback\\n\\n")
 
 	for idx := range ifacesNames {
-		interfacesConfig += fmt.Sprintf("auto %s\\niface %s inet dhcp\\nhostname localhost\\n\\n",
+		interfacesConfig.WriteString(fmt.Sprintf("auto %s\\niface %s inet dhcp\\nhostname localhost\\n\\n",
 			ifacesNames[idx],
-			ifacesNames[idx])
+			ifacesNames[idx]))
 	}
 
 	return console.SafeExpectBatch(vmi, []expect.Batcher{
 		&expect.BSnd{S: "\n"},
 		&expect.BExp{R: ""},
-		&expect.BSnd{S: "echo $'" + interfacesConfig + "' > /etc/network/interfaces\n"},
+		&expect.BSnd{S: "echo $'" + interfacesConfig.String() + "' > /etc/network/interfaces\n"},
 		&expect.BExp{R: ""},
 		&expect.BSnd{S: "/etc/init.d/networking restart\n"},
 		&expect.BExp{R: ""},
@@ -750,7 +741,7 @@ func createPtpNetworkAttachmentDefinition(namespace, networkName, subnet string)
 	ipam := map[string]string{"type": "host-local", "subnet": subnet}
 	netAttachDef := libnet.NewNetAttachDef(
 		networkName,
-		libnet.NewNetConfig("mynet", libnet.NewNetPluginConfig(pluginType, map[string]interface{}{"ipam": ipam})),
+		libnet.NewNetConfig("mynet", libnet.NewNetPluginConfig(pluginType, map[string]any{"ipam": ipam})),
 	)
 	_, err := libnet.CreateNetAttachDef(context.Background(), namespace, netAttachDef)
 	return err

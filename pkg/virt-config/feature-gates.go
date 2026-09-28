@@ -51,6 +51,10 @@ func (config *ClusterConfig) LiveMigrationEnabled() bool {
 	return config.isFeatureGateEnabled(featuregate.LiveMigrationGate)
 }
 
+func (config *ClusterConfig) CrossClusterMigrationProxyEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.CrossClusterMigrationProxy)
+}
+
 func (config *ClusterConfig) UtilityVolumesEnabled() bool {
 	return config.isFeatureGateEnabled(featuregate.UtilityVolumesGate)
 }
@@ -115,10 +119,6 @@ func (config *ClusterConfig) VSOCKEnabled() bool {
 	return config.isFeatureGateEnabled(featuregate.VSOCKGate)
 }
 
-func (config *ClusterConfig) KubevirtSeccompProfileEnabled() bool {
-	return config.isFeatureGateEnabled(featuregate.KubevirtSeccompProfile)
-}
-
 func (config *ClusterConfig) MultiArchitectureEnabled() bool {
 	return config.isFeatureGateEnabled(featuregate.MultiArchitecture)
 }
@@ -133,10 +133,6 @@ func (config *ClusterConfig) AlignCPUsEnabled() bool {
 
 func (config *ClusterConfig) ImageVolumeEnabled() bool {
 	return config.isFeatureGateEnabled(featuregate.ImageVolume)
-}
-
-func (config *ClusterConfig) LibvirtHooksServerAndClientEnabled() bool {
-	return config.isFeatureGateEnabled(featuregate.LibvirtHooksServerAndClient)
 }
 
 func (config *ClusterConfig) NodeRestrictionEnabled() bool {
@@ -193,14 +189,6 @@ func (config *ClusterConfig) IncrementalBackupEnabled() bool {
 	return config.isFeatureGateEnabled(featuregate.IncrementalBackupGate)
 }
 
-func (config *ClusterConfig) PodSecondaryInterfaceNamingUpgradeEnabled() bool {
-	return config.isFeatureGateEnabled(featuregate.PodSecondaryInterfaceNamingUpgrade)
-}
-
-func (config *ClusterConfig) ExternalNetResourceInjectionEnabled() bool {
-	return config.isFeatureGateEnabled(featuregate.ExternalNetResourceInjection)
-}
-
 func (config *ClusterConfig) RebootPolicyEnabled() bool {
 	return config.isFeatureGateEnabled(featuregate.RebootPolicy)
 }
@@ -251,4 +239,8 @@ func (config *ClusterConfig) FirmwareAutoSelectionEnabled() bool {
 
 func (config *ClusterConfig) MigrationStallDetectionEnabled() bool {
 	return config.isFeatureGateEnabled(featuregate.MigrationStallDetection)
+}
+
+func (config *ClusterConfig) MigrationDowntimeTuningEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.MigrationDowntimeTuning)
 }

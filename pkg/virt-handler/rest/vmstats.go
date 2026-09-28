@@ -214,6 +214,12 @@ func buildVMStatsRequestFromQuery(request *restful.Request) *cmdv1.VMStatsReques
 	if query.Get("guestGetMemoryBlocks") == "true" {
 		req.GuestGetMemoryBlocks = &cmdv1.AgentMemoryBlocksRequest{}
 	}
+	if query.Get("guestGetFsInfo") == "true" {
+		req.GuestGetFsInfo = &cmdv1.AgentFsInfoRequest{}
+	}
+	if query.Get("guestGetDevices") == "true" {
+		req.GuestGetDevices = &cmdv1.AgentDevicesRequest{}
+	}
 
 	return req
 }

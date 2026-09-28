@@ -50,13 +50,6 @@ var _ = Describe(SIG(" SRIOV nic-hotplug", Serial, decorators.SRIOV, func() {
 	sriovResourceName := readSRIOVResourceName()
 
 	BeforeEach(func() {
-		// Check if the hardware supports SRIOV
-		Expect(validateSRIOVSetup(sriovResourceName, 1)).To(Succeed(),
-			"Sriov is not enabled in this environment: %v. Skip these tests using - export FUNC_TEST_ARGS='--label-filter=!SRIOV'")
-
-	})
-
-	BeforeEach(func() {
 		virtClient := kubevirt.Client()
 		updateStrategy := &v1.KubeVirtWorkloadUpdateStrategy{
 			WorkloadUpdateMethods: []v1.WorkloadUpdateMethod{v1.WorkloadUpdateMethodLiveMigrate},
@@ -166,10 +159,7 @@ func createSRIOVNetworkAttachmentDefinition(namespace, networkName, sriovResourc
 }
 
 func addSRIOVInterface(vm *v1.VirtualMachine, name, netAttachDefName string) error {
-	mac, err := libnet.GenerateRandomMac()
-	if err != nil {
-		return err
-	}
+	mac := libnet.GenerateRandomMac()
 	newNetwork := *libvmi.MultusNetwork(name, netAttachDefName)
 	newIface := libvmi.NewInterface(name, libvmi.WithSRIOVBinding(), libvmi.WithMac(mac.String()))
 	return libnet.PatchVMWithNewInterface(vm, newNetwork, newIface)

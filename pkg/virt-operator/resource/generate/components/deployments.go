@@ -219,14 +219,21 @@ func attachProfileVolume(spec *corev1.PodSpec) {
 
 }
 
+func attachOptionalCertificateSecret(spec *corev1.PodSpec, secretName string, mountPath string) {
+	attachCertificateSecretWithOptions(spec, secretName, mountPath, true)
+}
+
 func attachCertificateSecret(spec *corev1.PodSpec, secretName string, mountPath string) {
-	True := true
+	attachCertificateSecretWithOptions(spec, secretName, mountPath, false)
+}
+
+func attachCertificateSecretWithOptions(spec *corev1.PodSpec, secretName string, mountPath string, optional bool) {
 	secretVolume := corev1.Volume{
 		Name: secretName,
 		VolumeSource: corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{
 				SecretName: secretName,
-				Optional:   &True,
+				Optional:   &optional,
 			},
 		},
 	}
@@ -656,7 +663,7 @@ func NewOperatorDeployment(namespace, repository, imagePrefix, version, verbosit
 		deployment.Spec.Template.Spec.Containers[0].Env = append(deployment.Spec.Template.Spec.Containers[0].Env, envVars...)
 	}
 
-	attachCertificateSecret(&deployment.Spec.Template.Spec, VirtOperatorCertSecretName, "/etc/virt-operator/certificates")
+	attachOptionalCertificateSecret(&deployment.Spec.Template.Spec, VirtOperatorCertSecretName, "/etc/virt-operator/certificates")
 	attachProfileVolume(&deployment.Spec.Template.Spec)
 	placement.InjectPlacementMetadata(nil, &deployment.Spec.Template.Spec, placement.RequireControlPlanePreferNonWorker)
 
@@ -763,8 +770,6 @@ func NewSynchronizationControllerDeployment(config *operatorutil.KubeVirtDeploym
 	if deployment.Spec.Template.Annotations == nil {
 		deployment.Spec.Template.Annotations = make(map[string]string)
 	}
-	// remove the prometheus label key, so prometheus doesn't try to scrape anything of the synchronization controller.
-	delete(deployment.Spec.Template.Labels, prometheusLabelKey)
 	deployment.Spec.Template.Annotations["openshift.io/required-scc"] = "restricted-v2"
 	migrationNetwork := config.GetMigrationNetwork()
 	if migrationNetwork != nil {
@@ -772,8 +777,27 @@ func NewSynchronizationControllerDeployment(config *operatorutil.KubeVirtDeploym
 		deployment.Spec.Template.ObjectMeta.Annotations[networkv1.NetworkAttachmentAnnot] = *migrationNetwork + "@" + virtv1.MigrationInterfaceName
 	}
 
+	// Add cross-cluster network if configured
+	crossClusterNetwork := config.GetCrossClusterMigrationNetwork()
+	if crossClusterNetwork != nil {
+		existing := deployment.Spec.Template.ObjectMeta.Annotations[networkv1.NetworkAttachmentAnnot]
+		if existing != "" {
+			// Append cross-cluster network with interface name CrossClusterMigrationInterfaceName
+			deployment.Spec.Template.ObjectMeta.Annotations[networkv1.NetworkAttachmentAnnot] =
+				existing + "," + *crossClusterNetwork + "@" + virtv1.CrossClusterMigrationInterfaceName
+		} else {
+			deployment.Spec.Template.ObjectMeta.Annotations[networkv1.NetworkAttachmentAnnot] =
+				*crossClusterNetwork + "@" + virtv1.CrossClusterMigrationInterfaceName
+		}
+	}
+
 	attachCertificateSecret(&deployment.Spec.Template.Spec, VirtSynchronizationControllerCertSecretName, "/etc/virt-sync-controller/clientcertificates")
 	attachCertificateSecret(&deployment.Spec.Template.Spec, VirtSynchronizationControllerServerCertSecretName, "/etc/virt-sync-controller/servercertificates")
+	// Migration proxy TLS termination:
+	// - migration client cert: dial target virt-handler (CN=client:migration)
+	// - virt-handler server cert: accept source virt-handler TLS (CN=node:virt-handler)
+	attachCertificateSecret(&deployment.Spec.Template.Spec, VirtHandlerMigrationClientCertSecretName, "/etc/virt-handler/migrationclientcertificates")
+	attachCertificateSecret(&deployment.Spec.Template.Spec, VirtHandlerServerCertSecretName, "/etc/virt-handler/migrationservercertificates")
 	attachProfileVolume(&deployment.Spec.Template.Spec)
 
 	pod := &deployment.Spec.Template.Spec
@@ -837,6 +861,11 @@ func NewSynchronizationControllerDeployment(config *operatorutil.KubeVirtDeploym
 		},
 		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 	}
+
+	// Node placement is applied once during reconciliation (SynchronizationPlacement,
+	// Infra, or the default control-plane placement). Applying it here as well would
+	// leave default control-plane affinity on the generated pod when placement later
+	// comes from Infra, making the pod require both worker and control-plane labels.
 
 	return deployment
 }

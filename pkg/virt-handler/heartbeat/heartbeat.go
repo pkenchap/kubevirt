@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -53,9 +54,10 @@ type HeartBeat struct {
 	devicePluginWaitTimeout   time.Duration
 }
 
-func NewHeartBeat(clientset k8scli.CoreV1Interface, deviceManager device_manager.DeviceControllerInterface, clusterConfig *virtconfig.ClusterConfig, host string) *HeartBeat {
+func NewHeartBeat(clientset k8scli.CoreV1Interface, deviceManager device_manager.DeviceControllerInterface, clusterConfig *virtconfig.ClusterConfig, host string, kubeletRoot string) *HeartBeat {
 	const cpuManagerOS3Path = virtutil.HostRootMount + "var/lib/origin/openshift.local.volumes/cpu_manager_state"
-	const cpuManagerPath = virtutil.KubeletRoot + "/cpu_manager_state"
+	// #nosec G304 cpuManagerPath is resolved at construction time from the --kubelet-root flag
+	cpuManagerPath := filepath.Join(kubeletRoot, "cpu_manager_state")
 	return &HeartBeat{
 		clientset:               clientset,
 		deviceManagerController: deviceManager,
@@ -105,12 +107,11 @@ func (h *HeartBeat) labelNodeUnschedulable() {
 		}
 
 		cpuManagerEnabled := h.clusterConfig.CPUManagerEnabled() && h.isCPUManagerEnabled(h.cpuManagerPaths)
-		data := []byte(fmt.Sprintf(`{"metadata": { "labels": {"%s": "%s", "%s": "%t", "%s": "%t"}, "annotations": {"%s": %s}}}`,
+		data := fmt.Appendf(nil, `{"metadata": { "labels": {"%s": "%s", "%s": "%t"}, "annotations": {"%s": %s}}}`,
 			v1.NodeSchedulable, "false",
-			v1.DeprecatedCPUManager, cpuManagerEnabled,
 			v1.CPUManager, cpuManagerEnabled,
 			v1.VirtHandlerHeartbeat, string(now),
-		))
+		)
 		_, err = h.clientset.Nodes().Patch(context.Background(), h.host, types.StrategicMergePatchType, data, metav1.PatchOptions{})
 		if err != nil {
 			log.DefaultLogger().Reason(err).Errorf("Can't patch node %s", h.host)
@@ -157,12 +158,11 @@ func (h *HeartBeat) do() {
 		cpuManagerEnabled = h.isCPUManagerEnabled(h.cpuManagerPaths)
 	}
 
-	data = []byte(fmt.Sprintf(`{"metadata": { "labels": {"%s": "%s", "%s": "%t", "%s": "%t"}, "annotations": {"%s": %s}}}`,
+	data = fmt.Appendf(nil, `{"metadata": { "labels": {"%s": "%s", "%s": "%t"}, "annotations": {"%s": %s}}}`,
 		v1.NodeSchedulable, kubevirtSchedulable,
-		v1.DeprecatedCPUManager, cpuManagerEnabled,
 		v1.CPUManager, cpuManagerEnabled,
 		v1.VirtHandlerHeartbeat, string(now),
-	))
+	)
 	_, err = h.clientset.Nodes().Patch(context.Background(), h.host, types.StrategicMergePatchType, data, metav1.PatchOptions{})
 	if err != nil {
 		log.DefaultLogger().Reason(err).Errorf("Can't patch node %s", h.host)
@@ -181,7 +181,7 @@ func (h *HeartBeat) do() {
 }
 
 func (h *HeartBeat) isCPUManagerEnabled(cpuManagerPaths []string) bool {
-	var cpuManagerOptions map[string]interface{}
+	var cpuManagerOptions map[string]any
 	cpuManagerPath, err := detectCPUManagerFile(cpuManagerPaths)
 	if err != nil {
 		log.DefaultLogger().Reason(err).Errorf(failedSetCPUManagerLabelFmt, h.host)

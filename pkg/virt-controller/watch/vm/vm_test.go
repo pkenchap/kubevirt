@@ -25,6 +25,7 @@ import (
 	"k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/workqueue"
 
 	v1 "kubevirt.io/api/core/v1"
 	instancetypeapi "kubevirt.io/api/instancetype"
@@ -137,7 +138,9 @@ var _ = Describe("VirtualMachine", func() {
 
 			config, _, kvStore = testutils.NewFakeClusterConfigUsingKVConfig(&v1.KubeVirtConfiguration{})
 
-			controller, _ = NewController(vmiInformer,
+			mockQueue = testutils.NewMockWorkQueue(testutils.NewFrozenClockRateLimitingQueue("virt-controller-vm"))
+			controller, _ = NewController(mockQueue,
+				vmiInformer,
 				vmInformer,
 				dataVolumeInformer,
 				dataSourceInformer,
@@ -154,10 +157,6 @@ var _ = Describe("VirtualMachine", func() {
 				[]string{},
 				[]string{},
 			)
-
-			// Wrap our workqueue to have a way to detect when we are done processing updates
-			mockQueue = testutils.NewMockWorkQueue(controller.Queue)
-			controller.Queue = mockQueue
 
 			// Set up mock client
 			virtClient.EXPECT().VirtualMachineInstance(metav1.NamespaceDefault).Return(
@@ -4410,6 +4409,45 @@ var _ = Describe("VirtualMachine", func() {
 					Entry("PersistentVolumeClaim is in Lost phase", k8sv1.ClaimLost),
 				)
 
+				It("Should NOT set WaitingForVolumeBinding when RerunOnFailure VM was stopped and PVC is unbound", func() {
+					err := virtFakeClient.KubevirtV1().VirtualMachines(vm.Namespace).Delete(context.TODO(), vm.Name, metav1.DeleteOptions{})
+					Expect(err).To(Succeed())
+
+					vm, _ = watchtesting.DefaultVirtualMachine(true)
+					vm.Spec.Running = nil
+					vm.Spec.RunStrategy = pointer.P(v1.RunStrategyRerunOnFailure)
+					vm.Status.RunStrategy = v1.RunStrategyRerunOnFailure
+					vm.Spec.Template.Spec.Volumes = append(vm.Spec.Template.Spec.Volumes, v1.Volume{
+						Name: "test1",
+						VolumeSource: v1.VolumeSource{
+							PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{PersistentVolumeClaimVolumeSource: k8sv1.PersistentVolumeClaimVolumeSource{
+								ClaimName: "pvc1",
+							}},
+						},
+					})
+
+					vm, err = virtFakeClient.KubevirtV1().VirtualMachines(vm.Namespace).Create(context.TODO(), vm, metav1.CreateOptions{})
+					Expect(err).To(Succeed())
+					addVirtualMachine(vm)
+
+					pvc := k8sv1.PersistentVolumeClaim{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "pvc1",
+							Namespace: vm.Namespace,
+						},
+						Status: k8sv1.PersistentVolumeClaimStatus{
+							Phase: k8sv1.ClaimPending,
+						},
+					}
+					Expect(controller.pvcStore.Add(&pvc)).To(Succeed())
+
+					sanityExecute(vm)
+
+					vm, err = virtFakeClient.KubevirtV1().VirtualMachines(vm.Namespace).Get(context.TODO(), vm.Name, metav1.GetOptions{})
+					Expect(err).To(Succeed())
+					Expect(vm.Status.PrintableStatus).To(Equal(v1.VirtualMachineStatusStopped))
+				})
+
 			})
 
 			It("should set a Running status when VMI is running but not paused", func() {
@@ -4635,7 +4673,7 @@ var _ = Describe("VirtualMachine", func() {
 				),
 			)
 
-			DescribeTable("should set an ImagePullBackOff/ErrPullImage statuses according to VMI Synchronized condition", func(reason string) {
+			DescribeTable("should set an ImagePullBackOff/ErrPullImage statuses according to VMI Synchronized condition", func(reason string, expectedStatus v1.VirtualMachinePrintableStatus) {
 				vm, vmi := watchtesting.DefaultVirtualMachine(true)
 				vmi.Status.Phase = v1.Scheduling
 				vmi.Status.Conditions = []v1.VirtualMachineInstanceCondition{
@@ -4655,10 +4693,11 @@ var _ = Describe("VirtualMachine", func() {
 
 				vm, err = virtFakeClient.KubevirtV1().VirtualMachines(vm.Namespace).Get(context.TODO(), vm.Name, metav1.GetOptions{})
 				Expect(err).To(Succeed())
-				Expect(vm.Status.PrintableStatus).To(Equal(v1.VirtualMachinePrintableStatus(reason)))
+				Expect(vm.Status.PrintableStatus).To(Equal(expectedStatus))
 			},
-				Entry("Reason: ErrImagePull", virtcontroller.ErrImagePullReason),
-				Entry("Reason: ImagePullBackOff", virtcontroller.ImagePullBackOffReason),
+				Entry("Reason: ErrImagePull", virtcontroller.ErrImagePullReason, v1.VirtualMachineStatusErrImagePull),
+				Entry("Reason: ImagePullBackOff", virtcontroller.ImagePullBackOffReason, v1.VirtualMachineStatusImagePullBackOff),
+				Entry("Reason: InvalidImageName", virtcontroller.InvalidImageNameReason, v1.VirtualMachineStatusErrImagePull),
 			)
 		})
 
@@ -6101,6 +6140,72 @@ var _ = Describe("VirtualMachine", func() {
 					Expect(cond.Message).To(ContainSubstring("invalid volumes to update with migration:"))
 				})
 
+				migVols := func(src, dst string) []v1.StorageMigratedVolumeInfo {
+					return []v1.StorageMigratedVolumeInfo{{
+						VolumeName:         diskName,
+						SourcePVCInfo:      &v1.PersistentVolumeClaimInfo{ClaimName: src},
+						DestinationPVCInfo: &v1.PersistentVolumeClaimInfo{ClaimName: dst},
+					}}
+				}
+				migState := func(src, dst string) *v1.VolumeMigrationState {
+					return &v1.VolumeMigrationState{MigratedVolumes: migVols(src, dst)}
+				}
+				volUpdateState := func(src, dst string) *v1.VolumeUpdateState {
+					return &v1.VolumeUpdateState{VolumeMigrationState: migState(src, dst)}
+				}
+
+				DescribeTable("should handle migratedVolumes propagation from VMI to VM", func(
+					volClaim string,
+					vmiMigratedVols []v1.StorageMigratedVolumeInfo,
+					vmVolumeUpdateState *v1.VolumeUpdateState,
+					expectedVolumeMigrationState *v1.VolumeMigrationState,
+				) {
+					testutils.UpdateFakeKubeVirtClusterConfig(kvStore, &v1.KubeVirt{
+						Spec: v1.KubeVirtSpec{
+							Configuration: v1.KubeVirtConfiguration{
+								VMRolloutStrategy: &liveUpdate,
+							},
+						},
+					})
+
+					vmi := libvmi.New(libvmi.WithNamespace(ns), libvmi.WithDataVolume(diskName, volClaim))
+					vm := libvmi.NewVirtualMachine(
+						libvmi.New(libvmi.WithNamespace(ns), libvmi.WithDataVolume(diskName, volClaim)),
+						libvmi.WithUpdateVolumeStrategy(v1.UpdateVolumesStrategyMigration),
+					)
+
+					vmi.Status.MigratedVolumes = vmiMigratedVols
+					vm.Status.VolumeUpdateState = vmVolumeUpdateState
+
+					controller.handleVolumeUpdateRequest(vm, vmi)
+
+					if expectedVolumeMigrationState == nil {
+						if vm.Status.VolumeUpdateState == nil {
+							return
+						}
+						Expect(vm.Status.VolumeUpdateState.VolumeMigrationState).To(BeNil())
+					} else {
+						Expect(vm.Status.VolumeUpdateState).ToNot(BeNil())
+						Expect(vm.Status.VolumeUpdateState.VolumeMigrationState).To(Equal(expectedVolumeMigrationState))
+					}
+				},
+					Entry("should propagate when VM status update previously failed",
+						"dv1", migVols("dv0", "dv1"), nil, migState("dv0", "dv1"),
+					),
+					Entry("should not update when VM already has matching migratedVolumes",
+						"dv1", migVols("dv0", "dv1"), volUpdateState("dv0", "dv1"), migState("dv0", "dv1"),
+					),
+					Entry("should not update when VMI has no migratedVolumes",
+						"dv1", nil, nil, nil,
+					),
+					Entry("should not propagate stale migratedVolumes from cancelled migration",
+						"dv0", migVols("dv0", "dv1"), nil, nil,
+					),
+					Entry("should overwrite with new migratedVolumes during chained migration",
+						"dv2", migVols("dv1", "dv2"), volUpdateState("dv0", "dv1"), migState("dv1", "dv2"),
+					),
+				)
+
 				DescribeTable("should return an error", func(setup func() (*v1.VirtualMachineInstance, *v1.VirtualMachine)) {
 					testutils.UpdateFakeKubeVirtClusterConfig(kvStore, &v1.KubeVirt{
 						Spec: v1.KubeVirtSpec{
@@ -6956,7 +7061,65 @@ var _ = Describe("VirtualMachine", func() {
 				Entry("Manual", v1.RunStrategyManual),
 			)
 
-			PIt("The VM should get restarted when doing RerunOnFailure -> Halted -> RerunOnFailure", func() {
+			DescribeTable("shouldStartRerunOnFailure should", func(stateChangeRequests []v1.VirtualMachineStateChangeRequest, statusRunStrategy v1.VirtualMachineRunStrategy, expected bool) {
+				vm, _ := watchtesting.DefaultVirtualMachine(true)
+				vm.Spec.Running = nil
+				vm.Spec.RunStrategy = pointer.P(v1.RunStrategyRerunOnFailure)
+				vm.Status.StateChangeRequests = stateChangeRequests
+				vm.Status.RunStrategy = statusRunStrategy
+
+				result := shouldStartRerunOnFailure(vm, v1.RunStrategyRerunOnFailure)
+				Expect(result).To(Equal(expected))
+			},
+				Entry("return true when VM was never started (empty status RunStrategy)",
+					[]v1.VirtualMachineStateChangeRequest{},
+					v1.VirtualMachineRunStrategy(""),
+					true,
+				),
+				Entry("return false when VM was stopped and status matches spec",
+					[]v1.VirtualMachineStateChangeRequest{},
+					v1.RunStrategyRerunOnFailure,
+					false,
+				),
+				Entry("return true when a StartRequest is present after VMI failure",
+					[]v1.VirtualMachineStateChangeRequest{{Action: v1.StartRequest}},
+					v1.RunStrategyRerunOnFailure,
+					true,
+				),
+				Entry("return true when RunStrategy was changed from Always",
+					[]v1.VirtualMachineStateChangeRequest{},
+					v1.RunStrategyAlways,
+					true,
+				),
+				Entry("return true when RunStrategy was changed from Halted",
+					[]v1.VirtualMachineStateChangeRequest{},
+					v1.RunStrategyHalted,
+					true,
+				),
+				Entry("return true when StartRequest is present and RunStrategy was also changed",
+					[]v1.VirtualMachineStateChangeRequest{{Action: v1.StartRequest}},
+					v1.RunStrategyAlways,
+					true,
+				),
+			)
+
+			It("should not start a RerunOnFailure VM that was manually stopped", func() {
+				vm, _ := watchtesting.DefaultVirtualMachine(true)
+				vm.Spec.Running = nil
+				vm.Spec.RunStrategy = pointer.P(v1.RunStrategyRerunOnFailure)
+				vm.Status.RunStrategy = v1.RunStrategyRerunOnFailure
+
+				vm, err := virtFakeClient.KubevirtV1().VirtualMachines(vm.Namespace).Create(context.TODO(), vm, metav1.CreateOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				addVirtualMachine(vm)
+
+				sanityExecute(vm)
+
+				_, err = virtFakeClient.KubevirtV1().VirtualMachineInstances(vm.Namespace).Get(context.TODO(), vm.Name, metav1.GetOptions{})
+				Expect(err).To(MatchError(k8serrors.IsNotFound, "IsNotFound"))
+			})
+
+			It("The VM should get restarted when doing RerunOnFailure -> Halted -> RerunOnFailure", func() {
 				vm, _ := watchtesting.DefaultVirtualMachine(true)
 				vm.Spec.Running = nil
 				vm.Spec.RunStrategy = pointer.P(v1.RunStrategyRerunOnFailure)
@@ -6966,6 +7129,7 @@ var _ = Describe("VirtualMachine", func() {
 
 				addVirtualMachine(vm)
 				sanityExecute(vm)
+				clearExpectations(vm)
 
 				controller.crIndexer.Add(createVMRevision(vm))
 
@@ -6979,6 +7143,7 @@ var _ = Describe("VirtualMachine", func() {
 				Expect(err).To(Not(HaveOccurred()))
 				controller.Queue.Add(key)
 				sanityExecute(vm)
+				clearExpectations(vm)
 
 				By("Change RunStrategy to Halted")
 				vm.Spec.RunStrategy = pointer.P(v1.RunStrategyHalted)
@@ -6988,13 +7153,18 @@ var _ = Describe("VirtualMachine", func() {
 
 				addVirtualMachine(vm)
 				sanityExecute(vm)
+				clearExpectations(vm)
 
-				controller.crIndexer.Delete(createVMRevision(vm))
+				cr := createVMRevision(vm)
+				controller.crIndexer.Delete(cr)
+				err = k8sClient.AppsV1().ControllerRevisions(vm.Namespace).Delete(context.TODO(), cr.Name, metav1.DeleteOptions{})
+				Expect(err).ToNot(HaveOccurred())
 
 				// let the controller pick up the deletion
 				controller.Queue.Add(key)
 				controller.vmiIndexer.Delete(vmi)
 				sanityExecute(vm)
+				clearExpectations(vm)
 
 				_, err = virtFakeClient.KubevirtV1().VirtualMachineInstances(vm.Namespace).Get(context.TODO(), vm.Name, metav1.GetOptions{})
 				Expect(err).To(MatchError(k8serrors.IsNotFound, "IsNotFound"))
@@ -7007,6 +7177,7 @@ var _ = Describe("VirtualMachine", func() {
 
 				addVirtualMachine(vm)
 				sanityExecute(vm)
+				clearExpectations(vm)
 
 				vmi, err = virtFakeClient.KubevirtV1().VirtualMachineInstances(vm.Namespace).Get(context.TODO(), vm.Name, metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
@@ -7469,6 +7640,10 @@ var _ = Describe("VirtualMachine", func() {
 
 			config, _, _ := testutils.NewFakeClusterConfigUsingKVConfig(&v1.KubeVirtConfiguration{})
 			testController, _ = NewController(
+				workqueue.NewTypedRateLimitingQueueWithConfig(
+					workqueue.DefaultTypedControllerRateLimiter[string](),
+					workqueue.TypedRateLimitingQueueConfig[string]{Name: "virt-controller-vm"},
+				),
 				vmiInformer,
 				vmInformer,
 				dataVolumeInformer,

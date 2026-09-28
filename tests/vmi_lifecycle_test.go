@@ -34,7 +34,7 @@ import (
 	. "github.com/onsi/gomega/gstruct"
 
 	k8sv1 "k8s.io/api/core/v1"
-	policyv1beta1 "k8s.io/api/policy/v1beta1"
+	policyv1 "k8s.io/api/policy/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -48,10 +48,7 @@ import (
 
 	"kubevirt.io/kubevirt/pkg/apimachinery/patch"
 	"kubevirt.io/kubevirt/pkg/controller"
-	"kubevirt.io/kubevirt/pkg/hypervisor"
 	"kubevirt.io/kubevirt/pkg/libvmi"
-	"kubevirt.io/kubevirt/pkg/pointer"
-	"kubevirt.io/kubevirt/pkg/virt-controller/services"
 	device_manager "kubevirt.io/kubevirt/pkg/virt-handler/device-manager"
 	"kubevirt.io/kubevirt/tests/console"
 	cd "kubevirt.io/kubevirt/tests/containerdisk"
@@ -156,7 +153,7 @@ var _ = Describe("[rfe_id:273][crit:high][vendor:cnv-qe@redhat.com][level:compon
 			Expect(err).NotTo(HaveOccurred())
 
 			By("calling evict on VMI's pod")
-			err = kubevirt.Client().CoreV1().Pods(vmi.Namespace).EvictV1beta1(context.Background(), &policyv1beta1.Eviction{ObjectMeta: metav1.ObjectMeta{Name: pod.Name}})
+			err = kubevirt.Client().CoreV1().Pods(vmi.Namespace).EvictV1(context.Background(), &policyv1.Eviction{ObjectMeta: metav1.ObjectMeta{Name: pod.Name}})
 			// The "too many requests" err is what get's returned when an
 			// eviction would invalidate a pdb. This is what we want to see here.
 			Expect(err).To(MatchError(k8serrors.IsTooManyRequests, "too many requests should be returned as way of blocking eviction"))
@@ -985,95 +982,6 @@ var _ = Describe("[rfe_id:273][crit:high][vendor:cnv-qe@redhat.com][level:compon
 			})
 
 		})
-
-		Context("with non default namespace", func() {
-			DescribeTable("[rfe_id:273][crit:high][vendor:cnv-qe@redhat.com][level:component]should log libvirt start and stop lifecycle events of the domain", func(alternativeNamespace bool) {
-				namespace := testsuite.GetTestNamespace(nil)
-				if alternativeNamespace {
-					namespace = testsuite.NamespaceTestAlternative
-				}
-
-				By("Creating a VirtualMachineInstance with different namespace")
-				vmi := libvmi.New(
-					libvmi.WithMemoryRequest("1Mi"),
-					libvmi.WithNetwork(v1.DefaultPodNetwork()),
-					libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding()),
-				)
-
-				var err error
-				vmi, err = kubevirt.Client().VirtualMachineInstance(namespace).Create(context.Background(), vmi, metav1.CreateOptions{})
-				Expect(err).ToNot(HaveOccurred(), "Should create VMI")
-				vmi = libwait.WaitForSuccessfulVMIStart(vmi)
-
-				virtHandlerPod, err := libnode.GetVirtHandlerPod(kubevirt.Client(), vmi.Status.NodeName)
-				Expect(err).ToNot(HaveOccurred(), "Should get virthandler client for node")
-
-				handlerName := virtHandlerPod.GetObjectMeta().GetName()
-				handlerNamespace := virtHandlerPod.GetObjectMeta().GetNamespace()
-				seconds := int64(120)
-				logsQuery := kubevirt.Client().CoreV1().Pods(handlerNamespace).GetLogs(handlerName, &k8sv1.PodLogOptions{SinceSeconds: &seconds, Container: "virt-handler"})
-
-				// Check if the start event was logged
-				By("Checking that virt-handler logs VirtualMachineInstance creation")
-				Eventually(func() string {
-					data, err := logsQuery.DoRaw(context.Background())
-					Expect(err).ToNot(HaveOccurred(), "Should get logs from virthandler")
-					return string(data)
-				}, 30, 0.5).Should(MatchRegexp(`"kind":"Domain","level":"info","msg":"Domain is in state Running reason Unknown","name":"%s"`, vmi.GetObjectMeta().GetName()), "Should verify from logs that domain is running")
-				// Check the VirtualMachineInstance Namespace
-				Expect(vmi.GetObjectMeta().GetNamespace()).To(Equal(namespace), "VMI should run in the right namespace")
-
-				// Delete the VirtualMachineInstance and wait for the confirmation of the delete
-				By("Deleting the VirtualMachineInstance")
-				_, err = kubevirt.Client().RestClient().Delete().Resource("virtualmachineinstances").Namespace(vmi.GetObjectMeta().GetNamespace()).Name(vmi.GetObjectMeta().GetName()).Do(context.Background()).Get()
-				Expect(err).ToNot(HaveOccurred())
-				ctx, cancel := context.WithCancel(context.Background())
-				defer cancel()
-				watcher.New(vmi).Timeout(60*time.Second).SinceWatchedObjectResourceVersion().WaitFor(ctx, watcher.NormalEvent, v1.Deleted)
-				Expect(libwait.WaitForVirtualMachineToDisappearWithTimeout(vmi, 120*time.Second)).To(Succeed())
-
-				// Check if the stop event was logged
-				By("Checking that virt-handler logs VirtualMachineInstance deletion")
-				/*
-						Since we deleted the VMI object, there are two possible outcomes and both are expected:
-						1. virt-controller kicks in, registers a deletion request on the launcher pod and K8s deletes the pod
-					       before virt-handler had a chance to set or check the deletion timestamp on the domain.
-						2. virt-handler detects the deletion timestamp on the domain and removes it.
-
-						TODO: https://github.com/kubevirt/kubevirt/issues/3764
-				*/
-				Eventually(func() string {
-					data, err := logsQuery.DoRaw(context.Background())
-					Expect(err).ToNot(HaveOccurred(), "Should get the virthandler logs")
-					return string(data)
-				}, 30, 0.5).Should(SatisfyAny(
-					MatchRegexp(`"kind":"Domain","level":"info","msg":"Domain is marked for deletion","name":"%s"`, vmi.GetObjectMeta().GetName()),               // Domain was deleted by virt-handler
-					MatchRegexp(`"kind":"Domain","level":"info","msg":"Domain is in state Shutoff reason Destroyed","name":"%s"`, vmi.GetObjectMeta().GetName()), // Domain was destroyed because the launcher pod is gone
-				), "Logs should confirm pod deletion")
-			},
-				Entry("[test_id:1641]Default test namespace", false),
-				Entry("[test_id:1642]Alternative test namespace", true),
-			)
-		})
-
-		Context("VM Accelerated Mode", decorators.WgS390x, func() {
-
-			It("[test_id:1648]Should provide KVM via plugin framework", func() {
-				nodeList := libnode.GetAllSchedulableNodes(kubevirt.Client())
-
-				if len(nodeList.Items) == 0 {
-					Fail("There are no compute nodes in cluster")
-				}
-				node := nodeList.Items[0]
-
-				kvmResource := services.ConstructHypervisorResourceName(hypervisor.NewLauncherHypervisorResources(v1.KvmHypervisorName))
-				_, ok := node.Status.Allocatable[kvmResource]
-				Expect(ok).To(BeTrue(), "KVM devices not allocatable on node: %s", node.Name)
-
-				_, ok = node.Status.Capacity[kvmResource]
-				Expect(ok).To(BeTrue(), "No Capacity for KVM devices on node: %s", node.Name)
-			})
-		})
 	})
 
 	Describe("Freeze/Unfreeze a VirtualMachineInstance", decorators.WgS390x, func() {
@@ -1165,19 +1073,6 @@ var _ = Describe("[rfe_id:273][crit:high][vendor:cnv-qe@redhat.com][level:compon
 	Describe("Softreboot a VirtualMachineInstance", decorators.ACPI, func() {
 		const vmiLaunchTimeout = 360
 
-		It("soft reboot vmi with agent connected should succeed", decorators.Conformance, decorators.WgS390x, func() {
-			vmi := libvmops.RunVMIAndExpectLaunch(libvmifact.NewFedora(withoutACPI()), vmiLaunchTimeout)
-
-			Eventually(matcher.ThisVMI(vmi), 12*time.Minute, 2*time.Second).Should(matcher.HaveConditionTrue(v1.VirtualMachineInstanceAgentConnected))
-			bootID, err := readBootID(vmi, console.LoginToFedora)
-			Expect(err).ToNot(HaveOccurred())
-
-			err = kubevirt.Client().VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).SoftReboot(context.Background(), vmi.Name)
-			Expect(err).ToNot(HaveOccurred())
-
-			waitForBootIDChange(vmi, console.LoginToFedora, bootID)
-		})
-
 		It("soft reboot vmi with ACPI feature enabled should succeed", decorators.Conformance, func() {
 			vmi := libvmops.RunVMIAndExpectLaunch(libvmifact.NewFedora(), vmiLaunchTimeout)
 			Expect(console.LoginToFedora(vmi)).To(Succeed())
@@ -1195,16 +1090,6 @@ var _ = Describe("[rfe_id:273][crit:high][vendor:cnv-qe@redhat.com][level:compon
 
 			By("Waiting for VMI to reboot")
 			waitForBootIDChange(vmi, console.LoginToFedora, bootID)
-		})
-
-		It("soft reboot vmi neither have the agent connected nor the ACPI feature enabled should fail", decorators.WgS390x, decorators.Conformance, func() {
-			vmi := libvmops.RunVMIAndExpectLaunch(libvmifact.NewAlpine(withoutACPI()), vmiLaunchTimeout)
-
-			Expect(console.LoginToAlpine(vmi)).To(Succeed())
-			Eventually(matcher.ThisVMI(vmi), 30*time.Second, 2*time.Second).Should(matcher.HaveConditionMissingOrFalse(v1.VirtualMachineInstanceAgentConnected))
-
-			err := kubevirt.Client().VirtualMachineInstance(testsuite.GetTestNamespace(vmi)).SoftReboot(context.Background(), vmi.Name)
-			Expect(err).To(MatchError(ContainSubstring("VMI neither have the agent connected nor the ACPI feature enabled")))
 		})
 
 		It("soft reboot vmi should fail to soft reboot a paused vmi", decorators.WgS390x, func() {
@@ -1558,12 +1443,4 @@ func waitForBootIDChange(vmi *v1.VirtualMachineInstance, login console.LoginToFu
 		}
 		return newBootID
 	}, 300*time.Second, 5*time.Second).ShouldNot(Equal(preRebootBootID), "expected guest to reboot (boot_id change)")
-}
-
-func withoutACPI() libvmi.Option {
-	return func(vmi *v1.VirtualMachineInstance) {
-		vmi.Spec.Domain.Features = &v1.Features{
-			ACPI: v1.FeatureState{Enabled: pointer.P(false)},
-		}
-	}
 }

@@ -75,7 +75,7 @@ var (
 		},
 		[]string{
 			// Basic info
-			"node", "namespace", "name",
+			"node", "namespace", "name", "uid",
 			// Domain info
 			"phase", "os", "workload", "flavor",
 			// Instance type
@@ -184,7 +184,9 @@ func collectVMILauncherMemoryOverhead(vmi *k6tv1.VirtualMachineInstance) operato
 		// Create the hypervisor resources calculator based on the cluster configuration, as the overhead calculation may differ between
 		// different hypervisors
 		launcherHypervisorResources := hypervisor.NewLauncherHypervisorResources(clusterConfig.GetHypervisor().Name)
-		memoryOverhead := services.CalculateMemoryOverhead(clusterConfig, netresources.MemoryCalculator{}, vmi, launcherHypervisorResources)
+		memoryOverhead := services.CalculateMemoryOverhead(clusterConfig,
+			vmi, launcherHypervisorResources,
+			netresources.NewMemoryCalculator(clusterConfig))
 		memoryOverheadValue = memoryOverhead.Value()
 	}
 
@@ -206,7 +208,7 @@ func collectVMIInfo(vmi *k6tv1.VirtualMachineInstance) operatormetrics.Collector
 	return operatormetrics.CollectorResult{
 		Metric: vmiInfo,
 		Labels: []string{
-			vmi.Status.NodeName, vmi.Namespace, vmi.Name,
+			vmi.Status.NodeName, vmi.Namespace, vmi.Name, string(vmi.UID),
 			getVMIPhase(vmi), os, workload, flavor, instanceType, preference,
 			kernelRelease, guestOSMachineType, guestOSMachineArch, name, versionID,
 			strconv.FormatBool(isVMEvictable(vmi)),

@@ -47,7 +47,6 @@ import (
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	"kubevirt.io/kubevirt/pkg/virt-handler/isolation"
 	launcherclients "kubevirt.io/kubevirt/pkg/virt-handler/launcher-clients"
-	migrationproxy "kubevirt.io/kubevirt/pkg/virt-handler/migration-proxy"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virtiofs"
 	"kubevirt.io/kubevirt/pkg/vmitrait"
@@ -102,14 +101,13 @@ type netconf interface {
 type BaseController struct {
 	logger                      *log.FilteredLogger
 	host                        string
-	clientset                   kubecli.KubevirtClient
+	virtClient                  kubecli.KubevirtClient
 	queue                       workqueue.TypedRateLimitingInterface[string]
 	vmiStore                    cache.Store
 	domainStore                 cache.Store
 	clusterConfig               *virtconfig.ClusterConfig
 	podIsolationDetector        isolation.PodIsolationDetector
 	launcherClients             launcherclients.LauncherClientsManager
-	migrationProxy              migrationproxy.ProxyManager
 	virtLauncherFSRunDirPattern string
 	netStat                     netstat
 	recorder                    record.EventRecorder
@@ -124,14 +122,13 @@ func NewBaseController(
 	logger *log.FilteredLogger,
 	host string,
 	recorder record.EventRecorder,
-	clientset kubecli.KubevirtClient,
+	virtClient kubecli.KubevirtClient,
 	queue workqueue.TypedRateLimitingInterface[string],
 	vmiInformer cache.SharedIndexInformer,
 	domainInformer cache.SharedInformer,
 	clusterConfig *virtconfig.ClusterConfig,
 	podIsolationDetector isolation.PodIsolationDetector,
 	launcherClients launcherclients.LauncherClientsManager,
-	migrationProxy migrationproxy.ProxyManager,
 	virtLauncherFSRunDirPattern string,
 	netStat netstat,
 	hypervisorNodeInfo hypervisor.HypervisorNodeInformation,
@@ -143,14 +140,13 @@ func NewBaseController(
 		logger:                      logger,
 		host:                        host,
 		recorder:                    recorder,
-		clientset:                   clientset,
+		virtClient:                  virtClient,
 		queue:                       queue,
 		vmiStore:                    vmiInformer.GetStore(),
 		domainStore:                 domainInformer.GetStore(),
 		clusterConfig:               clusterConfig,
 		podIsolationDetector:        podIsolationDetector,
 		launcherClients:             launcherClients,
-		migrationProxy:              migrationProxy,
 		virtLauncherFSRunDirPattern: virtLauncherFSRunDirPattern,
 		netStat:                     netStat,
 		hasSynced:                   func() bool { return domainInformer.HasSynced() && vmiInformer.HasSynced() },

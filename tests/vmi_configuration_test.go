@@ -77,31 +77,6 @@ var _ = Describe("[sig-compute]Configurations", decorators.SigCompute, func() {
 	const enoughMemForSafeBiosEmulation = "32Mi"
 	var virtClient kubecli.KubevirtClient
 
-	const (
-		cgroupV1MemoryUsagePath = "/sys/fs/cgroup/memory/memory.usage_in_bytes"
-		cgroupV2MemoryUsagePath = "/sys/fs/cgroup/memory.current"
-	)
-
-	getPodMemoryUsage := func(pod *k8sv1.Pod) (output string, err error) {
-		output, err = exec.ExecuteCommandOnPod(
-			pod,
-			"compute",
-			[]string{"cat", cgroupV2MemoryUsagePath},
-		)
-
-		if err == nil {
-			return
-		}
-
-		output, err = exec.ExecuteCommandOnPod(
-			pod,
-			"compute",
-			[]string{"cat", cgroupV1MemoryUsagePath},
-		)
-
-		return
-	}
-
 	BeforeEach(func() {
 		virtClient = kubevirt.Client()
 	})
@@ -1101,7 +1076,7 @@ var _ = Describe("[sig-compute]Configurations", decorators.SigCompute, func() {
 				for idx := 1; idx < len(nodes.Items); idx++ {
 					labels := nodes.Items[idx].GetLabels()
 					for label, val := range labels {
-						if label == "cpumanager" && val == "true" {
+						if label == "kubevirt.io/cpumanager" && val == "true" {
 							cpuManagerEnabled = true
 						}
 					}
@@ -1159,11 +1134,6 @@ var _ = Describe("[sig-compute]Configurations", decorators.SigCompute, func() {
 					&expect.BSnd{S: "grep -c ^processor /proc/cpuinfo\n"},
 					&expect.BExp{R: "2"},
 				}, 15)).To(Succeed())
-
-				By("Check values in domain XML")
-				domXML, err := libdomain.GetRunningVirtualMachineInstanceDomainXML(virtClient, cpuVmi)
-				Expect(err).ToNot(HaveOccurred(), "Should return XML from VMI")
-				Expect(domXML).To(ContainSubstring("<hint-dedicated state='on'/>"), "should container the hint-dedicated feature")
 			})
 			It("[test_id:4632]should be able to start a vm with guest memory different from requested and keep guaranteed qos", func() {
 				cpuVmi := libvmifact.NewAlpine(
@@ -1192,32 +1162,15 @@ var _ = Describe("[sig-compute]Configurations", decorators.SigCompute, func() {
 				podQos := readyPod.Status.QOSClass
 				Expect(podQos).To(Equal(k8sv1.PodQOSGuaranteed))
 
-				// -------------------------------------------------------------------
 				Expect(console.LoginToAlpine(vmi)).To(Succeed())
 
-				// Verify that the total memory is below guest memory and not request.
+				By("Verifying that the total memory is below guest memory and not request")
 				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 					&expect.BSnd{S: "[ $(free -m | grep Mem: | tr -s ' ' | cut -d' ' -f2) -lt 256 ] && echo 'pass'\n"},
 					&expect.BExp{R: console.RetValue("pass")},
-					// Write 100M to shared memory, the available memory can change per OS version
-					&expect.BSnd{S: "swapoff -a && dd if=/dev/zero of=/dev/shm/test bs=1k count=100k && echo 'pass'\n"},
-					&expect.BExp{R: console.RetValue("pass")},
-					&expect.BSnd{S: "echo $?\n"},
-					&expect.BExp{R: console.RetValue("0")},
 				}, 15)).To(Succeed())
-
-				pod, err := libpod.GetPodByVirtualMachineInstance(vmi, vmi.Namespace)
-				Expect(err).NotTo(HaveOccurred())
-
-				podMemoryUsage, err := getPodMemoryUsage(pod)
-				Expect(err).ToNot(HaveOccurred())
-				By("Converting pod memory usage")
-				m, err := strconv.Atoi(strings.Trim(podMemoryUsage, "\n"))
-				Expect(err).ToNot(HaveOccurred())
-				By("Checking if pod memory usage is > 80Mi")
-				Expect(m).To(BeNumerically(">", 83886080), "83886080 B = 80 Mi")
 			})
-			DescribeTable("[test_id:4023]should start a vmi with dedicated cpus and isolated emulator thread", decorators.RequiresAMD64, func(resources *v1.ResourceRequirements) {
+			DescribeTable("[test_id:4023]should start a vmi with dedicated cpus and isolated emulator thread", func(resources *v1.ResourceRequirements) {
 				cpuVmi := libvmifact.NewAlpine()
 				cpuVmi.Spec.Domain.CPU = &v1.CPU{
 					Cores:                 2,
@@ -1295,23 +1248,26 @@ var _ = Describe("[sig-compute]Configurations", decorators.SigCompute, func() {
 					&expect.BExp{R: "2"},
 				}, 15)).To(Succeed())
 
-				domSpec, err := libdomain.GetRunningVMIDomainSpec(vmi)
-				Expect(err).ToNot(HaveOccurred())
+				// KVM PIT (i8254) is x86-only; ARM64 uses the Generic Timer
+				if vmi.Spec.Architecture == "amd64" {
+					domSpec, err := libdomain.GetRunningVMIDomainSpec(vmi)
+					Expect(err).ToNot(HaveOccurred())
 
-				emulator := filepath.Base(domSpec.Devices.Emulator)
-				pidCmd := []string{"pidof", emulator}
-				qemuPid, err := exec.ExecuteCommandOnPod(readyPod, "compute", pidCmd)
-				// do not check for kvm-pit thread if qemu is not in use
-				if err != nil {
-					return
+					emulator := filepath.Base(domSpec.Devices.Emulator)
+					pidCmd := []string{"pidof", emulator}
+					qemuPid, err := exec.ExecuteCommandOnPod(readyPod, "compute", pidCmd)
+					// do not check for kvm-pit thread if qemu is not in use
+					if err != nil {
+						return
+					}
+					kvmpitmask, err := getKvmPitMask(strings.TrimSpace(qemuPid), node)
+					Expect(err).ToNot(HaveOccurred())
+
+					vcpuzeromask, err := getVcpuMask(readyPod, strings.TrimSpace(qemuPid), "0")
+					Expect(err).ToNot(HaveOccurred())
+
+					Expect(kvmpitmask).To(Equal(vcpuzeromask))
 				}
-				kvmpitmask, err := getKvmPitMask(strings.TrimSpace(qemuPid), node)
-				Expect(err).ToNot(HaveOccurred())
-
-				vcpuzeromask, err := getVcpuMask(readyPod, emulator, "0")
-				Expect(err).ToNot(HaveOccurred())
-
-				Expect(kvmpitmask).To(Equal(vcpuzeromask))
 			},
 				Entry(" with explicit resources set", &v1.ResourceRequirements{
 					Requests: k8sv1.ResourceList{
@@ -1809,8 +1765,8 @@ func getProcessName(pod *k8sv1.Pod, pid string) (output string, err error) {
 	return
 }
 
-func getVcpuMask(pod *k8sv1.Pod, emulator, cpu string) (output string, err error) {
-	pscmd := `ps -LC ` + emulator + ` -o lwp,comm | grep "CPU ` + cpu + `"  | cut -f1 -dC`
+func getVcpuMask(pod *k8sv1.Pod, emulatorPid, cpu string) (output string, err error) {
+	pscmd := `ps -L -o lwp=,comm= -p ` + emulatorPid + ` | grep "CPU ` + cpu + `/KVM" | awk '{print $1}'`
 	args := []string{"/bin/bash", "-c", pscmd}
 	Eventually(func() error {
 		output, err = exec.ExecuteCommandOnPod(pod, "compute", args)

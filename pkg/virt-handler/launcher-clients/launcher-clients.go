@@ -88,7 +88,7 @@ func (l *launcherClientsManager) GetLauncherClient(vmi *v1.VirtualMachineInstanc
 	// Slow path: use singleflight to ensure only one connection is created per VMI
 	// even when multiple controllers (VM, MigrationSource, MigrationTarget) race
 	// on the same VMI concurrently. Other VMIs are not blocked.
-	result, err, _ := l.connGroup.Do(string(vmi.UID), func() (interface{}, error) {
+	result, err, _ := l.connGroup.Do(string(vmi.UID), func() (any, error) {
 		// Re-check: another goroutine may have created the connection while we waited.
 		if clientInfo, exists := l.launcherClients.Load(vmi.UID); exists && clientInfo.Client != nil {
 			return clientInfo.Client, nil
@@ -106,7 +106,6 @@ func (l *launcherClientsManager) GetLauncherClient(vmi *v1.VirtualMachineInstanc
 
 		client, err := cmdclient.NewClient(socketFile)
 		if err != nil {
-			virtcache.GhostRecordGlobalStore.Delete(vmi.Namespace, vmi.Name)
 			return nil, err
 		}
 
@@ -115,7 +114,6 @@ func (l *launcherClientsManager) GetLauncherClient(vmi *v1.VirtualMachineInstanc
 		if err != nil {
 			client.Close()
 			close(domainPipeStopChan)
-			virtcache.GhostRecordGlobalStore.Delete(vmi.Namespace, vmi.Name)
 			return nil, err
 		}
 

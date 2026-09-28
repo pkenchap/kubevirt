@@ -73,7 +73,7 @@ import (
 	storagetypes "kubevirt.io/kubevirt/pkg/storage/types"
 	storageutils "kubevirt.io/kubevirt/pkg/storage/utils"
 	"kubevirt.io/kubevirt/pkg/storage/velero"
-	"kubevirt.io/kubevirt/pkg/util"
+	storagevmispec "kubevirt.io/kubevirt/pkg/storage/vmispec"
 	"kubevirt.io/kubevirt/pkg/util/hardware"
 	"kubevirt.io/kubevirt/pkg/util/migrations"
 	traceUtils "kubevirt.io/kubevirt/pkg/util/trace"
@@ -131,7 +131,8 @@ const (
 
 const defaultMaxCrashLoopBackoffDelaySeconds = 300
 
-func NewController(vmiInformer cache.SharedIndexInformer,
+func NewController(queue workqueue.TypedRateLimitingInterface[string],
+	vmiInformer cache.SharedIndexInformer,
 	vmInformer cache.SharedIndexInformer,
 	dataVolumeInformer cache.SharedIndexInformer,
 	dataSourceInformer cache.SharedIndexInformer,
@@ -150,10 +151,7 @@ func NewController(vmiInformer cache.SharedIndexInformer,
 ) (*Controller, error) {
 
 	c := &Controller{
-		Queue: workqueue.NewTypedRateLimitingQueueWithConfig[string](
-			workqueue.DefaultTypedControllerRateLimiter[string](),
-			workqueue.TypedRateLimitingQueueConfig[string]{Name: "virt-controller-vm"},
-		),
+		Queue:                  queue,
 		vmiIndexer:             vmiInformer.GetIndexer(),
 		vmIndexer:              vmInformer.GetIndexer(),
 		dataVolumeStore:        dataVolumeInformer.GetStore(),
@@ -905,6 +903,21 @@ func (c *Controller) handleVolumeUpdateRequest(vm *virtv1.VirtualMachine, vmi *v
 		*vm.Spec.UpdateVolumesStrategy == virtv1.UpdateVolumesStrategyReplacement:
 		log.Log.Object(vm).V(4).Infof("not handling replacement update volumes strategy")
 	case vm.Spec.UpdateVolumesStrategy != nil && *vm.Spec.UpdateVolumesStrategy == virtv1.UpdateVolumesStrategyMigration:
+		// Idempotency: if VMI has migratedVolumes the VM doesn't have yet,
+		// propagate them to the VM status (recovery from partial failure).
+		vmHasMigratedVolumes := vm.Status.VolumeUpdateState != nil &&
+			vm.Status.VolumeUpdateState.VolumeMigrationState != nil &&
+			equality.Semantic.DeepEqual(vm.Status.VolumeUpdateState.VolumeMigrationState.MigratedVolumes, vmi.Status.MigratedVolumes)
+		if len(vmi.Status.MigratedVolumes) > 0 && !vmHasMigratedVolumes &&
+			volumemig.MigratedVolumesMatchVMSpec(vmi.Status.MigratedVolumes, &vm.Spec.Template.Spec) {
+			if vm.Status.VolumeUpdateState == nil {
+				vm.Status.VolumeUpdateState = &virtv1.VolumeUpdateState{}
+			}
+			vm.Status.VolumeUpdateState.VolumeMigrationState = &virtv1.VolumeMigrationState{
+				MigratedVolumes: vmi.Status.MigratedVolumes,
+			}
+		}
+
 		if !volumemig.PersistentVolumesUpdated(&vm.Spec.Template.Spec, &vmi.Spec) {
 			log.Log.Object(vm).V(4).Infof("No persistent volumes updated")
 			return nil
@@ -1066,8 +1079,7 @@ func (c *Controller) syncRunStrategy(vm *virtv1.VirtualMachine, vmi *virtv1.Virt
 			return vm, nil
 		}
 
-		// when coming here from a different RunStrategy we have to start the VM
-		if !hasStartRequest(vm) && vm.Status.RunStrategy == runStrategy {
+		if !shouldStartRerunOnFailure(vm, runStrategy) {
 			return vm, nil
 		}
 
@@ -1211,6 +1223,15 @@ func (c *Controller) isVMIStopExpected(vm *virtv1.VirtualMachine) bool {
 	return dels > 0
 }
 
+// shouldStartRerunOnFailure reports whether a VM using the RerunOnFailure
+// strategy should create a new VMI when no VMI currently exists
+// It returns true when there is an explicit StartRequest
+// or when the RunStrategy has just been switched to RerunOnFailure from
+// a different strategy (detected via vm.Status.RunStrategy)
+func shouldStartRerunOnFailure(vm *virtv1.VirtualMachine, runStrategy virtv1.VirtualMachineRunStrategy) bool {
+	return hasStartRequest(vm) || vm.Status.RunStrategy != runStrategy
+}
+
 // isSetToStart determines whether a VM is configured to be started (running).
 func isSetToStart(vm *virtv1.VirtualMachine, vmi *virtv1.VirtualMachineInstance) bool {
 	runStrategy, err := vm.RunStrategy()
@@ -1233,7 +1254,7 @@ func isSetToStart(vm *virtv1.VirtualMachine, vmi *virtv1.VirtualMachineInstance)
 		if vmi != nil {
 			return vmi.Status.Phase != virtv1.Succeeded
 		}
-		return true
+		return shouldStartRerunOnFailure(vm, runStrategy)
 	case virtv1.RunStrategyOnce:
 		if vmi == nil {
 			return true
@@ -1292,6 +1313,9 @@ func (c *Controller) startVMI(vm *virtv1.VirtualMachine) (*virtv1.VirtualMachine
 
 	if vm.Spec.RunStrategy != nil && *vm.Spec.RunStrategy == virtv1.RunStrategyWaitAsReceiver {
 		log.Log.Infof("Setting up receiver VMI %s/%s", vmi.Namespace, vmi.Name)
+		if vmi.Annotations == nil {
+			vmi.Annotations = make(map[string]string)
+		}
 		vmi.Annotations[virtv1.CreateMigrationTarget] = "true"
 	}
 
@@ -1891,7 +1915,7 @@ func SetupVMIFromVM(vm *virtv1.VirtualMachine) *virtv1.VirtualMachineInstance {
 		*metav1.NewControllerRef(vm, virtv1.VirtualMachineGroupVersionKind),
 	}
 
-	util.SetDefaultVolumeDisk(&vmi.Spec)
+	storagevmispec.SetDefaultVolumeDisk(&vmi.Spec)
 
 	return vmi
 }
@@ -2658,10 +2682,17 @@ func (c *Controller) isVirtualMachineStatusUnschedulable(vm *virtv1.VirtualMachi
 		k8score.PodReasonUnschedulable)
 }
 
+// isErrImagePullPrintableStatusReason reports whether a VMI Synchronized condition reason
+// should surface the VM ErrImagePull printable status.
+func isErrImagePullPrintableStatusReason(reason string) bool {
+	return reason == controller.ErrImagePullReason || reason == controller.InvalidImageNameReason
+}
+
 // isVirtualMachineStatusErrImagePull determines whether the VM status field should be set to "ErrImagePull"
 func (c *Controller) isVirtualMachineStatusErrImagePull(vm *virtv1.VirtualMachine, vmi *virtv1.VirtualMachineInstance) bool {
 	syncCond := controller.NewVirtualMachineInstanceConditionManager().GetCondition(vmi, virtv1.VirtualMachineInstanceSynchronized)
-	return syncCond != nil && syncCond.Status == k8score.ConditionFalse && syncCond.Reason == controller.ErrImagePullReason
+	return syncCond != nil && syncCond.Status == k8score.ConditionFalse &&
+		isErrImagePullPrintableStatusReason(syncCond.Reason)
 }
 
 // isVirtualMachineStatusImagePullBackOff determines whether the VM status field should be set to "ImagePullBackOff"
