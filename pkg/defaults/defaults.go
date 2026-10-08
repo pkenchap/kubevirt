@@ -368,7 +368,7 @@ func setDefaultArchitectureFromDataSource(clusterConfig *virtconfig.ClusterConfi
 			continue
 		}
 		switch arch {
-		case "amd64", "arm64", "s390x":
+		case "amd64", "arm64", "s390x", "ppc64le":
 			vm.Spec.Template.Spec.Architecture = arch
 		default:
 			log.Log.Warningf(ignoreUnknownArchFmt, arch, ds.Name, ds.Namespace)
