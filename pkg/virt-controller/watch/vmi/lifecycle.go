@@ -50,17 +50,16 @@ import (
 	"kubevirt.io/kubevirt/pkg/apimachinery/patch"
 	"kubevirt.io/kubevirt/pkg/controller"
 	metrics "kubevirt.io/kubevirt/pkg/monitoring/metrics/common/vmisync"
-	"kubevirt.io/kubevirt/pkg/pointer"
 	backendstorage "kubevirt.io/kubevirt/pkg/storage/backend-storage"
 	storagetypes "kubevirt.io/kubevirt/pkg/storage/types"
 	"kubevirt.io/kubevirt/pkg/storage/virtiofs"
-	"kubevirt.io/kubevirt/pkg/util"
 	"kubevirt.io/kubevirt/pkg/util/hardware"
 	"kubevirt.io/kubevirt/pkg/util/migrations"
 	"kubevirt.io/kubevirt/pkg/virt-controller/services"
 	"kubevirt.io/kubevirt/pkg/virt-controller/watch/common"
 	"kubevirt.io/kubevirt/pkg/virt-controller/watch/descheduler"
 	"kubevirt.io/kubevirt/pkg/virt-controller/watch/topology"
+	"kubevirt.io/kubevirt/pkg/vmitrait"
 )
 
 func (c *Controller) sync(vmi *virtv1.VirtualMachineInstance, pod *k8sv1.Pod, dataVolumes []*cdiv1.DataVolume) (common.SyncError, *k8sv1.Pod) {
@@ -431,7 +430,7 @@ func (c *Controller) updateStatus(vmi *virtv1.VirtualMachineInstance, pod *k8sv1
 				vmiCopy.Status.MigrationTransport = virtv1.MigrationTransportUnix
 
 				// Allocate the CID if VSOCK is enabled.
-				if util.IsAutoAttachVSOCK(vmiCopy) {
+				if vmitrait.IsAutoAttachVSOCK(vmiCopy) {
 					if err := c.cidsMap.Allocate(vmiCopy); err != nil {
 						return err
 					}
@@ -518,7 +517,7 @@ func (c *Controller) updateStatus(vmi *virtv1.VirtualMachineInstance, pod *k8sv1
 				if vmiCopy.Status.MigrationState != nil {
 					vmiCopy.Status.MigrationState.Failed = true
 					vmiCopy.Status.MigrationState.Completed = true
-					vmiCopy.Status.MigrationState.EndTimestamp = pointer.P(metav1.Now())
+					vmiCopy.Status.MigrationState.EndTimestamp = new(metav1.Now())
 				}
 				break
 			}
@@ -769,8 +768,8 @@ func (c *Controller) syncDynamicAnnotationsAndLabelsToPod(vmi *virtv1.VirtualMac
 			if pattern == "" {
 				continue
 			}
-			if strings.HasSuffix(pattern, "*") {
-				prefix := strings.TrimSuffix(pattern, "*")
+			if before, ok := strings.CutSuffix(pattern, "*"); ok {
+				prefix := before
 				// Reject bare "*" to prevent accidental sync-all. Only prefix wildcards like "vendor.io/*" are supported.
 				if prefix == "" {
 					continue

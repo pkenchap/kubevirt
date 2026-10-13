@@ -40,6 +40,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/rand"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
@@ -91,6 +92,7 @@ const (
 	noVolumeVMReason          = "VMNoVolumes"
 	noVolumeSnapshotReason    = "VMSnapshotNoVolumes"
 	notAllPVCsCreatedReason   = "NotAllPVCsCreated"
+	duplicatePVCReason        = "DuplicatePVC"
 	VMSnapshotNotFoundReason  = "VMSnapshotNotFound"
 	ociDigestsComputedReason  = "DigestsComputed"
 	ociDigestsPendingReason   = "DigestsPending"
@@ -98,6 +100,9 @@ const (
 	exportServiceLabel = "kubevirt.io.virt-export-service"
 
 	exportPrefix = "virt-export"
+
+	// ExportServerPort is the port the export server listens on inside the pod.
+	ExportServerPort = types.ExportServerPort
 
 	blockVolumeMountPath = "/dev/export-volumes"
 	fileSystemMountPath  = "/export-volumes"
@@ -205,11 +210,34 @@ type sourceVolume struct {
 }
 
 func (sv *sourceVolumes) isSourceAvailable() bool {
-	return !sv.inUse && sv.isPopulated
+	return !sv.inUse && sv.isPopulated && len(sv.duplicatePVCNames()) == 0
+}
+
+func (sv *sourceVolumes) duplicatePVCNames() []string {
+	seen, duplicates := sets.New[string](), sets.New[string]()
+	for _, volume := range sv.volumes {
+		if volume.pvc == nil {
+			continue
+		}
+		if seen.Has(volume.pvc.Name) {
+			duplicates.Insert(volume.pvc.Name)
+		}
+		seen.Insert(volume.pvc.Name)
+	}
+	return sets.List(duplicates)
 }
 
 func (sv *sourceVolumes) hasContent() bool {
 	return len(sv.volumes) > 0
+}
+
+func (sv *sourceVolumes) ReadyCondition() exportv1.Condition {
+	if duplicates := sv.duplicatePVCNames(); len(duplicates) > 0 {
+		return newReadyCondition(corev1.ConditionFalse, duplicatePVCReason,
+			fmt.Sprintf("Source references the same PersistentVolumeClaim from more than one volume: %s",
+				strings.Join(duplicates, ", ")))
+	}
+	return sv.readyCondition
 }
 
 func (sv *sourceVolumes) configurePodVolumes(podManifest *corev1.Pod) {
@@ -1030,19 +1058,25 @@ func (ctrl *VMExportController) getExportLabelValue(vmExport *exportv1.VirtualMa
 
 func (ctrl *VMExportController) getOrCreateExportService(vmExport *exportv1.VirtualMachineExport, source exportSource) (*corev1.Service, error) {
 	key := controller.NamespacedKey(vmExport.Namespace, ctrl.getExportServiceName(vmExport))
-	if service, exists, err := ctrl.ServiceInformer.GetStore().GetByKey(key); err != nil {
+	obj, exists, err := ctrl.ServiceInformer.GetStore().GetByKey(key)
+	if err != nil {
 		return nil, err
-	} else if !exists {
-		service := ctrl.createServiceManifest(vmExport, source)
-		log.Log.V(3).Infof("Creating new exporter service %s/%s", service.Namespace, service.Name)
-		service, err := ctrl.Client.CoreV1().Services(vmExport.Namespace).Create(context.Background(), service, metav1.CreateOptions{})
-		if err == nil {
-			ctrl.Recorder.Eventf(vmExport, corev1.EventTypeNormal, serviceCreatedEvent, "Created service %s/%s", service.Namespace, service.Name)
-		}
-		return service, err
-	} else {
-		return service.(*corev1.Service), nil
 	}
+	if exists {
+		// Leave existing Services in place so in-flight ClusterIP exports
+		// (443 → targetPort 8443) keep working across upgrade. ClusterIP to
+		// headless is immutable; only newly created Services are headless.
+		return obj.(*corev1.Service), nil
+	}
+
+	service := ctrl.createServiceManifest(vmExport, source)
+	log.Log.V(3).Infof("Creating new exporter service %s/%s", service.Namespace, service.Name)
+	service, err = ctrl.Client.CoreV1().Services(vmExport.Namespace).Create(context.Background(), service, metav1.CreateOptions{})
+	if err != nil {
+		return nil, err
+	}
+	ctrl.Recorder.Eventf(vmExport, corev1.EventTypeNormal, serviceCreatedEvent, "Created service %s/%s", service.Namespace, service.Name)
+	return service, nil
 }
 
 func (ctrl *VMExportController) createServiceManifest(vmExport *exportv1.VirtualMachineExport, source exportSource) *corev1.Service {
@@ -1066,7 +1100,8 @@ func (ctrl *VMExportController) createServiceManifest(vmExport *exportv1.Virtual
 			Annotations: vmExport.Annotations,
 		},
 		Spec: corev1.ServiceSpec{
-			Ports: []corev1.ServicePort{exportPort()},
+			ClusterIP: corev1.ClusterIPNone,
+			Ports:     []corev1.ServicePort{exportPort()},
 			Selector: map[string]string{
 				exportServiceLabel: ctrl.getExportLabelValue(vmExport),
 			},
@@ -1088,10 +1123,10 @@ func exportPort() corev1.ServicePort {
 	return corev1.ServicePort{
 		Name:     "export",
 		Protocol: "TCP",
-		Port:     443,
+		Port:     ExportServerPort,
 		TargetPort: intstr.IntOrString{
 			Type:   intstr.Int,
-			IntVal: 8443,
+			IntVal: ExportServerPort,
 		},
 	}
 }
@@ -1218,7 +1253,7 @@ func (ctrl *VMExportController) createExporterPodManifest(vmExport *exportv1.Vir
 				Path:   ReadinessPath,
 				Port: intstr.IntOrString{
 					Type:   intstr.Int,
-					IntVal: 8443,
+					IntVal: ExportServerPort,
 				},
 			},
 		},
@@ -1344,7 +1379,9 @@ func (ctrl *VMExportController) reconcileManifestAndAddToPod(vmExport *exportv1.
 func (ctrl *VMExportController) createManifestConfigMap(vmExport *exportv1.VirtualMachineExport, manifestKey string, manifestBytes []byte, service *corev1.Service, extraData map[string]string) (*corev1.ConfigMap, error) {
 	data := make(map[string]string)
 
-	data[internalHostKey] = fmt.Sprintf("%s.%s.svc", service.Name, service.Namespace)
+	// ClusterIP Services remap 443 → 8443; headless Services do not remap, so
+	// clone DV HTTP URLs must use the dial port for this Service.
+	data[internalHostKey] = types.ExportServiceHost(service)
 	cert, err := ctrl.internalExportCa()
 	if err != nil {
 		return nil, err

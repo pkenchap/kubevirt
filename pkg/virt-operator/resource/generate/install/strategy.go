@@ -491,25 +491,11 @@ func GenerateCurrentInstallStrategy(config *operatorutil.KubeVirtDeploymentConfi
 
 	strategy := &Strategy{}
 
-	functions := []func() (*extv1.CustomResourceDefinition, error){
-		components.NewVirtualMachineInstanceCrd, components.NewPresetCrd, components.NewReplicaSetCrd,
-		components.NewVirtualMachineCrd, components.NewVirtualMachineInstanceMigrationCrd,
-		components.NewVirtualMachineSnapshotCrd, components.NewVirtualMachineSnapshotContentCrd,
-		components.NewVirtualMachineRestoreCrd, components.NewVirtualMachineInstancetypeCrd,
-		components.NewVirtualMachineClusterInstancetypeCrd, components.NewVirtualMachinePoolCrd,
-		components.NewMigrationPolicyCrd, components.NewVirtualMachinePreferenceCrd,
-		components.NewVirtualMachineClusterPreferenceCrd, components.NewVirtualMachineExportCrd,
-		components.NewVirtualMachineCloneCrd, components.NewVirtualMachineBackupCrd,
-		components.NewVirtualMachineBackupTrackerCrd,
-		components.NewPluginCrd,
+	crds, err := components.NewInstallStrategyCRDs()
+	if err != nil {
+		return nil, err
 	}
-	for _, f := range functions {
-		crd, err := f()
-		if err != nil {
-			return nil, err
-		}
-		strategy.crds = append(strategy.crds, crd)
-	}
+	strategy.crds = crds
 
 	rbaclist := make([]runtime.Object, 0)
 	rbaclist = append(rbaclist, rbac.GetAllCluster()...)
@@ -634,16 +620,8 @@ func GenerateCurrentInstallStrategy(config *operatorutil.KubeVirtDeploymentConfi
 	strategy.validatingAdmissionPolicies = append(strategy.validatingAdmissionPolicies, vap.NewHandlerV1ValidatingAdmissionPolicy(virtHandlerServiceAccount))
 
 	if config.PluginsEnabled() {
-		strategy.validatingAdmissionPolicyBindings = append(strategy.validatingAdmissionPolicyBindings, vap.NewPluginValidatingAdmissionPolicyBinding())
-		strategy.validatingAdmissionPolicies = append(strategy.validatingAdmissionPolicies, vap.NewPluginValidatingAdmissionPolicy())
-		strategy.validatingAdmissionPolicyBindings = append(strategy.validatingAdmissionPolicyBindings, vap.NewPluginWarningAdmissionPolicyBinding())
-		strategy.validatingAdmissionPolicies = append(strategy.validatingAdmissionPolicies, vap.NewPluginWarningAdmissionPolicy())
-
 		strategy.validatingAdmissionPolicyBindings = append(strategy.validatingAdmissionPolicyBindings, vap.NewSidecarSubPathValidatingAdmissionPolicyBinding())
 		strategy.validatingAdmissionPolicies = append(strategy.validatingAdmissionPolicies, vap.NewSidecarSubPathValidatingAdmissionPolicy())
-
-		strategy.validatingAdmissionPolicyBindings = append(strategy.validatingAdmissionPolicyBindings, vap.NewPluginSocketPathValidatingAdmissionPolicyBinding())
-		strategy.validatingAdmissionPolicies = append(strategy.validatingAdmissionPolicies, vap.NewPluginSocketPathValidatingAdmissionPolicy())
 	}
 
 	instancetypes, err := components.NewClusterInstancetypes()
