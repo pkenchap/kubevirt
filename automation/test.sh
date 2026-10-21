@@ -89,6 +89,9 @@ case "$TARGET" in
     export KUBEVIRT_DEPLOY_CDI=false
     export KUBEVIRT_DEPLOY_ISTIO=true
     export KUBEVIRT_DEPLOY_NETWORK_RESOURCES_INJECTOR=true
+    export KUBEVIRT_NUM_SECONDARY_NICS=1
+    export KUBEVIRT_SECONDARY_IFACES_TO_IP=eth1
+    export KUBEVIRT_DEPLOY_NET_DRA_DRIVER=true
     export KUBEVIRT_PROVIDER=${TARGET/-sig-network*/}
     if [[ "${KUBEVIRT_PROVIDER}" == "${SRIOV_TEST_LANE}" && $JOB_NAME =~ ^(pull|periodic)-kubevirt-e2e-${SRIOV_TEST_LANE}-sig-network$ ]]; then
       export KUBEVIRT_WITH_SRIOV=true
@@ -149,6 +152,12 @@ case "$TARGET" in
     ;;
   *sig-compute-conformance*)
     export KUBEVIRT_PROVIDER=${TARGET/-sig-compute-conformance/}
+    ;;
+  # DRA-CEX: CEX AP-queue passthrough via Kubernetes DRA. Needs an s390x
+  # node with the CEX DRA driver and a crypto queue, so it is not part of
+  # wg-s390x or the generic sig-compute lanes.
+  *sig-compute-dra-cex*)
+    export KUBEVIRT_PROVIDER=${TARGET/-sig-compute-dra-cex/}
     ;;
   *sig-compute-dra-gpu*)
     export KUBEVIRT_PROVIDER=${TARGET/-sig-compute-dra-gpu/}
@@ -588,16 +597,19 @@ if [[ -z ${KUBEVIRT_E2E_FOCUS} && -z ${KUBEVIRT_E2E_SKIP} && -z ${label_filter} 
     label_filter='(sig-compute-migrations && !(GPU,VGPU)) && !(SEV, SEVES, secure-execution)'
   elif [[ $TARGET =~ sig-compute-serial ]]; then
     export KUBEVIRT_E2E_PARALLEL=false
-    label_filter='((sig-compute && Serial) && !(GPU,VGPU,DRA-GPU,sig-compute-migrations) && !(SEV, SEVES, secure-execution))'
+    label_filter='((sig-compute && Serial) && !(GPU,VGPU,DRA-GPU,DRA-CEX,sig-compute-migrations) && !(SEV, SEVES, secure-execution))'
   elif [[ $TARGET =~ sig-compute-parallel ]]; then
     label_filter='(sig-compute && !(Serial,GPU,VGPU,sig-compute-migrations,sig-storage,storage-req) && !(SEV, SEVES, secure-execution))'
   elif [[ $TARGET =~ sig-compute-conformance ]]; then
     label_filter='(sig-compute && conformance)'
+  elif [[ $TARGET =~ sig-compute-dra-cex ]]; then
+    export KUBEVIRT_E2E_PARALLEL=false
+    label_filter='(DRA-CEX)'
   elif [[ $TARGET =~ sig-compute-dra-gpu ]]; then
     export KUBEVIRT_E2E_PARALLEL=false
     label_filter='(DRA-GPU)'
   elif [[ $TARGET =~ sig-compute ]]; then
-    label_filter='(sig-compute && !(GPU,VGPU,sig-compute-migrations,sig-storage,DRA-GPU) && !(SEV, SEVES, secure-execution))'
+    label_filter='(sig-compute && !(GPU,VGPU,sig-compute-migrations,sig-storage,DRA-GPU,DRA-CEX) && !(SEV, SEVES, secure-execution))'
   elif [[ $TARGET =~ sig-monitoring ]]; then
     label_filter='(sig-monitoring)'
   elif [[ $TARGET =~ sig-operator ]]; then
@@ -611,7 +623,7 @@ if [[ -z ${KUBEVIRT_E2E_FOCUS} && -z ${KUBEVIRT_E2E_SKIP} && -z ${label_filter} 
   elif [[ $TARGET =~ gpu.* ]]; then
     label_filter='(GPU)'
   else
-    label_filter='(!(Multus,SRIOV,Macvtap,GPU,VGPU,netCustomBindingPlugins))'
+    label_filter='(!(Multus,SRIOV,Macvtap,GPU,VGPU,netCustomBindingPlugins,DRA-CEX))'
   fi
 
   # execute tests labelled as PERIODIC only on periodic test lanes (according to lane name)
@@ -624,7 +636,8 @@ if [[ -z ${KUBEVIRT_E2E_FOCUS} && -z ${KUBEVIRT_E2E_SKIP} && -z ${label_filter} 
     add_to_label_filter "(!Sysprep)" "&&"
   fi
 
-  if [[ ! $TARGET =~ wg-s390x ]] && [[ ! $TARGET =~ secure-execution ]]; then
+  # sig-compute-dra-cex runs on s390x, so keep requires-s390x tests.
+  if [[ ! $TARGET =~ wg-s390x ]] && [[ ! $TARGET =~ secure-execution ]] && [[ ! $TARGET =~ dra-cex ]]; then
     add_to_label_filter "(!requires-s390x)" "&&"
   fi
 

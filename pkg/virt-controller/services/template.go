@@ -94,6 +94,7 @@ type clusterConfigProvider interface {
 	GetPermittedHostDevices() *v1.PermittedHostDevices
 	IsSerialConsoleLogDisabled() bool
 	GetConfig() *v1.KubeVirtConfiguration
+	GetEmulationPolicy(vmi *v1.VirtualMachineInstance) v1.EmulationPolicy
 }
 
 var _ clusterConfigProvider = (*virtconfig.ClusterConfig)(nil)
@@ -484,7 +485,7 @@ func (t *TemplateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, i
 		if t.clusterConfig.IsFeatureGateEnabled(featuregate.ImageVolume) {
 			args = append(args, "--image-volume")
 		}
-		if t.clusterConfig.IsFeatureGateEnabled(featuregate.VGPULiveMigration) {
+		if t.clusterConfig.IsFeatureGateEnabled(featuregate.MDevVGPULiveMigration) {
 			args = append(args, "--vgpu-dedicated-hook")
 		}
 		if t.clusterConfig.IsFeatureGateEnabled(featuregate.VMStatsCollector) {
@@ -503,7 +504,7 @@ func (t *TemplateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, i
 		args = append(args, "--allow-emulation")
 	}
 
-	if t.clusterConfig.IsFeatureGateEnabled(featuregate.CrossArchitectureVirtualization) {
+	if t.useSoftwareEmulation(vmi) {
 		command = append(command, "--allow-cross-arch-emulation")
 	}
 
@@ -640,16 +641,21 @@ func (t *TemplateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, i
 		initContainers = append(initContainers, *sconsolelogContainer)
 	}
 
+	cpBinaryOpts := []Option{
+		WithVolumeMounts(initContainerVolumeMount()),
+		WithResourceRequirements(initContainerResourceRequirementsForVMI(vmi, v1.ContainerDisk, t.clusterConfig)),
+		WithNoCapabilities(),
+		WithCommand([]string{"/usr/bin/cp"}),
+		WithArgs([]string{"--preserve=all", "/usr/bin/container-disk", "/init/usr/bin/container-disk"}),
+	}
+	if vmitrait.IsNonRoot(vmi) {
+		cpBinaryOpts = append(cpBinaryOpts, WithNonRoot(userId))
+	}
+
 	if !t.clusterConfig.IsFeatureGateEnabled(featuregate.ImageVolume) && (HaveContainerDiskVolume(vmi.Spec.Volumes) || vmitrait.HasKernelBootContainerImage(vmi)) {
 		initContainers = append(
 			initContainers,
-			t.newInitContainerRenderer(vmi,
-				initContainerVolumeMount(),
-				initContainerResourceRequirementsForVMI(vmi, v1.ContainerDisk, t.clusterConfig),
-				userId,
-				WithCommand([]string{"/usr/bin/cp"}),
-				WithArgs([]string{"--preserve=all", "/usr/bin/container-disk", "/init/usr/bin/container-disk"}),
-			).Render())
+			NewContainerSpecRenderer("container-disk-binary", t.launcherImage, t.clusterConfig.GetImagePullPolicy(), cpBinaryOpts...).Render())
 
 		// this causes containerDisks to be pre-pulled before virt-launcher starts.
 		initContainers = append(initContainers, containerdisk.GenerateInitContainers(vmi, t.clusterConfig, imageIDs, containerDisks, virtBinDir)...)
@@ -658,7 +664,14 @@ func (t *TemplateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, i
 		if kernelBootInitContainer != nil {
 			initContainers = append(initContainers, *kernelBootInitContainer)
 		}
-	} else if t.clusterConfig.IsFeatureGateEnabled(featuregate.ImageVolume) && vmi.Annotations[v1.ImageVolumeSkipDigestResolutionAnnotation] != "true" {
+	} else if t.clusterConfig.IsFeatureGateEnabled(featuregate.ImageVolume) && vmi.Annotations[v1.ImageVolumeSkipDigestResolutionAnnotation] != "true" &&
+		shouldAddLauncherBinaryVolume(vmi, imageIDs) {
+		// Copy the container-disk binary to the shared EmptyDir.
+		// Uses a distinct name from "container-disk-binary" to avoid triggering the
+		// old bind-mount path detection in virt-handler.
+		initContainers = append(
+			initContainers,
+			NewContainerSpecRenderer("image-volume-binary", t.launcherImage, t.clusterConfig.GetImagePullPolicy(), cpBinaryOpts...).Render())
 		// TODO: Once the KEP https://github.com/kubernetes/enhancements/pull/5375 is fully implemented and stable
 		// in all Kubernetes versions supported by KubeVirt, this entire init containers logic should be removed,
 		// and the digest can be fetched directly from the Pod volume status.
@@ -765,7 +778,7 @@ func (t *TemplateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, i
 		return nil, err
 	}
 
-	if t.clusterConfig.IsFeatureGateEnabled(featuregate.CrossArchitectureVirtualization) {
+	if t.allowCrossArchEmulation(vmi) {
 		setPreferredArchitectureAffinity(vmi.Spec.Architecture, &pod)
 		if vmi.Spec.Architecture != "" {
 			if pod.Spec.NodeSelector == nil {
@@ -854,7 +867,7 @@ func (t *TemplateService) newNodeSelectorRenderer(vmi *v1.VirtualMachineInstance
 		opts = append(opts, WithTDXSelector())
 	}
 
-	if t.clusterConfig.IsFeatureGateEnabled(featuregate.CrossArchitectureVirtualization) && vmi.Spec.Architecture != "" {
+	if t.allowCrossArchEmulation(vmi) && vmi.Spec.Architecture != "" {
 		opts = append(opts, WithoutNativeArchSelector())
 	}
 
@@ -923,23 +936,6 @@ func newSidecarContainerRenderer(sidecarName string, vmiSpec *v1.VirtualMachineI
 		requestedHookSidecar.Image,
 		requestedHookSidecar.ImagePullPolicy,
 		sidecarOpts...)
-}
-
-func (t *TemplateService) newInitContainerRenderer(vmiSpec *v1.VirtualMachineInstance, initContainerVolumeMount k8sv1.VolumeMount, initContainerResources k8sv1.ResourceRequirements, userId int64, extraOpts ...Option) *ContainerSpecRenderer {
-	const containerDisk = "container-disk-binary"
-	cpInitContainerOpts := []Option{
-		WithVolumeMounts(initContainerVolumeMount),
-		WithResourceRequirements(initContainerResources),
-		WithNoCapabilities(),
-	}
-
-	if vmitrait.IsNonRoot(vmiSpec) {
-		cpInitContainerOpts = append(cpInitContainerOpts, WithNonRoot(userId))
-	}
-
-	cpInitContainerOpts = append(cpInitContainerOpts, extraOpts...)
-
-	return NewContainerSpecRenderer(containerDisk, t.launcherImage, t.clusterConfig.GetImagePullPolicy(), cpInitContainerOpts...)
 }
 
 func (t *TemplateService) newContainerSpecRenderer(vmi *v1.VirtualMachineInstance, volumeRenderer *VolumeRenderer, resources k8sv1.ResourceRequirements, userId int64, extraOpts ...Option) *ContainerSpecRenderer {
@@ -1011,9 +1007,7 @@ func (t *TemplateService) newVolumeRenderer(vmi *v1.VirtualMachineInstance, imag
 	}
 
 	volumeRenderer, err := NewVolumeRenderer(
-		t.clusterConfig,
 		imageVolumeFeatureGateEnabled,
-		t.launcherImage,
 		imageIDs,
 		namespace,
 		t.ephemeralDiskDir,
@@ -1830,4 +1824,12 @@ func isHostDevVMIDRA(vmi *v1.VirtualMachineInstance) bool {
 func emptyMemoryRequest(vmi *v1.VirtualMachineInstance) bool {
 	resources := &vmi.Spec.Domain.Resources
 	return resources.Requests.Memory().IsZero()
+}
+
+func (t *TemplateService) allowCrossArchEmulation(vmi *v1.VirtualMachineInstance) bool {
+	return t.clusterConfig.IsFeatureGateEnabled(featuregate.CrossArchitectureVirtualization) && t.clusterConfig.GetEmulationPolicy(vmi) != v1.EmulationPolicyNone
+}
+
+func (t *TemplateService) useSoftwareEmulation(vmi *v1.VirtualMachineInstance) bool {
+	return t.clusterConfig.IsFeatureGateEnabled(featuregate.CrossArchitectureVirtualization) && t.clusterConfig.GetEmulationPolicy(vmi) == v1.EmulationPolicySoftware
 }

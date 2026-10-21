@@ -43,20 +43,20 @@ func main() {
 
 	certFile, keyFile := getCert()
 	config := exportServer.ExportServerConfig{
-		CertFile:        certFile,
-		KeyFile:         keyFile,
-		Deadline:        getDeadline(),
-		ListenAddr:      getListenAddr(),
-		TokenFile:       getTokenFile(),
-		Paths:           export.CreateServerPaths(export.EnvironToMap()),
-		TLSMinVersion:   getTLSMinVersion(),
-		TLSCipherSuites: getTLSCipherSuites(),
+		CertFile:            certFile,
+		KeyFile:             keyFile,
+		Deadline:            getDeadline(),
+		ListenAddr:          getListenAddr(),
+		TokenFile:           getTokenFile(),
+		Paths:               export.CreateServerPaths(export.EnvironToMap()),
+		TLSMinVersion:       getTLSMinVersion(),
+		TLSCipherSuites:     getTLSCipherSuites(),
+		TLSCurvePreferences: getTLSCurvePreferences(),
 	}
 	if len(config.Paths.Backups) > 0 {
-		config.BackupUID = getBackupUID()
+		config.NBDSocket = getNBDSocket()
 		config.BackupType = getBackupType()
 		config.BackupCheckpoint = getBackupCheckpoint()
-		config.BackupCACert = getBackupCACert()
 	}
 	server, err := exportServer.NewExportServer(config)
 	if err != nil {
@@ -103,12 +103,12 @@ func getDeadline() (result time.Time) {
 	return result
 }
 
-func getBackupUID() string {
-	backupUID := os.Getenv("BACKUP_UID")
-	if backupUID == "" {
-		panic("backup export but not backup UID provided")
+func getNBDSocket() string {
+	socket := os.Getenv("BACKUP_NBD_SOCKET")
+	if socket == "" {
+		panic("backup export but no NBD socket provided")
 	}
-	return backupUID
+	return socket
 }
 
 func getBackupType() string {
@@ -122,14 +122,6 @@ func getBackupType() string {
 func getBackupCheckpoint() string {
 	checkpointName := os.Getenv("BACKUP_CHECKPOINT")
 	return checkpointName
-}
-
-func getBackupCACert() []byte {
-	caCert := os.Getenv("BACKUP_CACERT")
-	if caCert == "" {
-		panic("backup export but no backup CA provided")
-	}
-	return []byte(caCert)
 }
 
 func getTLSMinVersion() uint16 {
@@ -153,6 +145,19 @@ func getTLSCipherSuites() []uint16 {
 	var ids []uint16
 	if err := json.Unmarshal([]byte(env), &ids); err != nil {
 		log.Log.Warningf("Failed to parse TLS_CIPHER_SUITES: %v", err)
+		return nil
+	}
+	return ids
+}
+
+func getTLSCurvePreferences() []tls.CurveID {
+	env := os.Getenv("TLS_CURVE_PREFERENCES")
+	if env == "" {
+		return nil
+	}
+	var ids []tls.CurveID
+	if err := json.Unmarshal([]byte(env), &ids); err != nil {
+		log.Log.Warningf("Failed to parse TLS_CURVE_PREFERENCES: %v", err)
 		return nil
 	}
 	return ids

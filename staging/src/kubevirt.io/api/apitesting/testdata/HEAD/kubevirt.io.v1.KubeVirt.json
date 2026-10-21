@@ -324,6 +324,9 @@
         "minTLSVersion": "minTLSVersionValue",
         "ciphers": [
           "ciphersValue"
+        ],
+        "groups": [
+          "groupsValue"
         ]
       },
       "seccompConfiguration": {
@@ -430,7 +433,8 @@
           }
         }
       },
-      "roleAggregationStrategy": "roleAggregationStrategyValue"
+      "roleAggregationStrategy": "roleAggregationStrategyValue",
+      "emulationPolicy": "emulationPolicyValue"
     },
     "infra": {
       "nodePlacement": {

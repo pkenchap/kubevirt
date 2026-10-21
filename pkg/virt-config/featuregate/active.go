@@ -117,7 +117,6 @@ const (
 
 	// Owner: sig-compute / @awels
 	// Alpha: v1.6.0
-	// Beta: v1.10.0
 	//
 	// DecentralizedLiveMigration enables live migration across namespaces
 	// with separate source and target VirtualMachineInstanceMigration resources.
@@ -203,9 +202,9 @@ const (
 	// Owner: @csomani1
 	// Alpha: v1.8.0
 	//
-	// The VGPULiveMigration fg enables the vGPU hook to run for vGPU live migrations, allowing the
+	// The MDevVGPULiveMigration fg enables the vGPU hook to run for vGPU live migrations, allowing the
 	// target XML's mdev UUID to be mutated.
-	VGPULiveMigration = "VGPULiveMigration"
+	MDevVGPULiveMigration = "MDevVGPULiveMigration"
 
 	// Owner: sig-compute / @enp0s3
 	// Alpha: v1.9.0
@@ -285,6 +284,16 @@ const (
 	// PortRangesSpec enables the portRanges field, initially only on masquerade interfaces,
 	// allowing compact specification of contiguous port intervals to forward to the VM guest.
 	PortRangesSpec = "PortRangesSpec"
+
+	// Owner: sig-compute / @bmordeha
+	// Alpha: v1.10.0
+	//
+	// TLSGroupPreferences enables the Groups field on TLSConfiguration,
+	// allowing cluster administrators to configure TLS supported groups
+	// (elliptic curves) negotiated during TLS handshakes across all virt
+	// pod endpoints. When disabled, the Groups field is ignored and Go's
+	// default curve preferences apply.
+	TLSGroupPreferences = "TLSGroupPreferences"
 )
 
 func init() {
@@ -308,7 +317,7 @@ func init() {
 	RegisterFeatureGate(FeatureGate{Name: HostDevicesWithDRAGate, State: Beta})
 	RegisterFeatureGate(FeatureGate{Name: PCINUMAAwareTopologyEnabled, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: NetworkDevicesWithDRAGate, State: Alpha})
-	RegisterFeatureGate(FeatureGate{Name: DecentralizedLiveMigration, State: Beta})
+	RegisterFeatureGate(FeatureGate{Name: DecentralizedLiveMigration, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: CrossClusterMigrationProxy, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: DeclarativeHotplugVolumesGate, State: Beta})
 	RegisterFeatureGate(FeatureGate{Name: ObjectGraph, State: Alpha})
@@ -321,7 +330,7 @@ func init() {
 	RegisterFeatureGate(FeatureGate{Name: ContainerPathVolumesGate, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: ReservedOverheadMemlock, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: OptOutRoleAggregation, State: Beta})
-	RegisterFeatureGate(FeatureGate{Name: VGPULiveMigration, State: Alpha})
+	RegisterFeatureGate(FeatureGate{Name: MDevVGPULiveMigration, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: VMStatsCollector, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: OCIExport, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: PluginsGate, State: Alpha})
@@ -332,4 +341,5 @@ func init() {
 	RegisterFeatureGate(FeatureGate{Name: MigrationDowntimeTuning, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: CrossArchitectureVirtualization, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: PortRangesSpec, State: Alpha})
+	RegisterFeatureGate(FeatureGate{Name: TLSGroupPreferences, State: Alpha})
 }

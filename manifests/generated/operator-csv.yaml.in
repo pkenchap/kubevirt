@@ -391,6 +391,7 @@ spec:
           verbs:
           - get
           - list
+          - watch
           - delete
           - patch
         - apiGroups:
@@ -1637,6 +1638,7 @@ spec:
                   capabilities:
                     drop:
                     - ALL
+                  readOnlyRootFilesystem: true
                   seccompProfile:
                     type: RuntimeDefault
                 terminationMessagePolicy: FallbackToLogsOnError

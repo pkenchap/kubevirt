@@ -119,6 +119,9 @@ func NewKubeVirtController(
 		PrometheusRuleCache:                   informers.PrometheusRule.GetStore(),
 		ValidatingAdmissionPolicyCache:        informers.ValidatingAdmissionPolicy.GetStore(),
 		ValidatingAdmissionPolicyBindingCache: informers.ValidatingAdmissionPolicyBinding.GetStore(),
+		SynchronizationServiceCache:           informers.SynchronizationService.GetStore(),
+		SynchronizationIngressCache:           informers.SynchronizationIngress.GetStore(),
+		SynchronizationRouteCache:             informers.SynchronizationRoute.GetStore(),
 	}
 
 	c := KubeVirtController{
@@ -175,6 +178,7 @@ func NewKubeVirtController(
 			informers.Deployment.HasSynced() &&
 			informers.DaemonSet.HasSynced() &&
 			informers.ValidationWebhook.HasSynced() &&
+			informers.MutatingWebhook.HasSynced() &&
 			informers.SCC.HasSynced() &&
 			informers.Route.HasSynced() &&
 			informers.InstallStrategyConfigMap.HasSynced() &&
@@ -415,6 +419,51 @@ func NewKubeVirtController(
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
 			c.genericUpdateHandler(oldObj, newObj, c.kubeVirtExpectations.Route)
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = informers.SynchronizationService.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			c.genericAddHandler(obj, nil)
+		},
+		DeleteFunc: func(obj interface{}) {
+			c.genericDeleteHandler(obj, nil)
+		},
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			c.genericUpdateHandler(oldObj, newObj, nil)
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = informers.SynchronizationIngress.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			c.genericAddHandler(obj, nil)
+		},
+		DeleteFunc: func(obj interface{}) {
+			c.genericDeleteHandler(obj, nil)
+		},
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			c.genericUpdateHandler(oldObj, newObj, nil)
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = informers.SynchronizationRoute.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			c.genericAddHandler(obj, nil)
+		},
+		DeleteFunc: func(obj interface{}) {
+			c.genericDeleteHandler(obj, nil)
+		},
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			c.genericUpdateHandler(oldObj, newObj, nil)
 		},
 	})
 	if err != nil {

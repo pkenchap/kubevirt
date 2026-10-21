@@ -37,6 +37,7 @@ import (
 	"go.uber.org/mock/gomock"
 	"libvirt.org/go/libvirt"
 
+	"kubevirt.io/kubevirt/pkg/storage/volumepath"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/disksource"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/network"
 
@@ -56,7 +57,6 @@ import (
 	"kubevirt.io/kubevirt/pkg/liveupdate/memory"
 	osdisk "kubevirt.io/kubevirt/pkg/os/disk"
 	virtpointer "kubevirt.io/kubevirt/pkg/pointer"
-	hostdisk "kubevirt.io/kubevirt/pkg/storage/host-disk"
 	"kubevirt.io/kubevirt/pkg/testutils"
 	"kubevirt.io/kubevirt/pkg/unsafepath"
 	"kubevirt.io/kubevirt/pkg/util"
@@ -120,7 +120,7 @@ var _ = Describe("Manager", func() {
 	testDomainName := fmt.Sprintf("%s_%s", testNamespace, testVmName)
 	ephemeralDiskCreatorMock := &fake.MockEphemeralDiskImageCreator{}
 	newLibvirtDomainManagerDefault := func() (DomainManager, error) {
-		return NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, nil, "", false, false, false, nil)
+		return NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, "", false, false, false, nil)
 	}
 
 	BeforeEach(func() {
@@ -694,7 +694,7 @@ var _ = Describe("Manager", func() {
 				func() {
 					isFreeCalled <- true
 				})
-			manager, _ := NewLibvirtDomainManager(mockLibvirt.VirtConnection, "fake", "fake", nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, nil, "", false, false, false, nil)
+			manager, _ := NewLibvirtDomainManager(mockLibvirt.VirtConnection, "fake", "fake", nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, "", false, false, false, nil)
 			Expect(manager.UnpauseVMI(vmi)).To(Succeed())
 			Eventually(func() bool {
 				select {
@@ -729,7 +729,7 @@ var _ = Describe("Manager", func() {
 			})
 			mockLibvirt.DomainEXPECT().Free().AnyTimes().Do(func() { freeCalls <- true })
 
-			manager, _ := NewLibvirtDomainManager(mockLibvirt.VirtConnection, "fake", "fake", nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, nil, "", false, false, false, nil)
+			manager, _ := NewLibvirtDomainManager(mockLibvirt.VirtConnection, "fake", "fake", nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, "", false, false, false, nil)
 
 			Expect(manager.UnpauseVMI(vmi)).To(Succeed())
 			Eventually(setTimeCalls, 20*time.Second, 1).Should(Receive(), "SetTime wasn't called on first unpause")
@@ -757,7 +757,7 @@ var _ = Describe("Manager", func() {
 			mockLibvirt.DomainEXPECT().GetState().Return(libvirt.DOMAIN_PAUSED, 1, nil)
 			mockLibvirt.DomainEXPECT().Resume().Return(nil)
 
-			manager, _ := NewLibvirtDomainManager(mockLibvirt.VirtConnection, "fake", "fake", nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, nil, "", false, false, false, nil)
+			manager, _ := NewLibvirtDomainManager(mockLibvirt.VirtConnection, "fake", "fake", nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, "", false, false, false, nil)
 
 			Expect(manager.FinalizeVirtualMachineMigration(vmi, &cmdv1.VirtualMachineOptions{})).To(Succeed())
 			Eventually(setTimeCalls, 20*time.Second, 1).Should(Receive(), "SetTime wasn't called on migration finalization")
@@ -842,7 +842,7 @@ var _ = Describe("Manager", func() {
 			mockLibvirt.DomainEXPECT().GetXMLDesc(libvirt.DomainXMLFlags(0)).MaxTimes(3).Return(string(xmlDomain), nil)
 			mockLibvirt.DomainEXPECT().GetXMLDesc(libvirt.DOMAIN_XML_INACTIVE).MaxTimes(1).Return(string(xmlDomain), nil)
 
-			manager, _ := newLibvirtDomainManager(mockLibvirt.VirtConnection, "fake", "fake", nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, &stubDiskDriverConfigurator{}, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, nil, "", false, false, false, nil)
+			manager, _ := newLibvirtDomainManager(mockLibvirt.VirtConnection, "fake", "fake", nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, &stubDiskDriverConfigurator{}, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, "", false, false, false, nil)
 			newspec, err := manager.SyncVMI(vmi, true, &cmdv1.VirtualMachineOptions{
 				VirtualMachineSMBios: &cmdv1.SMBios{},
 				PreallocatedVolumes:  []string{"permvolume1"},
@@ -973,7 +973,7 @@ var _ = Describe("Manager", func() {
 			mockLibvirt.DomainEXPECT().AttachDeviceFlags(strings.ToLower(string(attachBytes)), affectDeviceLiveAndConfigLibvirtFlags)
 			mockLibvirt.DomainEXPECT().GetXMLDesc(libvirt.DomainXMLFlags(0)).MaxTimes(3).Return(string(xmlDomain2), nil)
 
-			manager, _ := newLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, &stubDiskDriverConfigurator{}, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, nil, "", false, false, false, nil)
+			manager, _ := newLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, &stubDiskDriverConfigurator{}, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, "", false, false, false, nil)
 			newspec, err := manager.SyncVMI(vmi, true, &cmdv1.VirtualMachineOptions{VirtualMachineSMBios: &cmdv1.SMBios{}})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(newspec).ToNot(BeNil())
@@ -1082,7 +1082,7 @@ var _ = Describe("Manager", func() {
 			mockLibvirt.DomainEXPECT().DetachDeviceFlags(strings.ToLower(string(detachBytes)), affectDeviceLiveAndConfigLibvirtFlags)
 			mockLibvirt.DomainEXPECT().GetXMLDesc(libvirt.DomainXMLFlags(0)).MaxTimes(3).Return(string(xmlDomain), nil)
 			mockLibvirt.DomainEXPECT().GetXMLDesc(libvirt.DOMAIN_XML_INACTIVE).MaxTimes(1).Return(string(xmlDomain), nil)
-			manager, _ := newLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, &stubDiskDriverConfigurator{}, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, nil, "", false, false, false, nil)
+			manager, _ := newLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, &stubDiskDriverConfigurator{}, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, "", false, false, false, nil)
 			newspec, err := manager.SyncVMI(vmi, true, &cmdv1.VirtualMachineOptions{VirtualMachineSMBios: &cmdv1.SMBios{}})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(newspec).ToNot(BeNil())
@@ -1156,7 +1156,7 @@ var _ = Describe("Manager", func() {
 			}
 			mockLibvirt.DomainEXPECT().GetState().Return(libvirt.DOMAIN_SHUTDOWN, 1, nil)
 			mockLibvirt.DomainEXPECT().CreateWithFlags(libvirt.DOMAIN_NONE).Return(nil)
-			manager, _ := newLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, &stubDiskDriverConfigurator{}, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, nil, "", false, false, false, nil)
+			manager, _ := newLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, &stubDiskDriverConfigurator{}, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, "", false, false, false, nil)
 			newspec, err := manager.SyncVMI(vmi, true, &cmdv1.VirtualMachineOptions{VirtualMachineSMBios: &cmdv1.SMBios{}})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(newspec).ToNot(BeNil())
@@ -1257,7 +1257,7 @@ var _ = Describe("Manager", func() {
 			mockLibvirt.DomainEXPECT().CreateWithFlags(libvirt.DOMAIN_NONE).Return(nil)
 			mockLibvirt.DomainEXPECT().GetXMLDesc(libvirt.DomainXMLFlags(0)).MaxTimes(3).Return(string(xmlDomain2), nil)
 
-			manager, _ := newLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, &stubDiskDriverConfigurator{}, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, nil, "", false, false, false, nil)
+			manager, _ := newLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, &stubDiskDriverConfigurator{}, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, "", false, false, false, nil)
 			newspec, err := manager.SyncVMI(vmi, true, &cmdv1.VirtualMachineOptions{VirtualMachineSMBios: &cmdv1.SMBios{}})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(newspec).ToNot(BeNil())
@@ -1396,7 +1396,7 @@ var _ = Describe("Manager", func() {
 			mockLibvirt.DomainEXPECT().UpdateDeviceFlags(strings.ToLower(string(updateBytes)), affectDeviceLiveAndConfigLibvirtFlags)
 			mockLibvirt.DomainEXPECT().GetXMLDesc(libvirt.DomainXMLFlags(0)).MaxTimes(3).Return(string(xmlDomain2), nil)
 
-			manager, _ := newLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, &stubDiskDriverConfigurator{}, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, nil, "", false, false, false, nil)
+			manager, _ := newLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, &stubDiskDriverConfigurator{}, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, "", false, false, false, nil)
 			newspec, err := manager.SyncVMI(vmi, true, &cmdv1.VirtualMachineOptions{VirtualMachineSMBios: &cmdv1.SMBios{}})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(newspec).ToNot(BeNil())
@@ -1526,7 +1526,7 @@ var _ = Describe("Manager", func() {
 			mockLibvirt.DomainEXPECT().UpdateDeviceFlags(strings.ToLower(string(updateBytes)), affectDeviceLiveAndConfigLibvirtFlags)
 			mockLibvirt.DomainEXPECT().GetXMLDesc(libvirt.DomainXMLFlags(0)).MaxTimes(3).Return(string(xmlDomain2), nil)
 
-			manager, _ := newLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, &stubDiskDriverConfigurator{}, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, nil, "", false, false, false, nil)
+			manager, _ := newLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, &stubDiskDriverConfigurator{}, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, "", false, false, false, nil)
 			newspec, err := manager.SyncVMI(vmi, true, &cmdv1.VirtualMachineOptions{VirtualMachineSMBios: &cmdv1.SMBios{}})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(newspec).ToNot(BeNil())
@@ -1604,7 +1604,7 @@ var _ = Describe("Manager", func() {
 			defer os.RemoveAll(ovmfDir)
 			err = os.WriteFile(filepath.Join(ovmfDir, efi.EFICodeSEV), loaderBytes, 0644)
 			Expect(err).ToNot(HaveOccurred())
-			manager, _ := NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, ovmfDir, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, nil, "", false, false, false, nil)
+			manager, _ := NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, ovmfDir, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, "", false, false, false, nil)
 			sevMeasurementInfo, err := manager.GetLaunchMeasurement(vmi)
 			if runtime.GOARCH == "amd64" {
 				Expect(err).ToNot(HaveOccurred())
@@ -1813,7 +1813,7 @@ var _ = Describe("Manager", func() {
 					ephemeralDiskCreator:         ephemeralDiskCreatorMock,
 					hotplugHostDevicesInProgress: make(chan struct{}, maxConcurrentHotplugHostDevices),
 				}
-				manager.storageManager = storage.NewStorageManager(mockLibvirt.VirtConnection, metadataCache, nil)
+				manager.storageManager = storage.NewStorageManager(mockLibvirt.VirtConnection, metadataCache)
 				manager.credManager = accesscredentials.NewManager(mockLibvirt.VirtConnection, &manager.domainModifyLock, metadataCache, nil)
 			})
 
@@ -1920,7 +1920,7 @@ var _ = Describe("Manager", func() {
 				Physical: 20 * 1024 * 1024 * 1024,
 			}, nil)
 
-			manager, err := NewLibvirtDomainManager(localMockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, nil, "", false, false, false, nil)
+			manager, err := NewLibvirtDomainManager(localMockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, "", false, false, false, nil)
 			Expect(err).ToNot(HaveOccurred())
 			newspec, err := manager.SyncVMI(vmi, true, &cmdv1.VirtualMachineOptions{VirtualMachineSMBios: &cmdv1.SMBios{}})
 			Expect(err).ToNot(HaveOccurred())
@@ -1996,7 +1996,7 @@ var _ = Describe("Manager", func() {
 				return nil
 			})
 
-			monitor := newMigrationMonitor(vmi, manager, options, migrationDone)
+			monitor := newMigrationMonitor(vmi, manager, options, migrationDone, options.AllowPostCopy)
 			monitor.startMonitor(make(chan error, 1))
 		})
 		It("migration abort should be retried after transient failure", func() {
@@ -2063,7 +2063,7 @@ var _ = Describe("Manager", func() {
 				return nil
 			})
 
-			monitor := newMigrationMonitor(vmi, manager, options, migrationDone)
+			monitor := newMigrationMonitor(vmi, manager, options, migrationDone, options.AllowPostCopy)
 			monitor.startMonitor(make(chan error, 1))
 			Eventually(abortStatus, 500*time.Millisecond, 50*time.Millisecond).Should(Equal(string(v1.MigrationAbortSucceeded)))
 		})
@@ -2111,7 +2111,7 @@ var _ = Describe("Manager", func() {
 				return nil
 			})
 
-			monitor := newMigrationMonitor(vmi, manager, options, migrationDone)
+			monitor := newMigrationMonitor(vmi, manager, options, migrationDone, options.AllowPostCopy)
 			monitor.startMonitor(make(chan error, 1))
 			Eventually(abortStatus, 500*time.Millisecond, 50*time.Millisecond).Should(Equal(string(v1.MigrationAbortSucceeded)))
 		},
@@ -2170,7 +2170,7 @@ var _ = Describe("Manager", func() {
 				return nil
 			})
 
-			monitor := newMigrationMonitor(vmi, manager, options, migrationDone)
+			monitor := newMigrationMonitor(vmi, manager, options, migrationDone, options.AllowPostCopy)
 			monitor.startMonitor(make(chan error, 1))
 		})
 		It("migration should switch to PostCopy", func() {
@@ -2218,7 +2218,7 @@ var _ = Describe("Manager", func() {
 			})
 			mockLibvirt.DomainEXPECT().MigrateStartPostCopy(gomock.Eq(uint32(0))).Times(1).Return(nil)
 
-			monitor := newMigrationMonitor(vmi, manager, options, migrationDone)
+			monitor := newMigrationMonitor(vmi, manager, options, migrationDone, options.AllowPostCopy)
 			monitor.startMonitor(make(chan error, 1))
 		})
 
@@ -2281,7 +2281,7 @@ var _ = Describe("Manager", func() {
 				return nil
 			})
 
-			monitor := newMigrationMonitor(vmi, manager, options, migrationDone)
+			monitor := newMigrationMonitor(vmi, manager, options, migrationDone, options.AllowPostCopy)
 			monitor.startMonitor(make(chan error, 1))
 		})
 		It("migration should switch to Paused if AllowWorkloadDisruption is allowed and PostCopy is not", func() {
@@ -2332,7 +2332,113 @@ var _ = Describe("Manager", func() {
 			})
 			mockLibvirt.DomainEXPECT().Suspend().Times(1).Return(nil)
 
-			monitor := newMigrationMonitor(vmi, manager, options, migrationDone)
+			monitor := newMigrationMonitor(vmi, manager, options, migrationDone, options.AllowPostCopy)
+			monitor.startMonitor(make(chan error, 1))
+		})
+		It("migration should pause rather than switch to PostCopy when a hook disabled post-copy", func() {
+			migrationDone := make(chan struct{})
+			var migrationData = 32479827394
+			fake_jobinfo := func() *libvirt.DomainJobInfo {
+				// stop decreasing data and close the channel otherwise this
+				// job will run indefinitely until timeout
+				if migrationData <= 32479826519 {
+					close(migrationDone)
+					return &libvirt.DomainJobInfo{}
+				}
+
+				migrationData -= 125
+				return &libvirt.DomainJobInfo{
+					Type:             libvirt.DOMAIN_JOB_UNBOUNDED,
+					DataRemaining:    uint64(migrationData),
+					DataRemainingSet: true,
+				}
+			}
+
+			options := &cmdclient.MigrationOptions{
+				Bandwidth:               resource.MustParse("64Mi"),
+				ProgressTimeout:         3,
+				CompletionTimeoutPerGiB: 1,
+				AllowPostCopy:           true,
+				AllowWorkloadDisruption: true,
+			}
+			vmi := newVMI(testNamespace, testVmName)
+			vmi.Status.MigrationState = &v1.VirtualMachineInstanceMigrationState{
+				MigrationUID: "111222333",
+			}
+
+			manager := &LibvirtDomainManager{
+				paused: pausedVMIs{
+					paused: make(map[types.UID]bool),
+				},
+				virConn:       mockLibvirt.VirtConnection,
+				virtShareDir:  testVirtShareDir,
+				metadataCache: metadataCache,
+				cpuSetGetter:  fakeCpuSetGetter,
+			}
+
+			mockLibvirt.ConnectionEXPECT().LookupDomainByName(testDomainName).DoAndReturn(mockDomainWithFreeExpectation)
+			mockLibvirt.DomainEXPECT().GetState().AnyTimes().Return(libvirt.DOMAIN_RUNNING, 1, nil)
+			mockLibvirt.DomainEXPECT().GetJobStats(libvirt.DomainGetJobStatsFlags(0)).AnyTimes().DoAndReturn(func(flag libvirt.DomainGetJobStatsFlags) (*libvirt.DomainJobInfo, error) {
+				return fake_jobinfo(), nil
+			})
+			mockLibvirt.DomainEXPECT().MigrateStartPostCopy(gomock.Any()).Times(0)
+			mockLibvirt.DomainEXPECT().Suspend().Times(1).Return(nil)
+
+			// A PreMigrationSource hook removed the post-copy flag after the options were computed.
+			monitor := newMigrationMonitor(vmi, manager, options, migrationDone, false)
+			monitor.startMonitor(make(chan error, 1))
+		})
+		It("migration should switch to PostCopy when a hook enabled post-copy", func() {
+			migrationDone := make(chan struct{})
+			var migrationData = 32479827394
+			fake_jobinfo := func() *libvirt.DomainJobInfo {
+				// stop decreasing data and close the channel otherwise this
+				// job will run indefinitely until timeout
+				if migrationData <= 32479826519 {
+					close(migrationDone)
+					return &libvirt.DomainJobInfo{}
+				}
+
+				migrationData -= 125
+				return &libvirt.DomainJobInfo{
+					Type:             libvirt.DOMAIN_JOB_UNBOUNDED,
+					DataRemaining:    uint64(migrationData),
+					DataRemainingSet: true,
+				}
+			}
+
+			options := &cmdclient.MigrationOptions{
+				Bandwidth:               resource.MustParse("64Mi"),
+				ProgressTimeout:         3,
+				CompletionTimeoutPerGiB: 1,
+				AllowPostCopy:           false,
+				AllowWorkloadDisruption: true,
+			}
+			vmi := newVMI(testNamespace, testVmName)
+			vmi.Status.MigrationState = &v1.VirtualMachineInstanceMigrationState{
+				MigrationUID: "111222333",
+			}
+
+			manager := &LibvirtDomainManager{
+				paused: pausedVMIs{
+					paused: make(map[types.UID]bool),
+				},
+				virConn:       mockLibvirt.VirtConnection,
+				virtShareDir:  testVirtShareDir,
+				metadataCache: metadataCache,
+				cpuSetGetter:  fakeCpuSetGetter,
+			}
+
+			mockLibvirt.ConnectionEXPECT().LookupDomainByName(testDomainName).DoAndReturn(mockDomainWithFreeExpectation)
+			mockLibvirt.DomainEXPECT().GetState().AnyTimes().Return(libvirt.DOMAIN_RUNNING, 1, nil)
+			mockLibvirt.DomainEXPECT().GetJobStats(libvirt.DomainGetJobStatsFlags(0)).AnyTimes().DoAndReturn(func(flag libvirt.DomainGetJobStatsFlags) (*libvirt.DomainJobInfo, error) {
+				return fake_jobinfo(), nil
+			})
+			mockLibvirt.DomainEXPECT().MigrateStartPostCopy(gomock.Any()).Times(1).Return(nil)
+			mockLibvirt.DomainEXPECT().Suspend().Times(0)
+
+			// A PreMigrationSource hook added the post-copy flag after the options were computed.
+			monitor := newMigrationMonitor(vmi, manager, options, migrationDone, true)
 			monitor.startMonitor(make(chan error, 1))
 		})
 		It("migration should be canceled if Paused workload didn't migrate until timeout was reached", func() {
@@ -2389,7 +2495,7 @@ var _ = Describe("Manager", func() {
 				return nil
 			})
 
-			monitor := newMigrationMonitor(vmi, manager, options, migrationDone)
+			monitor := newMigrationMonitor(vmi, manager, options, migrationDone, options.AllowPostCopy)
 			monitor.startMonitor(make(chan error, 1))
 		})
 		// This is incomplete as it is not verifying that we abort. Previously it wasn't even testing anything at all
@@ -2491,7 +2597,7 @@ var _ = Describe("Manager", func() {
 				},
 			)
 
-			monitor := newMigrationMonitor(vmi, manager, options, migrationDone)
+			monitor := newMigrationMonitor(vmi, manager, options, migrationDone, options.AllowPostCopy)
 			done := make(chan struct{})
 			go func() {
 				monitor.startMonitor(make(chan error, 1))
@@ -2518,7 +2624,7 @@ var _ = Describe("Manager", func() {
 
 			mockLibvirt.ConnectionEXPECT().LookupDomainByName(testDomainName).Return(nil, fmt.Errorf("domain not found"))
 
-			monitor := newMigrationMonitor(vmi, manager, options, migrationDone)
+			monitor := newMigrationMonitor(vmi, manager, options, migrationDone, options.AllowPostCopy)
 			ready := make(chan error, 1)
 			monitor.startMonitor(ready)
 			Expect(ready).To(Receive(MatchError(ContainSubstring("domain not found"))))
@@ -2832,9 +2938,9 @@ var _ = Describe("Manager", func() {
 				}
 
 				options := &cmdv1.VirtualMachineOptions{
-					ClusterConfig: &cmdv1.ClusterConfig{VGPULiveMigrationEnabled: true},
+					ClusterConfig: &cmdv1.ClusterConfig{MDevVGPULiveMigrationEnabled: true},
 				}
-				manager, err := NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, nil, "", false, false, false, nil)
+				manager, err := NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, "", false, false, false, nil)
 				Expect(err).ToNot(HaveOccurred())
 				libvirtManager := manager.(*LibvirtDomainManager)
 
@@ -2877,7 +2983,7 @@ var _ = Describe("Manager", func() {
 			func(state libvirt.DomainState) {
 				mockLibvirt.ConnectionEXPECT().LookupDomainByName(testDomainName).DoAndReturn(mockDomainWithFreeExpectation)
 				mockLibvirt.DomainEXPECT().UndefineFlags(libvirt.DOMAIN_UNDEFINE_KEEP_NVRAM | libvirt.DOMAIN_UNDEFINE_CHECKPOINTS_METADATA).Return(nil)
-				manager, _ := NewLibvirtDomainManager(mockLibvirt.VirtConnection, "fake", "fake", nil, "/usr/share/", ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, nil, "", false, false, false, nil)
+				manager, _ := NewLibvirtDomainManager(mockLibvirt.VirtConnection, "fake", "fake", nil, "/usr/share/", ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, "", false, false, false, nil)
 				Expect(manager.DeleteVMI(newVMI(testNamespace, testVmName))).To(Succeed())
 			},
 			Entry("crashed", libvirt.DOMAIN_CRASHED),
@@ -3087,7 +3193,7 @@ var _ = Describe("Manager", func() {
 
 			BeforeEach(func() {
 				agentStore = agentpoller.NewAsyncAgentStore()
-				libvirtmanager, _ = NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, &agentStore, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, nil, "", false, false, false, nil)
+				libvirtmanager, _ = NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, &agentStore, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, "", false, false, false, nil)
 			})
 
 			It("should report nil when no OS info exists in the cache", func() {
@@ -3111,7 +3217,7 @@ var _ = Describe("Manager", func() {
 
 			BeforeEach(func() {
 				agentStore = agentpoller.NewAsyncAgentStore()
-				libvirtmanager, _ = NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, &agentStore, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, nil, "", false, false, false, nil)
+				libvirtmanager, _ = NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, &agentStore, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, "", false, false, false, nil)
 			})
 
 			It("should return nil when no interfaces exists in the cache", func() {
@@ -3155,7 +3261,7 @@ var _ = Describe("Manager", func() {
 				},
 			},
 		})
-		manager, _ := NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, &agentStore, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, nil, "", false, false, false, nil)
+		manager, _ := NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, &agentStore, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, "", false, false, false, nil)
 
 		// we need the non-typecast object to make the function we want to test available
 		libvirtmanager := manager.(*LibvirtDomainManager)
@@ -3191,7 +3297,7 @@ var _ = Describe("Manager", func() {
 			},
 		})
 
-		manager, _ := NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, &agentStore, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, nil, "", false, false, false, nil)
+		manager, _ := NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, &agentStore, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, "", false, false, false, nil)
 
 		// we need the non-typecast object to make the function we want to test available
 		libvirtmanager := manager.(*LibvirtDomainManager)
@@ -3218,7 +3324,7 @@ var _ = Describe("Manager", func() {
 			},
 		})
 
-		manager, _ := NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, &agentStore, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, nil, "", false, false, false, nil)
+		manager, _ := NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, &agentStore, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, "", false, false, false, nil)
 
 		// we need the non-typecast object to make the function we want to test available
 		libvirtmanager := manager.(*LibvirtDomainManager)
@@ -3245,7 +3351,7 @@ var _ = Describe("Manager", func() {
 			},
 		})
 
-		manager, _ := NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, &agentStore, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, nil, "", false, false, false, nil)
+		manager, _ := NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, &agentStore, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, "", false, false, false, nil)
 
 		// we need the non-typecast object to make the function we want to test available
 		libvirtmanager := manager.(*LibvirtDomainManager)
@@ -3291,7 +3397,7 @@ var _ = Describe("Manager", func() {
 			},
 		})
 
-		manager, _ := NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, &agentStore, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, nil, "", false, false, false, nil)
+		manager, _ := NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, &agentStore, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, "", false, false, false, nil)
 
 		// we need the non-typecast object to make the function we want to test available
 		libvirtmanager := manager.(*LibvirtDomainManager)
@@ -3651,7 +3757,7 @@ var _ = Describe("Manager", func() {
 					rebootCallback = callback
 					return nil
 				})
-			manager, err := NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, nil, testDomainName, true, false, false, nil)
+			manager, err := NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, testDomainName, true, false, false, nil)
 			Expect(err).ToNot(HaveOccurred())
 			return manager
 		}
@@ -3729,7 +3835,7 @@ var _ = Describe("Manager", func() {
 
 		It("should fail to create the manager if the reboot event callback cannot be registered", func() {
 			mockLibvirt.ConnectionEXPECT().DomainEventRebootRegister(gomock.Any()).Return(fmt.Errorf("register failed"))
-			_, err := NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, nil, testDomainName, true, false, false, nil)
+			_, err := NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, virtconfig.DefaultARCHOVMFPath, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, testDomainName, true, false, false, nil)
 			Expect(err).To(MatchError(ContainSubstring("failed to register reboot event callback")))
 		})
 	})
@@ -3786,7 +3892,7 @@ var _ = Describe("Manager", func() {
 		})
 
 		It("should use firmware auto-selection for standard secure boot when feature gate is enabled", func() {
-			manager, err := NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, "/usr/share/OVMF", ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, nil, "", false, true, false, nil)
+			manager, err := NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, "/usr/share/OVMF", ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, "", false, true, false, nil)
 			Expect(err).ToNot(HaveOccurred())
 
 			options := &cmdv1.VirtualMachineOptions{
@@ -3813,7 +3919,7 @@ var _ = Describe("Manager", func() {
 			Expect(os.WriteFile(filepath.Join(ovmfDir, efiCodeFile), []byte("code"), 0644)).To(Succeed())
 			Expect(os.WriteFile(filepath.Join(ovmfDir, efiVarsFile), []byte("vars"), 0644)).To(Succeed())
 
-			manager, err := NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, ovmfDir, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, nil, "", false, firmwareAutoSelection, false, nil)
+			manager, err := NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, ovmfDir, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, "", false, firmwareAutoSelection, false, nil)
 			Expect(err).ToNot(HaveOccurred())
 
 			libvirtManager := manager.(*LibvirtDomainManager)
@@ -3849,7 +3955,7 @@ var _ = Describe("Manager", func() {
 				Expect(os.WriteFile(filepath.Join(ovmfDir, f), []byte("data"), 0644)).To(Succeed())
 			}
 
-			manager, err := NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, ovmfDir, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, nil, "", false, true, false, nil)
+			manager, err := NewLibvirtDomainManager(mockLibvirt.VirtConnection, testVirtShareDir, testEphemeralDiskDir, nil, ovmfDir, ephemeralDiskCreatorMock, metadataCache, nil, virtconfig.DefaultDiskVerificationMemoryLimitBytes, fakeCpuSetGetter, false, nil, v1.KvmHypervisorName, "", false, true, false, nil)
 			Expect(err).ToNot(HaveOccurred())
 
 			libvirtManager := manager.(*LibvirtDomainManager)
@@ -5004,7 +5110,7 @@ func isoCreationFunc(isoOutFile, volumeID string, inDir string) error {
 }
 
 func getFsImagePath(name string) string {
-	return filepath.Join(hostdisk.GetMountedHostDiskDir(name), "disk.img")
+	return volumepath.Filesystem(name)
 }
 
 func getBlockPath(name string) string {
@@ -5108,5 +5214,33 @@ var _ = Describe("findDiskFileInImageVolume", func() {
 		_, err := findDiskFileInImageVolume(filepath.Join(baseDir, "nonexistent"))
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("failed to read image volume directory"))
+	})
+})
+
+var _ = Describe("PreBoot artifact paths", func() {
+	var manager *LibvirtDomainManager
+	var vmi *v1.VirtualMachineInstance
+
+	BeforeEach(func() {
+		ephemeralDir := GinkgoT().TempDir()
+		manager = &LibvirtDomainManager{ephemeralDiskDir: ephemeralDir, virtShareDir: ephemeralDir}
+		vmi = &v1.VirtualMachineInstance{ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default", UID: "test-uid"}}
+	})
+
+	It("omits a cloud-init artifact when none was generated", func() {
+		paths := manager.preBootArtifactPaths(vmi)
+		Expect(paths).NotTo(HaveKey("cloudInitISO"))
+		Expect(paths).To(HaveKeyWithValue("ephemeralDiskDir", manager.ephemeralDiskDir))
+	})
+
+	It("includes the cloud-init artifact once its ISO exists on disk", func() {
+		manager.cloudInitDataStore = &cloudinit.CloudInitData{DataSource: cloudinit.DataSourceNoCloud}
+		isoPath := cloudinit.GetIsoFilePath(cloudinit.DataSourceNoCloud, vmi.Name, vmi.Namespace)
+		Expect(os.MkdirAll(filepath.Dir(isoPath), 0755)).To(Succeed())
+		Expect(os.WriteFile(isoPath, []byte("iso"), 0600)).To(Succeed())
+		DeferCleanup(os.RemoveAll, filepath.Dir(isoPath))
+
+		paths := manager.preBootArtifactPaths(vmi)
+		Expect(paths).To(HaveKeyWithValue("cloudInitISO", isoPath))
 	})
 })

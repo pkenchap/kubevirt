@@ -17706,36 +17706,6 @@ func schema_kubevirtio_api_backup_v1alpha1_BackupOptions(ref common.ReferenceCal
 							Format: "",
 						},
 					},
-					"exportServerAddr": {
-						SchemaProps: spec.SchemaProps{
-							Type:   []string{"string"},
-							Format: "",
-						},
-					},
-					"exportServerName": {
-						SchemaProps: spec.SchemaProps{
-							Type:   []string{"string"},
-							Format: "",
-						},
-					},
-					"backupKey": {
-						SchemaProps: spec.SchemaProps{
-							Type:   []string{"string"},
-							Format: "",
-						},
-					},
-					"backupCert": {
-						SchemaProps: spec.SchemaProps{
-							Type:   []string{"string"},
-							Format: "",
-						},
-					},
-					"caCert": {
-						SchemaProps: spec.SchemaProps{
-							Type:   []string{"string"},
-							Format: "",
-						},
-					},
 				},
 			},
 		},
@@ -18028,13 +17998,6 @@ func schema_kubevirtio_api_backup_v1alpha1_VirtualMachineBackupStatus(ref common
 									},
 								},
 							},
-						},
-					},
-					"exportUID": {
-						SchemaProps: spec.SchemaProps{
-							Description: "ExportUID tracks the UID of the associated VMExport for pull-mode backups used to detect VMExport recreation and re-initiate the export handshake",
-							Type:        []string{"string"},
-							Format:      "",
 						},
 					},
 					"links": {
@@ -23459,6 +23422,13 @@ func schema_kubevirtio_api_core_v1_KubeVirtConfiguration(ref common.ReferenceCal
 							Format:      "",
 						},
 					},
+					"emulationPolicy": {
+						SchemaProps: spec.SchemaProps{
+							Description: "EmulationPolicy is the default emulation policy for VMs that do not set spec.emulationPolicy. A VM may set a more permissive policy.\n\nValid Options from least to most permissive are: - None: Only native-kvm - Hardware: Not yet implemented - Software: Qemu TCG cross-architecture emulation Default policy is 'None'\n\nThis is an alpha field and should only be configured if the feature-gate CrossArchitectureVirtualization is enabled. This feature is in alpha.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 				},
 			},
 		},
@@ -26836,6 +26806,26 @@ func schema_kubevirtio_api_core_v1_TLSConfiguration(ref common.ReferenceCallback
 							},
 						},
 					},
+					"groups": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Groups defines the set of allowed TLS supported groups (elliptic curves) on all TLS server endpoints. Group names follow the IANA TLS Supported Groups registry (e.g. X25519, secp256r1, X25519MLKEM768). Unrecognised names are silently ignored at TLS setup time, so an older component tolerates group names added in a newer release. When empty or when the TLSGroupPreferences feature gate is disabled, Go's default curve preferences apply. MaxItems bounds the CEL cost estimate for the exists() validation rule on TLSConfiguration; without it the CRD is rejected at creation time.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
 				},
 			},
 		},
@@ -29913,6 +29903,13 @@ func schema_kubevirtio_api_core_v1_VirtualMachineInstanceSpec(ref common.Referen
 									},
 								},
 							},
+						},
+					},
+					"emulationPolicy": {
+						SchemaProps: spec.SchemaProps{
+							Description: "The most permissive emulation backend this VM may use. Takes precedence over spec.configuration.emulationPolicy in the KubeVirt CR.\n\nValid Options from least to most permissive are: - None: Only native-kvm - Hardware: Not yet implemented - Software: Qemu TCG cross-architecture emulation Default policy is 'None'\n\nThis is an alpha field and should only be configured if the feature-gate CrossArchitectureVirtualization is enabled. This feature is in alpha.",
+							Type:        []string{"string"},
+							Format:      "",
 						},
 					},
 				},
@@ -33729,11 +33726,11 @@ func schema_kubevirtio_api_plugin_v1alpha1_CELLauncherHook(ref common.ReferenceC
 				Properties: map[string]spec.Schema{
 					"hookPoint": {
 						SchemaProps: spec.SchemaProps{
-							Description: "HookPoint specifies which launcher hook point this CEL expression applies to. GuestDefinition is the only currently supported launcher hook point for CEL.\n\nPossible enum values:\n - `\"GuestDefinition\"`",
+							Description: "HookPoint specifies which launcher hook point this CEL expression applies to. GuestDefinition is the only currently supported launcher hook point for CEL.\n\nPossible enum values:\n - `\"GuestDefinition\"`\n - `\"PreBoot\"`\n - `\"PreMigrationSource\"`",
 							Default:     "",
 							Type:        []string{"string"},
 							Format:      "",
-							Enum:        []interface{}{"GuestDefinition"},
+							Enum:        []interface{}{"GuestDefinition", "PreBoot", "PreMigrationSource"},
 						},
 					},
 					"expression": {
@@ -33772,7 +33769,7 @@ func schema_kubevirtio_api_plugin_v1alpha1_LauncherHook(ref common.ReferenceCall
 					},
 					"condition": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Condition is a CEL expression that determines whether this hook applies to a given VM.",
+							Description: "Condition is a CEL expression that determines whether this hook applies to a given VM. The expression may reference only `vmi` and must evaluate to a bool.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -33837,7 +33834,7 @@ func schema_kubevirtio_api_plugin_v1alpha1_NodeHook(ref common.ReferenceCallback
 					},
 					"condition": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Condition is a CEL expression that determines whether this hook applies to a given VM.",
+							Description: "Condition is a CEL expression that determines whether this hook applies to a given VM. The expression may reference only `vmi` and must evaluate to a bool.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -33976,7 +33973,7 @@ func schema_kubevirtio_api_plugin_v1alpha1_PluginSpec(ref common.ReferenceCallba
 				Properties: map[string]spec.Schema{
 					"condition": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Condition is a CEL expression that determines whether this plugin applies to a given VM. When set, this acts as a baseline filter for all hooks in the plugin. Individual hooks may further narrow the scope with their own Condition fields. Condition expressions are evaluated once per pipeline invocation, against the VMI/domain state as it existed before any hook in that invocation ran. They are not re-evaluated to reflect mutations made by other hooks applied earlier in the same invocation.",
+							Description: "Condition is a CEL expression that determines whether this plugin applies to a given VM. The expression may reference only `vmi` and must evaluate to a bool. When set, this acts as a baseline filter for all hooks in the plugin. Individual hooks may further narrow the scope with their own Condition fields. An empty condition always matches.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -34150,7 +34147,7 @@ func schema_kubevirtio_api_plugin_v1alpha1_SidecarLauncherHook(ref common.Refere
 										Default: "",
 										Type:    []string{"string"},
 										Format:  "",
-										Enum:    []interface{}{"GuestDefinition"},
+										Enum:    []interface{}{"GuestDefinition", "PreBoot", "PreMigrationSource"},
 									},
 								},
 							},

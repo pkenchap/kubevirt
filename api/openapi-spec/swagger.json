@@ -15947,6 +15947,10 @@
        "default": ""
       }
      },
+     "emulationPolicy": {
+      "description": "EmulationPolicy is the default emulation policy for VMs that do not set spec.emulationPolicy. A VM may set a more permissive policy.\n\nValid Options from least to most permissive are: - None: Only native-kvm - Hardware: Not yet implemented - Software: Qemu TCG cross-architecture emulation Default policy is 'None'\n\nThis is an alpha field and should only be configured if the feature-gate CrossArchitectureVirtualization is enabled. This feature is in alpha.",
+      "type": "string"
+     },
      "evictionStrategy": {
       "description": "EvictionStrategy defines at the cluster level if the VirtualMachineInstance should be migrated instead of shut-off in case of a node drain. If the VirtualMachineInstance specific field is set it overrides the cluster level one.",
       "type": "string"
@@ -17848,6 +17852,15 @@
       },
       "x-kubernetes-list-type": "set"
      },
+     "groups": {
+      "description": "Groups defines the set of allowed TLS supported groups (elliptic curves) on all TLS server endpoints. Group names follow the IANA TLS Supported Groups registry (e.g. X25519, secp256r1, X25519MLKEM768). Unrecognised names are silently ignored at TLS setup time, so an older component tolerates group names added in a newer release. When empty or when the TLSGroupPreferences feature gate is disabled, Go's default curve preferences apply. MaxItems bounds the CEL cost estimate for the exists() validation rule on TLSConfiguration; without it the CRD is rejected at creation time.",
+      "type": "array",
+      "items": {
+       "type": "string",
+       "default": ""
+      },
+      "x-kubernetes-list-type": "atomic"
+     },
      "minTLSVersion": {
       "description": "MinTLSVersion is a way to specify the minimum protocol version that is acceptable for TLS connections. Protocol versions are based on the following most common TLS configurations:\n\n  https://ssl-config.mozilla.org/\n\nNote that SSLv3.0 is not a supported protocol version due to well known vulnerabilities such as POODLE: https://en.wikipedia.org/wiki/POODLE",
       "type": "string"
@@ -19734,6 +19747,10 @@
       "default": {},
       "$ref": "#/definitions/v1.DomainSpec"
      },
+     "emulationPolicy": {
+      "description": "The most permissive emulation backend this VM may use. Takes precedence over spec.configuration.emulationPolicy in the KubeVirt CR.\n\nValid Options from least to most permissive are: - None: Only native-kvm - Hardware: Not yet implemented - Software: Qemu TCG cross-architecture emulation Default policy is 'None'\n\nThis is an alpha field and should only be configured if the feature-gate CrossArchitectureVirtualization is enabled. This feature is in alpha.",
+      "type": "string"
+     },
      "evictionStrategy": {
       "description": "EvictionStrategy describes the strategy to follow when a node drain occurs. The possible options are: - \"None\": No action will be taken, according to the specified 'RunStrategy' the VirtualMachine will be restarted or shutdown. - \"LiveMigrate\": the VirtualMachineInstance will be migrated instead of being shutdown. - \"LiveMigrateIfPossible\": the same as \"LiveMigrate\" but only if the VirtualMachine is Live-Migratable, otherwise it will behave as \"None\". - \"External\": the VirtualMachineInstance will be protected and `vmi.Status.EvacuationNodeName` will be set on eviction. This is mainly useful for cluster-api-provider-kubevirt (capk) which needs a way for VMI's to be blocked from eviction, yet signal capk that eviction has been called on the VMI so the capk controller can handle tearing the VMI down. Details can be found in the commit description https://github.com/kubevirt/kubevirt/commit/c1d77face705c8b126696bac9a3ee3825f27f1fa.",
       "type": "string"
@@ -20549,28 +20566,13 @@
     "description": "BackupOptions are options used to configure virtual machine backup job",
     "type": "object",
     "properties": {
-     "backupCert": {
-      "type": "string"
-     },
-     "backupKey": {
-      "type": "string"
-     },
      "backupName": {
       "type": "string"
      },
      "backupStartTime": {
       "$ref": "#/definitions/io.k8s.apimachinery.pkg.apis.meta.v1.Time"
      },
-     "caCert": {
-      "type": "string"
-     },
      "cmd": {
-      "type": "string"
-     },
-     "exportServerAddr": {
-      "type": "string"
-     },
-     "exportServerName": {
       "type": "string"
      },
      "incremental": {
@@ -20858,10 +20860,6 @@
        "type"
       ],
       "x-kubernetes-list-type": "map"
-     },
-     "exportUID": {
-      "description": "ExportUID tracks the UID of the associated VMExport for pull-mode backups used to detect VMExport recreation and re-initiate the export handshake",
-      "type": "string"
      },
      "includedVolumes": {
       "description": "IncludedVolumes lists the volumes that were included in the backup",

@@ -77,6 +77,17 @@ const (
 	StartStrategyPaused StartStrategy = "Paused"
 )
 
+type EmulationPolicy string
+
+var EmulationPolicies = []EmulationPolicy{EmulationPolicyNone, EmulationPolicyHardware, EmulationPolicySoftware}
+
+// Valid EmultionPolicy values
+const (
+	EmulationPolicyNone     EmulationPolicy = "None"
+	EmulationPolicyHardware EmulationPolicy = "Hardware"
+	EmulationPolicySoftware EmulationPolicy = "Software"
+)
+
 // VirtualMachineInstanceSpec is a description of a VirtualMachineInstance.
 type VirtualMachineInstanceSpec struct {
 
@@ -201,6 +212,22 @@ type VirtualMachineInstanceSpec struct {
 	// +listMapKey=name
 	// +optional
 	UtilityVolumes []UtilityVolume `json:"utilityVolumes,omitempty"`
+	// The most permissive emulation backend this VM may use.
+	// Takes precedence over spec.configuration.emulationPolicy in the KubeVirt CR.
+	//
+	// Valid Options from least to most permissive are:
+	// - None: Only native-kvm
+	// - Hardware: Not yet implemented
+	// - Software: Qemu TCG cross-architecture emulation
+	// Default policy is 'None'
+	//
+	// This is an alpha field and should only be configured if the
+	// feature-gate CrossArchitectureVirtualization is enabled.
+	// This feature is in alpha.
+	//
+	// +optional
+	// +kubebuilder:validation:Enum=None;Hardware;Software
+	EmulationPolicy *EmulationPolicy `json:"emulationPolicy,omitempty"`
 }
 
 type VirtualMachineInstanceResourceClaim struct {
@@ -1458,6 +1485,20 @@ const (
 
 	// CrossClusterMigrationInterfaceName is the name of the interface used for cross-cluster migration
 	CrossClusterMigrationInterfaceName string = "crosscluster0"
+
+	// SynchronizationEndpointLabel is applied by admins to exactly one Ingress,
+	// Route, or Service to designate it as the external endpoint for the
+	// virt-synchronization-controller peer gRPC traffic. When the proxy datapath
+	// is enabled without crossClusterNetwork, KubeVirt discovers the labeled
+	// resource and publishes its address in status.synchronizationAddresses.
+	// At most one resource of each type may carry this label; duplicates within
+	// a type are rejected. Priority: Route > Ingress > Service.
+	//
+	// The selector uses key-exists semantics: the label value is ignored, so
+	// any value (including an empty string) will match. Set the label to "true"
+	// by convention; note that setting it to "false" will NOT disable discovery.
+	// To stop discovery, remove the label entirely.
+	SynchronizationEndpointLabel = "kubevirt.io/synchronization-endpoint"
 
 	// EmulatorThreadCompleteToEvenParity alpha annotation will cause Kubevirt to complete the VMI's CPU count to an even parity when IsolateEmulatorThread options are requested
 	EmulatorThreadCompleteToEvenParity string = "alpha.kubevirt.io/EmulatorThreadCompleteToEvenParity"
@@ -2782,6 +2823,11 @@ const (
 	KubeVirtConditionProgressing KubeVirtConditionType = "Progressing"
 	// Whether KubeVirt is not functioning completely
 	KubeVirtConditionDegraded KubeVirtConditionType = "Degraded"
+
+	// Whether the synchronization endpoint for cross-cluster proxy migrations
+	// is correctly configured (exactly one labeled Route/Ingress/Service when
+	// the proxy datapath is enabled without crossClusterNetwork).
+	KubeVirtConditionSynchronizationEndpoint KubeVirtConditionType = "SynchronizationEndpoint"
 )
 
 const (
@@ -3228,6 +3274,23 @@ type KubeVirtConfiguration struct {
 	// +optional
 	// +kubebuilder:validation:Enum=AggregateToDefault;Manual
 	RoleAggregationStrategy *RoleAggregationStrategy `json:"roleAggregationStrategy,omitempty"`
+
+	// EmulationPolicy is the default emulation policy for VMs that do not set
+	// spec.emulationPolicy. A VM may set a more permissive policy.
+	//
+	// Valid Options from least to most permissive are:
+	// - None: Only native-kvm
+	// - Hardware: Not yet implemented
+	// - Software: Qemu TCG cross-architecture emulation
+	// Default policy is 'None'
+	//
+	// This is an alpha field and should only be configured if the
+	// feature-gate CrossArchitectureVirtualization is enabled.
+	// This feature is in alpha.
+	//
+	// +optional
+	// +kubebuilder:validation:Enum=None;Hardware;Software
+	EmulationPolicy *EmulationPolicy `json:"emulationPolicy,omitempty"`
 }
 
 // QGSConfiguration holds QGS configuration
@@ -3388,6 +3451,20 @@ const (
 	VersionTLS13 TLSProtocolVersion = "VersionTLS13"
 )
 
+// TLS supported group name constants using IANA TLS Supported Groups
+// registry names. These are convenience constants for use with
+// TLSConfiguration.Groups; the field is an open string set and is
+// not restricted to these values.
+const (
+	TLSGroupX25519             = "X25519"
+	TLSGroupSecp256r1          = "secp256r1"
+	TLSGroupSecp384r1          = "secp384r1"
+	TLSGroupSecp521r1          = "secp521r1"
+	TLSGroupX25519MLKEM768     = "X25519MLKEM768"
+	TLSGroupSecP256r1MLKEM768  = "SecP256r1MLKEM768"
+	TLSGroupSecP384r1MLKEM1024 = "SecP384r1MLKEM1024"
+)
+
 type CustomProfile struct {
 	LocalhostProfile      *string `json:"localhostProfile,omitempty"`
 	RuntimeDefaultProfile bool    `json:"runtimeDefaultProfile,omitempty"`
@@ -3423,6 +3500,7 @@ type DisableFreePageReporting struct{}
 type DisableSerialConsoleLog struct{}
 
 // TLSConfiguration holds TLS options
+// +kubebuilder:validation:XValidation:rule="!has(self.groups) || size(self.groups) == 0 || (has(self.minTLSVersion) && self.minTLSVersion == 'VersionTLS13') || !self.groups.exists(g, g in ['X25519MLKEM768','SecP256r1MLKEM768','SecP384r1MLKEM1024']) || self.groups.exists(g, g in ['X25519','secp256r1','secp384r1','secp521r1'])",message="a classical group (X25519, secp256r1, secp384r1 or secp521r1) is required in groups when minTLSVersion is below VersionTLS13 and a TLS 1.3-only group such as X25519MLKEM768 is configured"
 type TLSConfiguration struct {
 	// MinTLSVersion is a way to specify the minimum protocol version that is acceptable for TLS connections.
 	// Protocol versions are based on the following most common TLS configurations:
@@ -3435,6 +3513,19 @@ type TLSConfiguration struct {
 	MinTLSVersion TLSProtocolVersion `json:"minTLSVersion,omitempty"`
 	// +listType=set
 	Ciphers []string `json:"ciphers,omitempty"`
+	// Groups defines the set of allowed TLS supported groups (elliptic curves)
+	// on all TLS server endpoints. Group names follow the IANA TLS Supported
+	// Groups registry (e.g. X25519, secp256r1, X25519MLKEM768). Unrecognised
+	// names are silently ignored at TLS setup time, so an older component
+	// tolerates group names added in a newer release. When empty or when the
+	// TLSGroupPreferences feature gate is disabled, Go's default curve
+	// preferences apply.
+	// +optional
+	// +listType=atomic
+	// MaxItems bounds the CEL cost estimate for the exists() validation rule
+	// on TLSConfiguration; without it the CRD is rejected at creation time.
+	// +kubebuilder:validation:MaxItems=32
+	Groups []string `json:"groups,omitempty"`
 }
 
 type StallDetectorOptions struct {

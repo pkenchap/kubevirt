@@ -216,8 +216,8 @@ func (config *ClusterConfig) OptOutRoleAggregationEnabled() bool {
 	return config.IsFeatureGateEnabled(featuregate.OptOutRoleAggregation)
 }
 
-func (config *ClusterConfig) VGPULiveMigrationEnabled() bool {
-	return config.IsFeatureGateEnabled(featuregate.VGPULiveMigration)
+func (config *ClusterConfig) MDevVGPULiveMigrationEnabled() bool {
+	return config.IsFeatureGateEnabled(featuregate.MDevVGPULiveMigration)
 }
 
 func (config *ClusterConfig) VMStatsCollectorEnabled() bool {
@@ -246,4 +246,8 @@ func (config *ClusterConfig) MigrationStallDetectionEnabled() bool {
 
 func (config *ClusterConfig) MigrationDowntimeTuningEnabled() bool {
 	return config.IsFeatureGateEnabled(featuregate.MigrationDowntimeTuning)
+}
+
+func (config *ClusterConfig) TLSGroupPreferencesEnabled() bool {
+	return config.IsFeatureGateEnabled(featuregate.TLSGroupPreferences)
 }

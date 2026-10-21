@@ -376,7 +376,6 @@ type VMExportController struct {
 	ControllerRevisionInformer  cache.SharedIndexInformer
 	VMBackupInformer            cache.SharedIndexInformer
 	VMBackupTrackerInformer     cache.SharedIndexInformer
-	BackupCAConfigMapInformer   cache.SharedIndexInformer
 	VMTemplateInformer          cache.SharedIndexInformer
 
 	Recorder record.EventRecorder
@@ -760,22 +759,18 @@ func (ctrl *VMExportController) updateVMExport(vmExport *exportv1.VirtualMachine
 		if vmBackup.Status == nil || vmBackup.Status.Type == "" {
 			return 0, fmt.Errorf("backup status empty")
 		}
-		caCert, exists, err := ctrl.backupCA()
-		if err != nil || !exists {
-			return 0, fmt.Errorf("could not obtain VirtualMachineBackup tunnel CA: %w", err)
-		}
-		vmiID, err := ctrl.getBackupSourceVMIID(vmBackup)
+		vmi, err := ctrl.getBackupSourceVMI(vmBackup)
 		if err != nil {
 			return 0, err
 		}
-		return ctrl.handleSource(vmExport, NewVMBackupSource(vmBackup, caCert, vmiID))
+		return ctrl.handleSource(vmExport, NewVMBackupSource(vmBackup, vmi))
 	}
 
 	return 0, nil
 }
 
 func (ctrl *VMExportController) handleSource(vmExport *exportv1.VirtualMachineExport, source exportSource) (time.Duration, error) {
-	service, err := ctrl.getOrCreateExportService(vmExport, source)
+	service, err := ctrl.getOrCreateExportService(vmExport)
 	if err != nil {
 		return 0, err
 	}
@@ -1031,11 +1026,7 @@ func getExportPodVolumeName(pvc *corev1.PersistentVolumeClaim) string {
 	return getExportPodVolumeNameFromStr(pvc.Name)
 }
 
-// getExportPodVolumeNameFromStr sanitizes and hashes the PVC name to match the volume name used in the Pod.
-//
-// CRITICAL: This logic must stay strictly in sync with the volume naming logic used in 'createExportPod'.
-// If the logic in createExportPod changes (e.g. prefix or hashing algorithm), this function MUST be updated
-// to match, otherwise the export server will fail to locate the mounted volumes.
+// getExportPodVolumeNameFromStr sanitizes and hashes the PVC name into the volume name used in the Pod.
 func getExportPodVolumeNameFromStr(claimName string) string {
 	pvcName := strings.ReplaceAll(claimName, ".", "-")
 	// Using the formatted PVC name if it's under the max length.
@@ -1056,7 +1047,7 @@ func (ctrl *VMExportController) getExportLabelValue(vmExport *exportv1.VirtualMa
 	return naming.GetName(exportPrefix, vmExport.Name, validation.DNS1035LabelMaxLength)
 }
 
-func (ctrl *VMExportController) getOrCreateExportService(vmExport *exportv1.VirtualMachineExport, source exportSource) (*corev1.Service, error) {
+func (ctrl *VMExportController) getOrCreateExportService(vmExport *exportv1.VirtualMachineExport) (*corev1.Service, error) {
 	key := controller.NamespacedKey(vmExport.Namespace, ctrl.getExportServiceName(vmExport))
 	obj, exists, err := ctrl.ServiceInformer.GetStore().GetByKey(key)
 	if err != nil {
@@ -1069,7 +1060,7 @@ func (ctrl *VMExportController) getOrCreateExportService(vmExport *exportv1.Virt
 		return obj.(*corev1.Service), nil
 	}
 
-	service := ctrl.createServiceManifest(vmExport, source)
+	service := ctrl.createServiceManifest(vmExport)
 	log.Log.V(3).Infof("Creating new exporter service %s/%s", service.Namespace, service.Name)
 	service, err = ctrl.Client.CoreV1().Services(vmExport.Namespace).Create(context.Background(), service, metav1.CreateOptions{})
 	if err != nil {
@@ -1079,7 +1070,7 @@ func (ctrl *VMExportController) getOrCreateExportService(vmExport *exportv1.Virt
 	return service, nil
 }
 
-func (ctrl *VMExportController) createServiceManifest(vmExport *exportv1.VirtualMachineExport, source exportSource) *corev1.Service {
+func (ctrl *VMExportController) createServiceManifest(vmExport *exportv1.VirtualMachineExport) *corev1.Service {
 	labels := map[string]string{virtv1.AppLabel: exportv1.App}
 	for key, value := range vmExport.Labels {
 		labels[key] = value
@@ -1106,14 +1097,6 @@ func (ctrl *VMExportController) createServiceManifest(vmExport *exportv1.Virtual
 				exportServiceLabel: ctrl.getExportLabelValue(vmExport),
 			},
 		},
-	}
-
-	// The backup tunnel is established by virt-launcher dialing this service,
-	// but the export server only reports ready once the tunnel is up. The
-	// endpoint must be routable while the pod is still unready, otherwise the
-	// tunnel can never connect and readiness deadlocks.
-	if _, isBackup := source.(*VMBackupSource); isBackup {
-		service.Spec.PublishNotReadyAddresses = true
 	}
 
 	return service
@@ -1913,6 +1896,20 @@ func (ctrl *VMExportController) appendTLSEnvVars(podManifest *corev1.Pod) {
 				Name:  "TLS_CIPHER_SUITES",
 				Value: string(cipherJSON),
 			})
+		}
+	}
+	if ctrl.clusterConfig.TLSGroupPreferencesEnabled() && len(tlsConfig.Groups) > 0 {
+		curveIDs := kvtls.CurvePreferenceIds(tlsConfig.Groups)
+		if len(curveIDs) > 0 {
+			curveJSON, err := json.Marshal(curveIDs)
+			if err != nil {
+				log.Log.Warningf("Failed to marshal TLS curve preference IDs: %v", err)
+			} else {
+				podManifest.Spec.Containers[0].Env = append(podManifest.Spec.Containers[0].Env, corev1.EnvVar{
+					Name:  "TLS_CURVE_PREFERENCES",
+					Value: string(curveJSON),
+				})
+			}
 		}
 	}
 }

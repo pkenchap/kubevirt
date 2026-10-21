@@ -109,6 +109,7 @@ func (admitter *VMICreateAdmitter) Admit(_ context.Context, ar *admissionv1.Admi
 	}
 
 	var causes []metav1.StatusCause
+	causes = append(causes, validateContainerPathVolumesFeatureGate(k8sfield.NewPath("spec"), vmi.Spec.Volumes, nil, admitter.ClusterConfig)...)
 	clusterCfg := admitter.ClusterConfig.GetConfig()
 	if devCfg := clusterCfg.DeveloperConfiguration; devCfg != nil {
 		causes = append(causes, featuregate.ValidateFeatureGates(devCfg.FeatureGates, &vmi.Spec)...)
@@ -286,7 +287,31 @@ func ValidateVirtualMachineInstanceSpec(field *k8sfield.Path, spec *v1.VirtualMa
 	causes = append(causes, validateRebootPolicy(field, spec, config)...)
 	causes = append(causes, validateReservedOverheadMemlock(field, spec, config)...)
 	causes = append(causes, validateServiceAccountName(field, spec)...)
+	causes = append(causes, validateEmulationPolicy(field, spec, config)...)
 
+	return causes
+}
+
+// Objects already using ContainerPath may update or add ContainerPath volumes after the feature gate is disabled.
+func validateContainerPathVolumesFeatureGate(field *k8sfield.Path, volumes, oldVolumes []v1.Volume, config *virtconfig.ClusterConfig) []metav1.StatusCause {
+	if config.ContainerPathVolumesEnabled() {
+		return nil
+	}
+	for _, volume := range oldVolumes {
+		if volume.ContainerPath != nil {
+			return nil
+		}
+	}
+	var causes []metav1.StatusCause
+	for idx, volume := range volumes {
+		if volume.ContainerPath != nil {
+			causes = append(causes, metav1.StatusCause{
+				Type:    metav1.CauseTypeFieldValueInvalid,
+				Message: "ContainerPathVolumes feature gate is not enabled",
+				Field:   field.Child("volumes").Index(idx).Child("containerPath").String(),
+			})
+		}
+	}
 	return causes
 }
 
@@ -378,9 +403,9 @@ func validateVirtualMachineInstanceSpecVolumeDisks(field *k8sfield.Path, spec *v
 				})
 			}
 			// Block reserved paths used by KubeVirt internally
-			reservedPrefixes := []string{"/var/run/kubevirt", "/var/run/libvirt"}
+			reservedPrefixes := []string{"/var/run/kubevirt", "/var/run/libvirt", "/run/kubevirt", "/run/libvirt"}
 			for _, prefix := range reservedPrefixes {
-				if strings.HasPrefix(volume.ContainerPath.Path, prefix) {
+				if strings.HasPrefix(filepath.Clean(volume.ContainerPath.Path), prefix) {
 					causes = append(causes, metav1.StatusCause{
 						Type:    metav1.CauseTypeFieldValueInvalid,
 						Message: fmt.Sprintf("ContainerPath volume '%s' uses reserved path prefix '%s'", volume.Name, prefix),
@@ -2225,5 +2250,38 @@ func validateServiceAccountName(field *k8sfield.Path, spec *v1.VirtualMachineIns
 		}
 	}
 
+	return causes
+}
+
+func validateEmulationPolicy(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) []metav1.StatusCause {
+	var causes []metav1.StatusCause
+
+	if spec.EmulationPolicy == nil {
+		return causes
+	}
+
+	if !config.CrossArchitectureVirtualizationEnabled() {
+		causes = append(causes, metav1.StatusCause{
+			Type:    metav1.CauseTypeFieldValueInvalid,
+			Message: fmt.Sprintf("EmulationPolicy is specified but the %s feature gate is not enabled", featuregate.CrossArchitectureVirtualization),
+			Field:   field.Child("emulationPolicy").String(),
+		})
+		return causes
+	}
+
+	if !slices.Contains(v1.EmulationPolicies, *spec.EmulationPolicy) {
+		causes = append(causes, metav1.StatusCause{
+			Type:    metav1.CauseTypeFieldValueInvalid,
+			Message: fmt.Sprintf("Unknown EmulationPolicy '%s', allowed values are %v", *spec.EmulationPolicy, v1.EmulationPolicies),
+			Field:   field.Child("emulationPolicy").String(),
+		})
+	}
+	if *spec.EmulationPolicy == v1.EmulationPolicyHardware {
+		causes = append(causes, metav1.StatusCause{
+			Type:    metav1.CauseTypeFieldValueInvalid,
+			Message: "EmulationPolicy 'Hardware' is not yet implemented",
+			Field:   field.Child("emulationPolicy").String(),
+		})
+	}
 	return causes
 }

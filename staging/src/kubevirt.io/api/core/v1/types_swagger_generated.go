@@ -42,6 +42,7 @@ func (VirtualMachineInstanceSpec) SwaggerDoc() map[string]string {
 		"architecture":                  "Specifies the architecture of the vm guest you are attempting to run. Defaults to the compiled architecture of the KubeVirt components",
 		"resourceClaims":                "ResourceClaims define which ResourceClaims must be allocated\nand reserved before the VMI, hence virt-launcher pod is allowed to start. The resources\nwill be made available to the domain which consumes them\nby name.\n\nThis is an alpha field and requires enabling the\nDynamicResourceAllocation feature gate in kubernetes\n https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/\nThis field should only be configured if one of the feature-gates GPUsWithDRA, HostDevicesWithDRA,\nor NetworkDevicesWithDRA is enabled.\nThis feature is in alpha.\n\n+listType=map\n+listMapKey=name\n+optional",
 		"utilityVolumes":                "List of utility volumes that can be mounted to the vmi virt-launcher pod\nwithout having a matching disk in the domain.\nUsed to collect data for various operational workflows.\n+kubebuilder:validation:MaxItems:=256\n+listType=map\n+listMapKey=name\n+optional",
+		"emulationPolicy":               "The most permissive emulation backend this VM may use.\nTakes precedence over spec.configuration.emulationPolicy in the KubeVirt CR.\n\nValid Options from least to most permissive are:\n- None: Only native-kvm\n- Hardware: Not yet implemented\n- Software: Qemu TCG cross-architecture emulation\nDefault policy is 'None'\n\nThis is an alpha field and should only be configured if the\nfeature-gate CrossArchitectureVirtualization is enabled.\nThis feature is in alpha.\n\n+optional\n+kubebuilder:validation:Enum=None;Hardware;Software",
 	}
 }
 
@@ -910,6 +911,7 @@ func (KubeVirtConfiguration) SwaggerDoc() map[string]string {
 		"persistentReservationConfiguration": "PersistentReservationConfiguration controls the deployment of additional resources required for using SCSI persistent reservation in VMs\n+nullable",
 		"confidentialCompute":                "QGS configuration for attestation on the Intel TDX Platform\n+nullable",
 		"roleAggregationStrategy":            "RoleAggregationStrategy controls whether RBAC cluster roles should be aggregated\nto the default Kubernetes roles (admin, edit, view).\nWhen set to \"AggregateToDefault\" (default) or not specified, the aggregate-to-* labels are added to the cluster roles.\nWhen set to \"Manual\", the labels are not added, and roles will not be aggregated to the default roles.\nSetting RoleAggregationStrategy to \"Manual\" requires the OptOutRoleAggregation feature gate\nto be enabled (Beta, enabled by default since v1.9.0).\n+optional\n+kubebuilder:validation:Enum=AggregateToDefault;Manual",
+		"emulationPolicy":                    "EmulationPolicy is the default emulation policy for VMs that do not set\nspec.emulationPolicy. A VM may set a more permissive policy.\n\nValid Options from least to most permissive are:\n- None: Only native-kvm\n- Hardware: Not yet implemented\n- Software: Qemu TCG cross-architecture emulation\nDefault policy is 'None'\n\nThis is an alpha field and should only be configured if the\nfeature-gate CrossArchitectureVirtualization is enabled.\nThis feature is in alpha.\n\n+optional\n+kubebuilder:validation:Enum=None;Hardware;Software",
 	}
 }
 
@@ -1020,9 +1022,10 @@ func (DisableSerialConsoleLog) SwaggerDoc() map[string]string {
 
 func (TLSConfiguration) SwaggerDoc() map[string]string {
 	return map[string]string{
-		"":              "TLSConfiguration holds TLS options",
+		"":              "TLSConfiguration holds TLS options\n+kubebuilder:validation:XValidation:rule=\"!has(self.groups) || size(self.groups) == 0 || (has(self.minTLSVersion) && self.minTLSVersion == 'VersionTLS13') || !self.groups.exists(g, g in ['X25519MLKEM768','SecP256r1MLKEM768','SecP384r1MLKEM1024']) || self.groups.exists(g, g in ['X25519','secp256r1','secp384r1','secp521r1'])\",message=\"a classical group (X25519, secp256r1, secp384r1 or secp521r1) is required in groups when minTLSVersion is below VersionTLS13 and a TLS 1.3-only group such as X25519MLKEM768 is configured\"",
 		"minTLSVersion": "MinTLSVersion is a way to specify the minimum protocol version that is acceptable for TLS connections.\nProtocol versions are based on the following most common TLS configurations:\n\n  https://ssl-config.mozilla.org/\n\nNote that SSLv3.0 is not a supported protocol version due to well known\nvulnerabilities such as POODLE: https://en.wikipedia.org/wiki/POODLE\n+kubebuilder:validation:Enum=VersionTLS10;VersionTLS11;VersionTLS12;VersionTLS13",
 		"ciphers":       "+listType=set",
+		"groups":        "Groups defines the set of allowed TLS supported groups (elliptic curves)\non all TLS server endpoints. Group names follow the IANA TLS Supported\nGroups registry (e.g. X25519, secp256r1, X25519MLKEM768). Unrecognised\nnames are silently ignored at TLS setup time, so an older component\ntolerates group names added in a newer release. When empty or when the\nTLSGroupPreferences feature gate is disabled, Go's default curve\npreferences apply.\n+optional\n+listType=atomic\nMaxItems bounds the CEL cost estimate for the exists() validation rule\non TLSConfiguration; without it the CRD is rejected at creation time.\n+kubebuilder:validation:MaxItems=32",
 	}
 }
 

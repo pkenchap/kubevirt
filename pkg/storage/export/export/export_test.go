@@ -20,11 +20,11 @@ package export
 
 import (
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -768,7 +768,7 @@ var _ = Describe("Export controller", func() {
 			return true, service, nil
 		})
 
-		service, err := controller.getOrCreateExportService(testVMExport, NewPVCSource(nil))
+		service, err := controller.getOrCreateExportService(testVMExport)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(service).ToNot(BeNil())
 		Expect(service.Status.Conditions[0].Type).To(Equal("test"))
@@ -792,7 +792,7 @@ var _ = Describe("Export controller", func() {
 				},
 			}),
 		).To(Succeed())
-		service, err = controller.getOrCreateExportService(testVMExport, NewPVCSource(nil))
+		service, err = controller.getOrCreateExportService(testVMExport)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(service).ToNot(BeNil())
 		Expect(service.Status.Conditions[0].Type).To(Equal("test2"))
@@ -829,7 +829,7 @@ var _ = Describe("Export controller", func() {
 			return true, nil, nil
 		})
 
-		service, err := controller.getOrCreateExportService(testVMExport, NewPVCSource(nil))
+		service, err := controller.getOrCreateExportService(testVMExport)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(service).To(Equal(existing))
 	},
@@ -858,7 +858,7 @@ var _ = Describe("Export controller", func() {
 			return true, nil, errors.NewAlreadyExists(schema.GroupResource{Resource: "services"}, controller.getExportServiceName(testVMExport))
 		})
 
-		service, err := controller.getOrCreateExportService(testVMExport, NewPVCSource(nil))
+		service, err := controller.getOrCreateExportService(testVMExport)
 		Expect(errors.IsAlreadyExists(err)).To(BeTrue())
 		Expect(service).To(BeNil())
 	})
@@ -959,7 +959,7 @@ var _ = Describe("Export controller", func() {
 			Expect(service.GetNamespace()).To(Equal(testNamespace))
 			return true, service, nil
 		})
-		service, err = controller.getOrCreateExportService(testVMExport, NewPVCSource(nil))
+		service, err = controller.getOrCreateExportService(testVMExport)
 		Expect(err).ToNot(HaveOccurred())
 		pod, err := controller.createExporterPod(testVMExport, service, source)
 		Expect(err).ToNot(HaveOccurred())
@@ -1093,6 +1093,37 @@ var _ = Describe("Export controller", func() {
 			gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{"Name": Equal("TLS_CIPHER_SUITES")}),
 		))
 	})
+
+	DescribeTable("TLS_CURVE_PREFERENCES env var in exporter pod", func(featureGates []string, expectEnvVar bool) {
+		groups := []string{"X25519", "secp384r1"}
+		kvObj, _, _ := kvInformer.GetStore().GetByKey(controller.KubevirtNamespace + "/kv")
+		kv := kvObj.(*virtv1.KubeVirt)
+		kv.Spec.Configuration.TLSConfiguration = &virtv1.TLSConfiguration{
+			Groups: groups,
+		}
+		if len(featureGates) > 0 {
+			kv.Spec.Configuration.DeveloperConfiguration = &virtv1.DeveloperConfiguration{
+				FeatureGates: featureGates,
+			}
+		}
+		kv.ResourceVersion = "tls-groups-table"
+		Expect(kvInformer.GetStore().Update(kv)).To(Succeed())
+
+		pod, err := controller.createExporterPodManifest(createPVCVMExport(), nil, NewPVCSource(&sourceVolumes{}))
+		Expect(err).ToNot(HaveOccurred())
+		matcher := gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{"Name": Equal("TLS_CURVE_PREFERENCES")})
+		if expectEnvVar {
+			Expect(pod.Spec.Containers[0].Env).To(ContainElement(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+				"Name":  Equal("TLS_CURVE_PREFERENCES"),
+				"Value": Equal(fmt.Sprintf("[%d,%d]", tls.CurveP384, tls.X25519)),
+			})))
+		} else {
+			Expect(pod.Spec.Containers[0].Env).ToNot(ContainElement(matcher))
+		}
+	},
+		Entry("should set when TLSGroupPreferences gate is enabled", []string{featuregate.TLSGroupPreferences}, true),
+		Entry("should not set when TLSGroupPreferences gate is disabled", nil, false),
+	)
 
 	DescribeTable("Should set export pod env vars", func(vmExport *exportv1.VirtualMachineExport, source exportSource, expectManifest bool) {
 		pod, err := controller.createExporterPodManifest(vmExport, nil, source)
@@ -1273,7 +1304,7 @@ var _ = Describe("Export controller", func() {
 			Expect(service.GetNamespace()).To(Equal(testNamespace))
 			return true, service, nil
 		})
-		service, err = controller.getOrCreateExportService(testVMExport, NewPVCSource(nil))
+		service, err = controller.getOrCreateExportService(testVMExport)
 		Expect(err).ToNot(HaveOccurred())
 		pod, err := controller.createExporterPod(testVMExport, service, snapSource)
 		Expect(err).ToNot(HaveOccurred())
@@ -1330,31 +1361,32 @@ var _ = Describe("Export controller", func() {
 		Entry("two duplicates sorted", []string{"b", "a", "b", "a"}, []string{"a", "b"}),
 	)
 
-	DescribeTable("GetVolumeInfo should correctly resolve volume paths for various PVC names", func(pvcName string) {
-		targetName := getExportPodVolumeNameFromStr(pvcName)
-		sp := &ServerPaths{
-			Volumes: []VolumeInfo{
-				{
-					Path: "/var/run/kubevirt-export/" + targetName,
-				},
+	It("serverPathsForPod should resolve volumes by the claim mounted at their path", func() {
+		sv := &sourceVolumes{}
+		for _, pvc := range []*k8sv1.PersistentVolumeClaim{
+			{ObjectMeta: metav1.ObjectMeta{Name: "pvc.with.dots"}},
+			{ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("a", validation.DNS1035LabelMaxLength+1)}},
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "block-disk"},
+				Spec:       k8sv1.PersistentVolumeClaimSpec{VolumeMode: pointer.P(k8sv1.PersistentVolumeBlock)},
 			},
+		} {
+			sv.volumes = append(sv.volumes, sourceVolume{pvc: pvc})
 		}
+		pod := &k8sv1.Pod{Spec: k8sv1.PodSpec{Containers: []k8sv1.Container{{}}}}
+		sv.configurePodVolumes(pod)
 
-		result := sp.GetVolumeInfo(pvcName)
-		Expect(result).ToNot(BeNil())
-
-		_, foundName := filepath.Split(filepath.Clean(result.Path))
-		Expect(foundName).To(Equal(targetName))
-
-		if len(pvcName) > validation.DNS1035LabelMaxLength {
-			Expect(len(foundName)).To(BeNumerically("<", 63))
-			Expect(foundName).To(HavePrefix(exportPrefix))
+		paths := serverPathsForPod(pod)
+		volumePaths := map[string]bool{}
+		for _, volume := range sv.volumes {
+			vi := paths.GetVolumeInfo(volume.pvc.Name)
+			Expect(vi).ToNot(BeNil())
+			volumePaths[vi.Path] = true
 		}
-	},
-		Entry("Short name", "pvc-name"),
-		Entry("Name with dots", "pvc.with.dots"),
-		Entry("Long name exceeding limit", strings.Repeat("a", validation.DNS1035LabelMaxLength+1)),
-	)
+		Expect(volumePaths).To(HaveLen(len(sv.volumes)))
+		Expect(paths.GetVolumeInfo("block-disk").Path).To(HavePrefix(blockVolumeMountPath))
+		Expect(paths.GetVolumeInfo("does-not-exist")).To(BeNil())
+	})
 
 	It("CreateServerPaths should parse OCI URI", func() {
 		const uri = "/export.oci.tar"
@@ -1388,7 +1420,7 @@ var _ = Describe("Export controller", func() {
 			return true, service, nil
 		})
 
-		service, err := controller.getOrCreateExportService(testVMExport, NewPVCSource(nil))
+		service, err := controller.getOrCreateExportService(testVMExport)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(service).ToNot(BeNil())
 		Expect(service.Status.Conditions[0].Type).To(Equal("test"))

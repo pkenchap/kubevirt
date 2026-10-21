@@ -60,9 +60,9 @@ import (
 	vhmetrics "kubevirt.io/kubevirt/pkg/monitoring/metrics/virt-handler"
 	"kubevirt.io/kubevirt/pkg/network/domainspec"
 	neterrors "kubevirt.io/kubevirt/pkg/network/errors"
+	netmigration "kubevirt.io/kubevirt/pkg/network/migration"
 	netsetup "kubevirt.io/kubevirt/pkg/network/setup"
 	netvmispec "kubevirt.io/kubevirt/pkg/network/vmispec"
-	hostdisk "kubevirt.io/kubevirt/pkg/storage/host-disk"
 	hotplugdisk "kubevirt.io/kubevirt/pkg/storage/hotplug-disk"
 
 	pluginv1alpha1 "kubevirt.io/api/plugin/v1alpha1"
@@ -756,10 +756,12 @@ func (c *VirtualMachineController) updatePausedConditions(vmi *v1.VirtualMachine
 	}
 }
 
-func (c *VirtualMachineController) updateSoftwareEmulationCondition(vmi *v1.VirtualMachineInstance, domain *api.Domain, condManager *controller.VirtualMachineInstanceConditionManager) {
-	if !c.clusterConfig.CrossArchitectureVirtualizationEnabled() {
+func updateSoftwareEmulationCondition(config *virtconfig.ClusterConfig, vmi *v1.VirtualMachineInstance, domain *api.Domain) {
+	if !config.CrossArchitectureVirtualizationEnabled() {
 		return
 	}
+
+	condManager := controller.NewVirtualMachineInstanceConditionManager()
 
 	isCrossArchEmulation := domain != nil && domain.Spec.Type == "qemu" &&
 		vmi.Spec.Architecture != "" && vmi.Spec.Architecture != runtime.GOARCH
@@ -767,7 +769,7 @@ func (c *VirtualMachineController) updateSoftwareEmulationCondition(vmi *v1.Virt
 	if isCrossArchEmulation {
 		if !condManager.HasCondition(vmi, v1.VirtualMachineInstanceSoftwareEmulation) {
 			now := metav1.Now()
-			vmi.Status.Conditions = append(vmi.Status.Conditions, v1.VirtualMachineInstanceCondition{
+			condManager.UpdateCondition(vmi, &v1.VirtualMachineInstanceCondition{
 				Type:               v1.VirtualMachineInstanceSoftwareEmulation,
 				Status:             k8sv1.ConditionTrue,
 				LastProbeTime:      now,
@@ -776,9 +778,9 @@ func (c *VirtualMachineController) updateSoftwareEmulationCondition(vmi *v1.Virt
 				Message:            fmt.Sprintf("VM running with software emulation (host=%s, guest=%s)", runtime.GOARCH, vmi.Spec.Architecture),
 			})
 		}
-	} else if condManager.HasCondition(vmi, v1.VirtualMachineInstanceSoftwareEmulation) {
-		condManager.RemoveCondition(vmi, v1.VirtualMachineInstanceSoftwareEmulation)
+		return
 	}
+	condManager.RemoveCondition(vmi, v1.VirtualMachineInstanceSoftwareEmulation)
 }
 
 func dumpTargetFile(vmiName, volName string) string {
@@ -967,7 +969,7 @@ func (c *VirtualMachineController) updateVMIStatusFromDomain(vmi *v1.VirtualMach
 	c.updateGuestInfoFromDomain(vmi, domain)
 	c.updateVolumeStatusesFromDomain(vmi, domain)
 	c.updateFSFreezeStatus(vmi, domain)
-	c.updateBackupStatus(vmi, domain)
+	updateBackupStatus(vmi, domain)
 	c.updateMachineType(vmi, domain)
 	if err = c.updateMemoryInfo(vmi, domain); err != nil {
 		return err
@@ -987,7 +989,7 @@ func (c *VirtualMachineController) updateVMIConditions(vmi *v1.VirtualMachineIns
 		return err
 	}
 	c.updatePausedConditions(vmi, domain, condManager)
-	c.updateSoftwareEmulationCondition(vmi, domain, condManager)
+	updateSoftwareEmulationCondition(c.clusterConfig, vmi, domain)
 
 	return nil
 }
@@ -1204,8 +1206,8 @@ func vmiContainsNonMigratablePCIHostDevices(vmi *v1.VirtualMachineInstance, conf
 		return "VMI specifies too many GPUs", true
 	}
 
-	if len(vmi.Spec.Domain.Devices.GPUs) == 1 && !config.VGPULiveMigrationEnabled() {
-		return "VMI specifies a GPU but feature gate " + featuregate.VGPULiveMigration + " is not enabled", true
+	if len(vmi.Spec.Domain.Devices.GPUs) == 1 && !config.MDevVGPULiveMigrationEnabled() {
+		return "VMI specifies a GPU but feature gate " + featuregate.MDevVGPULiveMigration + " is not enabled", true
 	}
 
 	if len(vmi.Spec.Domain.Devices.GPUs) == 1 && !isMdevGPU(vmi.Spec.Domain.Devices.GPUs[0], config.GetConfig()) {
@@ -1363,6 +1365,13 @@ func (c *VirtualMachineController) sync(key string,
 		domain.Status.Status != api.Shutoff &&
 		domain.Status.Status != api.Crashed &&
 		domain.Status.Status != ""
+
+	if vmiExists {
+		if _, err := c.launcherClients.GetVerifiedLauncherClient(vmi); goerror.Is(err, launcherclients.IrrecoverableError) {
+			log.Log.Reason(err).Errorf("Virt-launcher client not found for VMI %s/%s", vmi.Namespace, vmi.Name)
+			domainAlive = false
+		}
+	}
 
 	forceShutdownIrrecoverable = domainExists && domainPausedFailedPostCopy(domain)
 
@@ -1626,8 +1635,9 @@ func (c *VirtualMachineController) hasGracePeriodExpired(terminationGracePeriod 
 
 func (c *VirtualMachineController) helperVmShutdown(vmi *v1.VirtualMachineInstance, domain *api.Domain, tryGracefully bool) error {
 
-	// Only attempt to shutdown/destroy if we still have a connection established with the pod.
 	client, err := c.launcherClients.GetVerifiedLauncherClient(vmi)
+	// Only attempt to shutdown/destroy if we still have a connection established with the pod.
+	// TODO: distinguish between irrecoverable and transient errors: goerror.Is(err, launcherclients.IrrecoverableError)
 	if err != nil {
 		return err
 	}
@@ -1749,7 +1759,7 @@ func (c *VirtualMachineController) isVMIOwnedByNode(vmi *v1.VirtualMachineInstan
 }
 
 func (c *VirtualMachineController) checkNetworkInterfacesForMigration(vmi *v1.VirtualMachineInstance) error {
-	return netvmispec.VerifyVMIMigratable(vmi, c.clusterConfig.GetNetworkBindings())
+	return netmigration.VerifyVMIMigratable(vmi, c.clusterConfig)
 }
 
 func isReadOnlyDisk(disk *v1.Disk) bool {
@@ -1795,16 +1805,6 @@ func (c *VirtualMachineController) checkVolumesForMigration(vmi *v1.VirtualMachi
 			}
 
 		} else if volSrc.HostDisk != nil {
-			// Check if this is a translated PVC.
-			volumeStatus, ok := volumeStatusMap[volume.Name]
-			if ok && volumeStatus.PersistentVolumeClaimInfo != nil {
-				if !storagetypes.HasSharedAccessMode(volumeStatus.PersistentVolumeClaimInfo.AccessModes) && !storagetypes.IsMigratedVolume(volumeStatus.Name, vmi) {
-					return true, fmt.Errorf("cannot migrate VMI: PVC %v is not shared, live migration requires that all PVCs must be shared (using ReadWriteMany access mode)", volumeStatus.PersistentVolumeClaimInfo.ClaimName)
-				} else {
-					continue
-				}
-			}
-
 			shared := volSrc.HostDisk.Shared != nil && *volSrc.HostDisk.Shared
 			if !shared {
 				return true, fmt.Errorf("cannot migrate VMI with non-shared HostDisk")
@@ -1849,11 +1849,6 @@ func (c *VirtualMachineController) vmUpdateHelperDefault(vmi *v1.VirtualMachineI
 	}
 
 	preallocatedVolumes := c.getPreallocatedVolumes(vmi)
-
-	err = hostdisk.ReplacePVCByHostDisk(vmi)
-	if err != nil {
-		return err
-	}
 
 	cgroupManager, err := getCgroupManager(vmi, c.host, c.hypervisorNodeInfo, c.clusterConfig.AllowEmulation())
 	if err != nil {
@@ -2049,7 +2044,7 @@ func (c *VirtualMachineController) syncVirtualMachine(client cmdclient.LauncherC
 		if strings.Contains(err.Error(), "EFI OVMF rom missing") {
 			return &virtLauncherCriticalSecurebootError{fmt.Sprintf("mismatch of Secure Boot setting and bootloaders: %v", err)}
 		}
-		if msg, ok := c.detectDiskWriteLockError(err, vmi); ok {
+		if msg, ok := detectDiskWriteLockError(err, vmi); ok {
 			return fmt.Errorf("%s", msg)
 		}
 	}
@@ -2057,7 +2052,7 @@ func (c *VirtualMachineController) syncVirtualMachine(client cmdclient.LauncherC
 	return err
 }
 
-func (c *VirtualMachineController) detectDiskWriteLockError(err error, vmi *v1.VirtualMachineInstance) (string, bool) {
+func detectDiskWriteLockError(err error, vmi *v1.VirtualMachineInstance) (string, bool) {
 	errMsg := err.Error()
 	if !strings.Contains(errMsg, `Failed to get "write" lock`) &&
 		!strings.Contains(errMsg, "Is another process using the image") {
@@ -2406,7 +2401,7 @@ func parseLibvirtQuantity(value int64, unit string) *resource.Quantity {
 	return nil
 }
 
-func (c *VirtualMachineController) updateBackupStatus(vmi *v1.VirtualMachineInstance, domain *api.Domain) {
+func updateBackupStatus(vmi *v1.VirtualMachineInstance, domain *api.Domain) {
 	if domain == nil ||
 		domain.Spec.Metadata.KubeVirt.Backup == nil ||
 		vmi.Status.ChangedBlockTracking == nil ||

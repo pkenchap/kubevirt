@@ -71,6 +71,7 @@ import (
 	ephemeraldisk "kubevirt.io/kubevirt/pkg/ephemeral-disk"
 	cmdv1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
 	"kubevirt.io/kubevirt/pkg/hooks"
+	pluginsv1alpha1 "kubevirt.io/kubevirt/pkg/hooks/plugins/v1alpha1"
 	"kubevirt.io/kubevirt/pkg/ignition"
 	"kubevirt.io/kubevirt/pkg/liveupdate/memory"
 	"kubevirt.io/kubevirt/pkg/network/cache"
@@ -109,6 +110,7 @@ import (
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/disksource"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/efi"
 	domainerrors "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/errors"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/plugins"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/stats"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/storage/diskdriver"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/util"
@@ -141,28 +143,28 @@ const maxConcurrentHotplugHostDevices = 1
 
 var agentDataCommandTTLs = map[string]time.Duration{
 	// 20sec
-	"guest-get-load":      twentySeconds,
-	"guest-get-cpustats":  twentySeconds,
-	"guest-get-diskstats": twentySeconds,
+	stats.GuestGetLoadKey:      twentySeconds,
+	stats.GuestGetCPUStatsKey:  twentySeconds,
+	stats.GuestGetDiskStatsKey: twentySeconds,
 
 	// 1min
-	"guest-get-time":              oneMinute,
-	"guest-get-vcpus":             oneMinute,
-	"guest-get-memory-block-info": oneMinute,
-	"guest-get-users":             oneMinute,
+	stats.GuestGetTimeKey:            oneMinute,
+	stats.GuestGetVcpusKey:           oneMinute,
+	stats.GuestGetMemoryBlockInfoKey: oneMinute,
+	stats.GuestGetUsersKey:           oneMinute,
 
 	// 5min
-	"guest-get-fsinfo":             fiveMinutes,
-	"guest-get-osinfo":             fiveMinutes,
-	"guest-get-disks":              fiveMinutes,
-	"guest-get-host-name":          fiveMinutes,
-	"guest-get-timezone":           fiveMinutes,
-	"guest-network-get-route":      fiveMinutes,
-	"guest-network-get-interfaces": fiveMinutes,
-	"guest-get-devices":            fiveMinutes,
+	stats.GuestGetFsInfoKey:            fiveMinutes,
+	stats.GuestGetOsInfoKey:            fiveMinutes,
+	stats.GuestGetDisksKey:             fiveMinutes,
+	stats.GuestGetHostNameKey:          fiveMinutes,
+	stats.GuestGetTimezoneKey:          fiveMinutes,
+	stats.GuestNetworkGetRouteKey:      fiveMinutes,
+	stats.GuestNetworkGetInterfacesKey: fiveMinutes,
+	stats.GuestGetDevicesKey:           fiveMinutes,
 
 	// 30min
-	"guest-get-memory-blocks": thirtyMinutes,
+	stats.GuestGetMemoryBlocksKey: thirtyMinutes,
 }
 
 type contextStore struct {
@@ -268,6 +270,11 @@ type LibvirtDomainManager struct {
 	guestAgentProbePaused atomic.Bool
 	abortWg               sync.WaitGroup
 
+	// activeMigrationPreparation tracks a migration that has not reached
+	// libvirt yet. Set while such a migration is in flight and PreMigrationSource
+	// hooks will run, nil otherwise.
+	activeMigrationPreparation atomic.Pointer[migrationPreparation]
+
 	// iommuFD holds the IOMMUFD file descriptor received from the device plugin
 	// via SCM_RIGHTS. A value of -1 means no IOMMUFD FD is available.
 	// See: https://libvirt.org/html/libvirt-libvirt-domain.html#virDomainFDAssociate
@@ -311,7 +318,6 @@ func NewLibvirtDomainManager(
 	imageVolumeEnabled bool,
 	hookServer *premigrationhookserver.PreMigrationHookServer,
 	hypervisorName string,
-	registerNBD storage.RegisterNBDFunc,
 	domainName string,
 	vmStatsCollectorEnabled bool,
 	firmwareAutoSelectionEnabled bool,
@@ -332,7 +338,6 @@ func NewLibvirtDomainManager(
 		imageVolumeEnabled,
 		hookServer,
 		hypervisorName,
-		registerNBD,
 		domainName,
 		vmStatsCollectorEnabled,
 		firmwareAutoSelectionEnabled,
@@ -354,7 +359,6 @@ func newLibvirtDomainManager(
 	imageVolumeEnabled bool,
 	hookServer *premigrationhookserver.PreMigrationHookServer,
 	hypervisorName string,
-	registerNBD storage.RegisterNBDFunc,
 	domainName string,
 	vmStatsCollectorEnabled bool,
 	firmwareAutoSelectionEnabled bool,
@@ -402,7 +406,7 @@ func newLibvirtDomainManager(
 	}
 
 	manager.hotplugHostDevicesInProgress = make(chan struct{}, maxConcurrentHotplugHostDevices)
-	manager.storageManager = storage.NewStorageManager(connection, metadataCache, registerNBD)
+	manager.storageManager = storage.NewStorageManager(connection, metadataCache)
 	manager.credManager = accesscredentials.NewManager(connection, &manager.domainModifyLock, metadataCache, eventSender)
 
 	reCalcDomainStats := func() (*stats.DomainStats, error) {
@@ -1389,7 +1393,7 @@ func (l *LibvirtDomainManager) generateConverterContext(vmi *v1.VirtualMachineIn
 			c.SerialConsoleLog = isSerialConsoleLogEnabled(options.GetClusterConfig().GetSerialConsoleLogDisabled(), vmi)
 			c.PCINUMAAwareTopologyEnabled = options.GetClusterConfig().GetPCINUMAAwareTopologyEnabled()
 			c.GraceIOVirtualizationEnabled = options.GetClusterConfig().GetGraceIOVirtualizationEnabled()
-			vGPULiveMigrationEnabled = options.GetClusterConfig().GetVGPULiveMigrationEnabled()
+			vGPULiveMigrationEnabled = options.GetClusterConfig().GetMDevVGPULiveMigrationEnabled()
 		}
 
 		c.GraceHostDeviceAliases = options.GetGraceHostDeviceAliases()
@@ -1594,13 +1598,16 @@ func (l *LibvirtDomainManager) syncDisks(
 			logger.Reason(err).Error("marshalling detached disk failed")
 			return err
 		}
+		// Unlink the CBT overlay before detaching so a failed delete is retried
+		// on the next sync. QEMU keeps the overlay open until the disk is gone,
+		// and nothing on the removal path depends on reopening it by path.
+		if err := storage.DeleteQCOW2Overlay(detachDisk); err != nil {
+			logger.Reason(err).Error("deleting CBT overlay")
+			return err
+		}
 		err = dom.DetachDeviceFlags(strings.ToLower(string(detachBytes)), affectDeviceLiveAndConfigLibvirtFlags)
 		if err != nil {
 			logger.Reason(err).Error("detaching device")
-			return err
-		}
-		if err := storage.DeleteQCOW2Overlay(vmi, volumeName); err != nil {
-			logger.Reason(err).Error("deleting CBT overlay")
 			return err
 		}
 	}
@@ -1675,6 +1682,13 @@ func (l *LibvirtDomainManager) startDomain(
 	if err := l.generateCloudInitISO(vmi, &dom); err != nil {
 		return err
 	}
+	// Like the GuestDefinition hooks, PreBoot runs at boot time under the domainModifyLock the
+	// caller holds, so an unready sidecar delays other domain operations for at most the shared
+	// sidecar readiness budget plus the per-hook call timeout; PreMigrationSource runs outside
+	// the lock instead (see migrateHelper).
+	if err := plugins.ApplyPreBootHooks(plugins.GetPlugins(), vmi, l.preBootArtifactPaths); err != nil {
+		return err
+	}
 
 	createFlags := getDomainCreateFlags(vmi)
 	if err := dom.CreateWithFlags(createFlags); err != nil {
@@ -1688,6 +1702,30 @@ func (l *LibvirtDomainManager) startDomain(
 		l.paused.add(vmi.UID)
 	}
 	return nil
+}
+
+// preBootArtifactPaths returns the paths of PreBoot artifacts that exist on disk, keyed by
+// artifact name. An artifact is omitted (never an error) whenever it has no path or a stat on it
+// fails for any reason, since missing artifacts are expected (e.g. no cloud-init data) and must
+// not block VM start.
+func (l *LibvirtDomainManager) preBootArtifactPaths(vmi *v1.VirtualMachineInstance) map[string]string {
+	candidates := map[string]string{
+		pluginsv1alpha1.PreBootArtifactEphemeralDiskDir: l.ephemeralDiskDir,
+	}
+	if l.cloudInitDataStore != nil {
+		candidates[pluginsv1alpha1.PreBootArtifactCloudInitISO] = cloudinit.GetIsoFilePath(l.cloudInitDataStore.DataSource, vmi.Name, vmi.Namespace)
+	}
+	paths := make(map[string]string)
+	for key, path := range candidates {
+		if path == "" {
+			continue
+		}
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		paths[key] = path
+	}
+	return paths
 }
 
 func (l *LibvirtDomainManager) lookupOrCreateVirDomain(
@@ -3063,8 +3101,6 @@ func (l *LibvirtDomainManager) BackupVirtualMachine(vmi *v1.VirtualMachineInstan
 	switch backupOptions.Cmd {
 	case backupv1.Start:
 		return l.storageManager.BackupVirtualMachine(vmi, backupOptions)
-	case backupv1.Export:
-		return l.storageManager.ExportVirtualMachineBackup(backupOptions)
 	case backupv1.Abort:
 		return l.storageManager.AbortVirtualMachineBackup(vmi, backupOptions)
 	default:

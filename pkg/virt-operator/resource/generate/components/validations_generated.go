@@ -1177,6 +1177,25 @@ var CRDsValidation map[string]string = map[string]string{
               items:
                 type: string
               type: array
+            emulationPolicy:
+              description: |-
+                EmulationPolicy is the default emulation policy for VMs that do not set
+                spec.emulationPolicy. A VM may set a more permissive policy.
+
+                Valid Options from least to most permissive are:
+                - None: Only native-kvm
+                - Hardware: Not yet implemented
+                - Software: Qemu TCG cross-architecture emulation
+                Default policy is 'None'
+
+                This is an alpha field and should only be configured if the
+                feature-gate CrossArchitectureVirtualization is enabled.
+                This feature is in alpha.
+              enum:
+              - None
+              - Hardware
+              - Software
+              type: string
             evictionStrategy:
               description: |-
                 EvictionStrategy defines at the cluster level if the VirtualMachineInstance should be
@@ -1827,6 +1846,22 @@ var CRDsValidation map[string]string = map[string]string{
                     type: string
                   type: array
                   x-kubernetes-list-type: set
+                groups:
+                  description: |-
+                    Groups defines the set of allowed TLS supported groups (elliptic curves)
+                    on all TLS server endpoints. Group names follow the IANA TLS Supported
+                    Groups registry (e.g. X25519, secp256r1, X25519MLKEM768). Unrecognised
+                    names are silently ignored at TLS setup time, so an older component
+                    tolerates group names added in a newer release. When empty or when the
+                    TLSGroupPreferences feature gate is disabled, Go's default curve
+                    preferences apply.
+                    MaxItems bounds the CEL cost estimate for the exists() validation rule
+                    on TLSConfiguration; without it the CRD is rejected at creation time.
+                  items:
+                    type: string
+                  maxItems: 32
+                  type: array
+                  x-kubernetes-list-type: atomic
                 minTLSVersion:
                   description: |-
                     MinTLSVersion is a way to specify the minimum protocol version that is acceptable for TLS connections.
@@ -1843,6 +1878,14 @@ var CRDsValidation map[string]string = map[string]string{
                   - VersionTLS13
                   type: string
               type: object
+              x-kubernetes-validations:
+              - message: a classical group (X25519, secp256r1, secp384r1 or secp521r1)
+                  is required in groups when minTLSVersion is below VersionTLS13 and
+                  a TLS 1.3-only group such as X25519MLKEM768 is configured
+                rule: '!has(self.groups) || size(self.groups) == 0 || (has(self.minTLSVersion)
+                  && self.minTLSVersion == ''VersionTLS13'') || !self.groups.exists(g,
+                  g in [''X25519MLKEM768'',''SecP256r1MLKEM768'',''SecP384r1MLKEM1024''])
+                  || self.groups.exists(g, g in [''X25519'',''secp256r1'',''secp384r1'',''secp521r1''])'
             virtTemplateDeployment:
               description: VirtTemplateDeployment controls the deployment of virt-template
                 components
@@ -5377,11 +5420,10 @@ var CRDsValidation map[string]string = map[string]string{
         condition:
           description: |-
             Condition is a CEL expression that determines whether this plugin applies to a given VM.
+            The expression may reference only 'vmi' and must evaluate to a bool.
             When set, this acts as a baseline filter for all hooks in the plugin.
             Individual hooks may further narrow the scope with their own Condition fields.
-            Condition expressions are evaluated once per pipeline invocation, against the VMI/domain
-            state as it existed before any hook in that invocation ran. They are not re-evaluated to
-            reflect mutations made by other hooks applied earlier in the same invocation.
+            An empty condition always matches.
           type: string
         failureStrategy:
           description: |-
@@ -5418,15 +5460,20 @@ var CRDsValidation map[string]string = map[string]string{
                       GuestDefinition is the only currently supported launcher hook point for CEL.
                     type: string
                     x-kubernetes-validations:
-                    - message: hook point must be GuestDefinition
+                    - message: CEL is only supported for the GuestDefinition hook
+                        point
                       rule: self == 'GuestDefinition'
+                    - message: 'hook point must be one of: GuestDefinition, PreBoot,
+                        PreMigrationSource'
+                      rule: self in ['GuestDefinition','PreBoot','PreMigrationSource']
                 required:
                 - expression
                 - hookPoint
                 type: object
               condition:
-                description: Condition is a CEL expression that determines whether
-                  this hook applies to a given VM.
+                description: |-
+                  Condition is a CEL expression that determines whether this hook applies to a given VM.
+                  The expression may reference only 'vmi' and must evaluate to a bool.
                 type: string
               failureStrategy:
                 description: FailureStrategy specifies how to handle hook failures
@@ -5446,11 +5493,12 @@ var CRDsValidation map[string]string = map[string]string{
                     items:
                       description: |-
                         LauncherHookPoint identifies a point in the VM lifecycle where a launcher hook can run.
-                        Only hook points implemented by virt-launcher are accepted.
+                        GuestDefinition accepts CEL and sidecar hooks; PreBoot and PreMigrationSource are sidecar-only.
                       type: string
                       x-kubernetes-validations:
-                      - message: hook point must be GuestDefinition
-                        rule: self == 'GuestDefinition'
+                      - message: 'hook point must be one of: GuestDefinition, PreBoot,
+                          PreMigrationSource'
+                        rule: self in ['GuestDefinition','PreBoot','PreMigrationSource']
                     maxItems: 64
                     minItems: 1
                     type: array
@@ -5535,8 +5583,9 @@ var CRDsValidation map[string]string = map[string]string{
               Implementations must be idempotent.
             properties:
               condition:
-                description: Condition is a CEL expression that determines whether
-                  this hook applies to a given VM.
+                description: |-
+                  Condition is a CEL expression that determines whether this hook applies to a given VM.
+                  The expression may reference only 'vmi' and must evaluate to a bool.
                 type: string
               failureStrategy:
                 description: FailureStrategy specifies how to handle hook failures
@@ -8869,6 +8918,25 @@ var CRDsValidation map[string]string = map[string]string{
                   required:
                   - devices
                   type: object
+                emulationPolicy:
+                  description: |-
+                    The most permissive emulation backend this VM may use.
+                    Takes precedence over spec.configuration.emulationPolicy in the KubeVirt CR.
+
+                    Valid Options from least to most permissive are:
+                    - None: Only native-kvm
+                    - Hardware: Not yet implemented
+                    - Software: Qemu TCG cross-architecture emulation
+                    Default policy is 'None'
+
+                    This is an alpha field and should only be configured if the
+                    feature-gate CrossArchitectureVirtualization is enabled.
+                    This feature is in alpha.
+                  enum:
+                  - None
+                  - Hardware
+                  - Software
+                  type: string
                 evictionStrategy:
                   description: |-
                     EvictionStrategy describes the strategy to follow when a node drain occurs.
@@ -10911,11 +10979,6 @@ var CRDsValidation map[string]string = map[string]string{
           x-kubernetes-list-map-keys:
           - type
           x-kubernetes-list-type: map
-        exportUID:
-          description: |-
-            ExportUID tracks the UID of the associated VMExport for pull-mode backups
-            used to detect VMExport recreation and re-initiate the export handshake
-          type: string
         includedVolumes:
           description: IncludedVolumes lists the volumes that were included in the
             backup
@@ -15131,6 +15194,25 @@ var CRDsValidation map[string]string = map[string]string{
           required:
           - devices
           type: object
+        emulationPolicy:
+          description: |-
+            The most permissive emulation backend this VM may use.
+            Takes precedence over spec.configuration.emulationPolicy in the KubeVirt CR.
+
+            Valid Options from least to most permissive are:
+            - None: Only native-kvm
+            - Hardware: Not yet implemented
+            - Software: Qemu TCG cross-architecture emulation
+            Default policy is 'None'
+
+            This is an alpha field and should only be configured if the
+            feature-gate CrossArchitectureVirtualization is enabled.
+            This feature is in alpha.
+          enum:
+          - None
+          - Hardware
+          - Software
+          type: string
         evictionStrategy:
           description: |-
             EvictionStrategy describes the strategy to follow when a node drain occurs.
@@ -21955,6 +22037,25 @@ var CRDsValidation map[string]string = map[string]string{
                   required:
                   - devices
                   type: object
+                emulationPolicy:
+                  description: |-
+                    The most permissive emulation backend this VM may use.
+                    Takes precedence over spec.configuration.emulationPolicy in the KubeVirt CR.
+
+                    Valid Options from least to most permissive are:
+                    - None: Only native-kvm
+                    - Hardware: Not yet implemented
+                    - Software: Qemu TCG cross-architecture emulation
+                    Default policy is 'None'
+
+                    This is an alpha field and should only be configured if the
+                    feature-gate CrossArchitectureVirtualization is enabled.
+                    This feature is in alpha.
+                  enum:
+                  - None
+                  - Hardware
+                  - Software
+                  type: string
                 evictionStrategy:
                   description: |-
                     EvictionStrategy describes the strategy to follow when a node drain occurs.
@@ -27153,6 +27254,25 @@ var CRDsValidation map[string]string = map[string]string{
                           required:
                           - devices
                           type: object
+                        emulationPolicy:
+                          description: |-
+                            The most permissive emulation backend this VM may use.
+                            Takes precedence over spec.configuration.emulationPolicy in the KubeVirt CR.
+
+                            Valid Options from least to most permissive are:
+                            - None: Only native-kvm
+                            - Hardware: Not yet implemented
+                            - Software: Qemu TCG cross-architecture emulation
+                            Default policy is 'None'
+
+                            This is an alpha field and should only be configured if the
+                            feature-gate CrossArchitectureVirtualization is enabled.
+                            This feature is in alpha.
+                          enum:
+                          - None
+                          - Hardware
+                          - Software
+                          type: string
                         evictionStrategy:
                           description: |-
                             EvictionStrategy describes the strategy to follow when a node drain occurs.
@@ -32841,6 +32961,25 @@ var CRDsValidation map[string]string = map[string]string{
                               required:
                               - devices
                               type: object
+                            emulationPolicy:
+                              description: |-
+                                The most permissive emulation backend this VM may use.
+                                Takes precedence over spec.configuration.emulationPolicy in the KubeVirt CR.
+
+                                Valid Options from least to most permissive are:
+                                - None: Only native-kvm
+                                - Hardware: Not yet implemented
+                                - Software: Qemu TCG cross-architecture emulation
+                                Default policy is 'None'
+
+                                This is an alpha field and should only be configured if the
+                                feature-gate CrossArchitectureVirtualization is enabled.
+                                This feature is in alpha.
+                              enum:
+                              - None
+                              - Hardware
+                              - Software
+                              type: string
                             evictionStrategy:
                               description: |-
                                 EvictionStrategy describes the strategy to follow when a node drain occurs.

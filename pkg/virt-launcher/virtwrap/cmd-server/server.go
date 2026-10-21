@@ -38,7 +38,6 @@ import (
 	"kubevirt.io/client-go/log"
 
 	cmdv1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
-	grpcutil "kubevirt.io/kubevirt/pkg/util/net/grpc"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
 	notifyclient "kubevirt.io/kubevirt/pkg/virt-launcher/notify-client"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap"
@@ -681,53 +680,11 @@ func (l *Launcher) GuestPing(ctx context.Context, request *cmdv1.GuestPingReques
 	return resp, nil
 }
 
-func RunServer(socketPath string,
-	domainManager virtwrap.DomainManager,
-	stopChan chan struct{},
-	options *ServerOptions) (chan struct{}, error) {
-	grpcServer := grpc.NewServer([]grpc.ServerOption{}...)
-	if options == nil {
-		options = NewServerOptions(false)
+func RegisterCmdServer(cmdServer cmdv1.CmdServer) func(grpcServer *grpc.Server) {
+	return func(server *grpc.Server) {
+		registerInfoServer(server)
+		cmdv1.RegisterCmdServer(server, cmdServer)
 	}
-	server := NewLauncher(domainManager, options)
-	registerInfoServer(grpcServer)
-
-	// register more versions as soon as needed
-	// and add them to info.go
-	cmdv1.RegisterCmdServer(grpcServer, server)
-
-	sock, err := grpcutil.CreateSocket(socketPath)
-	if err != nil {
-		return nil, err
-	}
-
-	done := make(chan struct{})
-
-	go func() {
-		<-stopChan
-		log.Log.Info("stopping cmd server")
-		stopped := make(chan struct{})
-		go func() {
-			grpcServer.Stop()
-			close(stopped)
-		}()
-
-		select {
-		case <-stopped:
-			log.Log.Info("cmd server stopped")
-		case <-time.After(1 * time.Second):
-			log.Log.Error("timeout on stopping the cmd server, continuing anyway.")
-		}
-		sock.Close()
-		os.Remove(socketPath)
-		close(done)
-	}()
-
-	go func() {
-		grpcServer.Serve(sock)
-	}()
-
-	return done, nil
 }
 
 func (l *Launcher) Ping(_ context.Context, _ *cmdv1.EmptyRequest) (*cmdv1.Response, error) {
@@ -887,11 +844,6 @@ func getBackupOptionsFromRequest(request *cmdv1.BackupRequest) (*backupv1.Backup
 		default:
 			return nil, fmt.Errorf("unknown backup mode: only Push and Pull are supported")
 		}
-	case backupv1.Export:
-		if err := validateBackupExportRequest(options); err != nil {
-			return nil, err
-		}
-		return options, nil
 	case backupv1.Abort:
 		return options, nil
 	default:
@@ -899,34 +851,6 @@ func getBackupOptionsFromRequest(request *cmdv1.BackupRequest) (*backupv1.Backup
 	}
 
 	return options, nil
-}
-
-func validateBackupExportRequest(options *backupv1.BackupOptions) error {
-	if options.Mode != backupv1.PullMode {
-		return fmt.Errorf("can only export Pull mode backup")
-	}
-	if options.ExportServerAddr == nil {
-		return fmt.Errorf("backup export server address wasn't provided")
-	}
-	if options.ExportServerName == nil {
-		return fmt.Errorf("backup export server name wasn't provided")
-	}
-	if options.BackupName == "" {
-		return fmt.Errorf("backup name wasn't provided")
-	}
-	if options.BackupStartTime == nil {
-		return fmt.Errorf("backup start time wasn't provided")
-	}
-	if options.BackupCert == nil {
-		return fmt.Errorf("backup certificate wasn't provided")
-	}
-	if options.BackupKey == nil {
-		return fmt.Errorf("backup key wasn't provided")
-	}
-	if options.CACert == nil {
-		return fmt.Errorf("backup export server CA cert wasn't provided")
-	}
-	return nil
 }
 
 func (l *Launcher) BackupVirtualMachine(_ context.Context, request *cmdv1.BackupRequest) (*cmdv1.Response, error) {

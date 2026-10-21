@@ -34,7 +34,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/client-go/util/certificate"
 	"k8s.io/client-go/util/workqueue"
 
 	backupv1 "kubevirt.io/api/backup/v1alpha1"
@@ -44,12 +43,10 @@ import (
 	"kubevirt.io/client-go/log"
 
 	"kubevirt.io/kubevirt/pkg/apimachinery/patch"
-	"kubevirt.io/kubevirt/pkg/certificates/bootstrap"
 	"kubevirt.io/kubevirt/pkg/controller"
 	"kubevirt.io/kubevirt/pkg/pointer"
 	hotplugdisk "kubevirt.io/kubevirt/pkg/storage/hotplug-disk"
 	migrations "kubevirt.io/kubevirt/pkg/util/migrations"
-	kvtls "kubevirt.io/kubevirt/pkg/util/tls"
 )
 
 const (
@@ -74,10 +71,6 @@ const (
 	trackerCheckpointRedefinitionPending = "Waiting for checkpoint redefinition on tracker %s"
 	invalidBackupModeMsg                 = "invalid backup mode: %s"
 	vmMigrationInProgressMsg             = "vm %s is currently migrating, waiting for migration to complete before starting backup"
-
-	caDefaultPath = "/etc/virt-controller/backupca"
-	caCertFile    = caDefaultPath + "/tls.crt"
-	caKeyFile     = caDefaultPath + "/tls.key"
 )
 
 var (
@@ -98,8 +91,6 @@ type VMBackupController struct {
 	backupQueue           workqueue.TypedRateLimitingInterface[string]
 	trackerQueue          workqueue.TypedRateLimitingInterface[string]
 	hasSynced             func() bool
-	caCertManager         certificate.Manager
-	exportCaManager       kvtls.ClientCAManager
 }
 
 func NewVMBackupController(client kubecli.KubevirtClient,
@@ -109,9 +100,7 @@ func NewVMBackupController(client kubecli.KubevirtClient,
 	vmiInformer cache.SharedIndexInformer,
 	pvcInformer cache.SharedIndexInformer,
 	vmExportInformer cache.SharedIndexInformer,
-	cmInformer cache.SharedIndexInformer,
 	recorder record.EventRecorder,
-	kubevirtNamespace string,
 ) (*VMBackupController, error) {
 	c := &VMBackupController{
 		backupQueue: workqueue.NewTypedRateLimitingQueueWithConfig(
@@ -130,10 +119,7 @@ func NewVMBackupController(client kubecli.KubevirtClient,
 		vmExportStore:         vmExportInformer.GetStore(),
 		recorder:              recorder,
 		client:                client,
-		exportCaManager:       kvtls.NewCAManager(cmInformer.GetStore(), kubevirtNamespace, "kubevirt-export-ca"),
 	}
-
-	initCert(c)
 
 	c.hasSynced = func() bool {
 		return backupInformer.HasSynced() && backupTrackerInformer.HasSynced() && vmInformer.HasSynced() && vmiInformer.HasSynced() && pvcInformer.HasSynced() && vmExportInformer.HasSynced()
@@ -152,6 +138,7 @@ func NewVMBackupController(client kubecli.KubevirtClient,
 	_, err = vmiInformer.AddEventHandler(
 		cache.ResourceEventHandlerFuncs{
 			UpdateFunc: c.handleUpdateVMI,
+			DeleteFunc: c.handleDeleteVMI,
 		},
 	)
 	if err != nil {
@@ -181,11 +168,6 @@ func NewVMBackupController(client kubecli.KubevirtClient,
 	}
 
 	return c, nil
-}
-
-var initCert = func(ctrl *VMBackupController) {
-	ctrl.caCertManager = bootstrap.NewFileCertificateManager(caCertFile, caKeyFile)
-	go ctrl.caCertManager.Start()
 }
 
 func (ctrl *VMBackupController) handleBackup(obj interface{}) {
@@ -227,7 +209,23 @@ func (ctrl *VMBackupController) handleUpdateVMI(oldObj, newObj interface{}) {
 	if equality.Semantic.DeepEqual(ovmi.Status, nvmi.Status) {
 		return
 	}
-	key := types.NamespacedName{Namespace: nvmi.Namespace, Name: nvmi.Name}.String()
+	ctrl.enqueueBackupsOfVMI(nvmi)
+}
+
+func (ctrl *VMBackupController) handleDeleteVMI(obj interface{}) {
+	if unknown, ok := obj.(cache.DeletedFinalStateUnknown); ok && unknown.Obj != nil {
+		obj = unknown.Obj
+	}
+
+	vmi, ok := obj.(*v1.VirtualMachineInstance)
+	if !ok {
+		return
+	}
+	ctrl.enqueueBackupsOfVMI(vmi)
+}
+
+func (ctrl *VMBackupController) enqueueBackupsOfVMI(vmi *v1.VirtualMachineInstance) {
+	key := types.NamespacedName{Namespace: vmi.Namespace, Name: vmi.Name}.String()
 
 	// Find backups directly referencing this VMI
 	keys, err := ctrl.backupInformer.GetIndexer().IndexKeys("vmi", key)
@@ -509,6 +507,11 @@ func (ctrl *VMBackupController) reconcileStart(backup *backupv1.VirtualMachineBa
 
 	if backup.Status.Type != "" {
 		if !vmiExists {
+			if isPullMode(backup) {
+				if err := ctrl.cleanupBackupExport(backup); err != nil {
+					return err
+				}
+			}
 			ctrl.setFailed(backup, backupv1.ReasonSourceLost, "VMI was deleted during backup")
 			return nil
 		}

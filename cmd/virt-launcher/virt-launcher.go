@@ -43,11 +43,11 @@ import (
 	"kubevirt.io/kubevirt/pkg/config"
 	"kubevirt.io/kubevirt/pkg/downwardmetrics"
 	ephemeraldisk "kubevirt.io/kubevirt/pkg/ephemeral-disk"
+	"kubevirt.io/kubevirt/pkg/grpcserver"
 	"kubevirt.io/kubevirt/pkg/hooks"
 	"kubevirt.io/kubevirt/pkg/ignition"
 	containerdisk "kubevirt.io/kubevirt/pkg/storage/container-disk"
 	hotplugdisk "kubevirt.io/kubevirt/pkg/storage/hotplug-disk"
-	"kubevirt.io/kubevirt/pkg/storage/nbdclient"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
 	virtlauncher "kubevirt.io/kubevirt/pkg/virt-launcher"
@@ -85,8 +85,12 @@ func markReady() {
 func startCmdServer(socketPath string,
 	domainManager virtwrap.DomainManager,
 	stopChan chan struct{},
-	options *cmdserver.ServerOptions) chan struct{} {
-	done, err := cmdserver.RunServer(socketPath, domainManager, stopChan, options)
+	options *cmdserver.ServerOptions) <-chan struct{} {
+
+	done, err := grpcserver.RunServer(stopChan, socketPath,
+		cmdserver.RegisterCmdServer(
+			cmdserver.NewLauncher(domainManager, options),
+		))
 	if err != nil {
 		log.Log.Reason(err).Error("Failed to start virt-launcher cmd server")
 		panic(err)
@@ -445,11 +449,11 @@ func main() {
 
 	hookFuncs := []premigrationhookserver.HookFunc{
 		cpuhook.CPUDedicatedHook,
-		disk.DiskSourcePathHook,
+		disk.Hook,
 		network.UpgradeOrdinalNamingScheme,
 	}
 	if *vGPUDedicatedHookEnabled {
-		hookFuncs = append(hookFuncs, vgpuhook.VGPULiveMigration)
+		hookFuncs = append(hookFuncs, vgpuhook.MDevVGPULiveMigration)
 	}
 
 	preMigrationHookServer := premigrationhookserver.NewPreMigrationHookServer(
@@ -470,7 +474,6 @@ func main() {
 		*imageVolumeEnabled,
 		preMigrationHookServer,
 		*hypervisor,
-		nbdclient.RegisterNBDServer,
 		domainName,
 		*vmStatsCollectorEnabled,
 		*firmwareAutoSelectionEnabled,
