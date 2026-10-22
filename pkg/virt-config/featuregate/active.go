@@ -178,10 +178,11 @@ const (
 
 	// Owner: sig-storage / @mhenriks
 	// Alpha: v1.8.0
+	// Beta: v1.10.0
 	//
 	// ContainerPathVolumes enables exposing virt-launcher volumeMount paths to the VM
 	// via virtiofs. This allows VMs to access credentials and tokens injected into pods
-	// by external systems such as AWS IRSA, GKE Workload Identity, or TEE attestation.
+	// by external systems such as AWS IRSA, Azure Workload Identity, or TEE attestation.
 	ContainerPathVolumesGate = "ContainerPathVolumes"
 
 	// Enables using the spec.domain.memory.ReservedOverhead field which
@@ -294,6 +295,13 @@ const (
 	// pod endpoints. When disabled, the Groups field is ignored and Go's
 	// default curve preferences apply.
 	TLSGroupPreferences = "TLSGroupPreferences"
+
+	// Owner: sig-storage / @dsanatar
+	// Alpha: v1.10.0
+	//
+	// SCSIMultiIOThread enables iothread virtqueue mapping for virtio-scsi devices
+	// by leveraging IOThreadsPolicy to allocate thread pools to the SCSI Controller Driver.
+	SCSIMultiIOThread = "SCSIMultiIOThread"
 )
 
 func init() {
@@ -327,7 +335,7 @@ func init() {
 	RegisterFeatureGate(FeatureGate{Name: IncrementalBackupGate, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: RebootPolicy, State: Beta})
 	RegisterFeatureGate(FeatureGate{Name: Template, State: Beta})
-	RegisterFeatureGate(FeatureGate{Name: ContainerPathVolumesGate, State: Alpha})
+	RegisterFeatureGate(FeatureGate{Name: ContainerPathVolumesGate, State: Beta})
 	RegisterFeatureGate(FeatureGate{Name: ReservedOverheadMemlock, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: OptOutRoleAggregation, State: Beta})
 	RegisterFeatureGate(FeatureGate{Name: MDevVGPULiveMigration, State: Alpha})
@@ -342,4 +350,5 @@ func init() {
 	RegisterFeatureGate(FeatureGate{Name: CrossArchitectureVirtualization, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: PortRangesSpec, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: TLSGroupPreferences, State: Alpha})
+	RegisterFeatureGate(FeatureGate{Name: SCSIMultiIOThread, State: Alpha})
 }

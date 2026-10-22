@@ -440,13 +440,19 @@ func withBackendStorage(vmi *v1.VirtualMachineInstance, backendStoragePVCName st
 			})
 		}
 
+		// Always mount the CBT subpath when backend storage is present so
+		// orphaned overlays can be cleaned up after CBT is disabled while the
+		// PVC is retained for other features (TPM/EFI), and after eligible
+		// disks are removed from the VM.
+		renderer.podVolumeMounts = append(renderer.podVolumeMounts, k8sv1.VolumeMount{
+			Name:      volumeName,
+			ReadOnly:  false,
+			MountPath: cbt.PathForCBT(vmi),
+			SubPath:   cbt.CBTDirName,
+		})
+
 		if cbt.HasCBTStateEnabled(vmi.Status.ChangedBlockTracking) {
 			renderer.podVolumeMounts = append(renderer.podVolumeMounts, k8sv1.VolumeMount{
-				Name:      volumeName,
-				ReadOnly:  false,
-				MountPath: cbt.PathForCBT(vmi),
-				SubPath:   "cbt",
-			}, k8sv1.VolumeMount{
 				Name:      volumeName,
 				ReadOnly:  false,
 				MountPath: cbt.PathForBackupNBD(vmi),
@@ -531,7 +537,12 @@ func withHotplugSupport(hotplugDiskDir string) VolumeRendererOption {
 			MountPath:        hotplugDiskDir,
 			MountPropagation: &prop,
 		})
-		renderer.podVolumes = append(renderer.podVolumes, emptyDirVolume(hotplugDisks))
+		volume := emptyDirVolume(hotplugDisks)
+		// Use tmpfs for hotplug mount propagation.
+		volume.EmptyDir.Medium = k8sv1.StorageMediumMemory
+		sizeLimit := resource.MustParse("1Mi")
+		volume.EmptyDir.SizeLimit = &sizeLimit
+		renderer.podVolumes = append(renderer.podVolumes, volume)
 		return nil
 	}
 }
