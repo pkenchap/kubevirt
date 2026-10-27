@@ -61,6 +61,13 @@ var DefaultObsoleteCPUModels = map[string]bool{
 	"Opteron_G1-v1": true,
 	"Opteron_G2":    true,
 	"Opteron_G2-v1": true,
+	"POWER7":        true,
+	"POWER7-v2.3":   true,
+	"POWER8":        true,
+	"POWER8-v2.0":   true,
+	"POWER9":        true,
+	"POWER9-v2.0":   true,
+	"POWER9-v2.2":   true,
 }
 
 var DefaultArchitecturePrefix = map[string]string{

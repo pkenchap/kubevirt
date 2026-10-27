@@ -265,6 +265,31 @@ var _ = Describe("Node-labeller config", func() {
 			Entry("When Intel TDX is not supported", false),
 		)
 	})
+	It("Should return correct cpu models on ppc64le", func() {
+		nlController.arch = newArchLabeller(ppc64le)
+		nlController.volumePath = "testdata/ppc64le"
+		nlController.domCapabilitiesFileName = "virsh_domcapabilities.xml"
+
+		err := nlController.loadDomCapabilities()
+		Expect(err).ToNot(HaveOccurred())
+
+		usable := nlController.getSupportedCpuModels(nlController.clusterConfig.GetObsoleteCPUModels())
+		known := nlController.getKnownCpuModels(nlController.clusterConfig.GetObsoleteCPUModels())
+
+		Expect(usable).To(ConsistOf("POWER10", "POWER11"))
+		Expect(known).To(HaveLen(2), "only non-obsolete ppc64le models should be present")
+	})
+
+	It("Should default to IBM as CPU Vendor on ppc64le if none is given", func() {
+		nlController.arch = newArchLabeller(ppc64le)
+		nlController.volumePath = "testdata/ppc64le"
+		nlController.domCapabilitiesFileName = "virsh_domcapabilities.xml"
+
+		err := nlController.loadDomCapabilities()
+		Expect(err).ToNot(HaveOccurred())
+
+		Expect(nlController.cpuModelVendor).To(Equal("IBM"), "CPU Vendor should be IBM on ppc64le")
+	})
 
 	It("Make sure proper labels are removed on removeLabellerLabels()", func() {
 		node := &k8sv1.Node{
